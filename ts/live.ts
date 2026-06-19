@@ -17,7 +17,13 @@
 //   R24  (rec_type 24): header ts@7, counter@3; spo2@72, skin_temp@70/4, resting_hr@88 (RELATIVE-only, not surfaced here).
 //   0x33: live IMU stream — RAW-ONLY, no sample emitted (low decode confidence).
 //
-// NEVER decode HRV / RR-intervals. (R17 is BANNED.)
+// RR/HRV: the historical source is R24 (records.ts, rr_count@18 / rr@19). Live RR is
+// also carried by the compact-HR (0x28) and R10 records — see realtimeRr() below.
+// The separate "type-17 / Labrador" RR record (count@24/rr@26 in our Python probe) is
+// NOT shipped: an independent implementation (noop/Strand) has no such record type and
+// reads live RR from 0x28/R10 instead, so our type-17 offsets are uncorroborated. RR
+// unit is raw u16 ms (confirmed across both implementations); callers MUST physiologically
+// gate (300–2000 ms) so an unvalidated offset yields droppable garbage, never corruption.
 
 import { parse_r24 } from './records'
 
@@ -77,6 +83,41 @@ export function frameAccel(hex: string): ImuFrame | null {
     return ts > 0 ? { ts, idx: 0, mags } : null
   }
   return null
+}
+
+// realtimeRr — extract beat-to-beat (R-R) intervals (ms) from the LIVE records that
+// carry them, mirroring the noop/Strand layout (and cross-validated: noop's R10 RR
+// offset equals our R24's). Offsets are inner-relative (inner[0] = packet/record byte):
+//   • 0x28 REALTIME_DATA (compact HR): rr_count u8 @ [9],  rr i16 LE @ [10 + 2i]
+//   • R10  (rec_type 10, 0x2B/0x2F):   rr_count u8 @ [18], rr i16 LE @ [19 + 2i]
+// (R24 historical RR is decoded separately in records.ts / parse_r24.)
+//
+// RR unit = raw u16 ms (confirmed). NOT yet hardware-validated on our firmware for the
+// 0x28 carrier, so this is deliberately defensive: a count>8 (realtime carries 0–4) or
+// any value the caller's 300–2000 ms gate rejects is dropped. A wrong offset therefore
+// produces nothing storable — never a corrupted interval.
+export function realtimeRr(hex: string): { ts: number; rr_ms: number[] } | null {
+  let b: Uint8Array
+  try { b = hexToBytes(hex) } catch { return null }
+  if (b.length < 12) return null
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength)
+  const pkt = b[0], rec = b[1]
+  let tsOff: number, cntOff: number
+  if (pkt === 0x28) { tsOff = 2; cntOff = 9 }
+  else if (rec === 10) { tsOff = 7; cntOff = 18 }
+  else return null
+  if (cntOff + 1 >= b.length) return null
+  const ts = view.getUint32(tsOff, true)
+  if (ts <= 0) return null
+  const n = b[cntOff]
+  if (n === 0 || n > 8) return null // realtime carries 0–4; a large count = wrong offset → bail
+  const rr_ms: number[] = []
+  const first = cntOff + 1
+  for (let i = 0; i < n && first + 2 * i + 2 <= b.length; i++) {
+    const v = view.getInt16(first + 2 * i, true)
+    if (v > 0) rr_ms.push(v) // drop 0-ms placeholders (matches R24 + noop)
+  }
+  return rr_ms.length ? { ts, rr_ms } : null
 }
 
 // Decode the R10 IMU arrays into (activity, steps) over the 100-sample window.
