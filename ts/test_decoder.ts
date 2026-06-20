@@ -57,6 +57,13 @@ function runTests() {
     Number.isInteger(result0.spo2_red_raw) && Number.isInteger(result0.skin_temp_raw),
     `Expected raw ADCs to decode as integers`
   );
+  // New optical/accel fields (validated on 261 R2 records / 113 h).
+  console.assert(
+    [result0.ppg_red_ir, result0.spo2_ir_raw, result0.ambient_raw, result0.skin_contact].every(
+      (v) => Number.isInteger(v)
+    ),
+    `Expected ppg_red_ir/spo2_ir/ambient/skin_contact as integers`
+  );
 
   // Accel assertions: accel≈(-0.150,-0.331,1.001)
   const [ax, ay, az] = result0.accel_g;
