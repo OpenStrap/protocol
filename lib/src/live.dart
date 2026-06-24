@@ -290,6 +290,67 @@ DecodedSample? decodeRecord(String hex) {
   return null;
 }
 
+/// Full IMU payload of one live R10 record: 100 samples/axis of accelerometer
+/// (g) and gyroscope (deg/s), plus the record timestamp.
+class R10Imu {
+  final int ts; // unix seconds (device clock; may be unset on a fresh band)
+  final List<double> accelX; // g
+  final List<double> accelY;
+  final List<double> accelZ;
+  final List<double> gyroX; // deg/s
+  final List<double> gyroY;
+  final List<double> gyroZ;
+
+  R10Imu({
+    required this.ts,
+    required this.accelX,
+    required this.accelY,
+    required this.accelZ,
+    required this.gyroX,
+    required this.gyroY,
+    required this.gyroZ,
+  });
+}
+
+// Gyro full-scale ±2000 dps over signed int16 → 2000/32768 deg/s per LSB.
+const double _gyroScale = 0.06103515625;
+const double _accelScale = 1 / 4096;
+
+/// Decode the full accel + gyro IMU arrays from a live R10 record
+/// (inner packet `0x2B`, record type `0x0A`). Layout (our base, verified on a
+/// real 1920-byte R10 from a live capture):
+///   ts        u32 LE @ 7
+///   accel X/Y/Z  100× int16 LE @ 85 / 285 / 485, scale 1/4096 g
+///   gyro  X/Y/Z  100× int16 LE @ 688 / 888 / 1088, scale 0.06103515625 deg/s
+/// Returns null if `hex` is not a long-enough R10 frame.
+R10Imu? decodeR10Imu(String hex) {
+  Uint8List b;
+  try {
+    b = hexToBytes(hex);
+  } catch (_) {
+    return null;
+  }
+  if (b.length < 1288 || b[0] != 0x2b || b[1] != 0x0a) return null;
+  final view = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
+  List<double> axis(int off, double scale) {
+    final out = <double>[];
+    for (int i = 0; i < 100; i++) {
+      out.add(view.getInt16(off + 2 * i, Endian.little) * scale);
+    }
+    return out;
+  }
+
+  return R10Imu(
+    ts: view.getUint32(7, Endian.little),
+    accelX: axis(85, _accelScale),
+    accelY: axis(285, _accelScale),
+    accelZ: axis(485, _accelScale),
+    gyroX: axis(688, _gyroScale),
+    gyroY: axis(888, _gyroScale),
+    gyroZ: axis(1088, _gyroScale),
+  );
+}
+
 /// Decode a batch of hex records, returning all surfaceable samples.
 List<DecodedSample> decodeBatch(List<String> records) {
   final out = <DecodedSample>[];
