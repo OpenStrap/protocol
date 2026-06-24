@@ -1,0 +1,11 @@
+name: openstrap_protocol
+description: Pure-Dart WHOOP 4.0 protocol library — bytes <-> records/frames/commands. 1:1 port of the TS record decoders + edge framing/CRC/commands.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^4.0.0
