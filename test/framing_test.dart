@@ -64,6 +64,38 @@ void main() {
       expect(m!.sub, SyncMeta.historyEnd);
       expect(m.token, token);
     });
+
+    test('END→ACK round-trip: the 8-byte token is echoed VERBATIM (cursor fix)', () {
+      // A full framed HISTORY_END (the band advances + trims its read cursor on the
+      // ACK, but ONLY if the token we echo is the band's own continuation token).
+      // metadata.data[10:18] == frame[17:25] == inner[13:21]. Build a real frame,
+      // parse the token, ACK it, and assert the ACK carries those exact 8 bytes —
+      // a verbatim echo. A wrong slice / mangled echo is the "Groundhog Day" cursor
+      // bug (the band re-floods the same history on the next connect).
+      final token = [0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44];
+      final metaInner = List<int>.filled(21, 0)
+        ..[0] = PacketType.metadata
+        ..[1] = 7 // arbitrary seq on the marker
+        ..[2] = SyncMeta.historyEnd;
+      for (int i = 0; i < 8; i++) {
+        metaInner[13 + i] = token[i];
+      }
+      final endFrame = buildFrame(metaInner);
+      // frame[17:25] is the metadata.data[10:18] slice reference acks verbatim.
+      expect(endFrame.sublist(17, 25), token);
+
+      final parsed = parseFrame(endFrame)!;
+      final m = parseMetadata(parsed.inner)!;
+      expect(m.token, token);
+
+      final ack = buildBatchAck(5, m.token!);
+      final af = parseFrame(ack)!;
+      expect(af.crc8Ok && af.crc32Ok, isTrue);
+      // [0x23][seq=5][0x17][0x01] + the verbatim token.
+      expect(af.inner.sublist(0, 4),
+          [PacketType.command, 5, Cmd.historicalDataResult, revision1]);
+      expect(af.inner.sublist(4, 12), token);
+    });
   });
 
   group('FrameReassembler (length-based, never reset on 0xAA)', () {
