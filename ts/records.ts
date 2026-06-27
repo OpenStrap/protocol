@@ -38,14 +38,14 @@ export interface R24 {
  * Decode a Type-24 historical biometric record (96 bytes, 1 Hz).
  *
  * Offsets verified against 127,971 of our own stored records and cross-checked
- * with two independent implementations (contributor/wearable; reference implementation
- * whoop_protocol.json V24). Only fields that survived per-byte variance
+ * cross-validated against independent reference implementations. Only fields that
+ * survived per-byte variance
  * validation on real data are surfaced. The optical block (ppg_red_ir@31,
  * spo2_ir@66, ambient@70) and skin_contact@51 were added after confirming they
  * VARY across 261 R2 records spanning 113 h (plus 550 golden capture records).
  * The f32 triplet at @52 is dropped: byte-identical to accel_g@36 on all 811
- * records (a mirrored copy). Conversely the reference labels `resp_rate_raw`@76
- * and `signal_quality`@78 are NOT decoded: both are bit-constant (3073 / 3074)
+ * records (a mirrored copy). Conversely `resp_rate_raw`@76 and
+ * `signal_quality`@78 are NOT decoded: both are bit-constant (3073 / 3074)
  * across all 811 records — a fixed trailer on our firmware, not a measurement
  * (WHOOP derives respiration in-cloud from PPG; see backend resp.ts). Raw ADC
  * fields are RELATIVE: the band relays them uncalibrated and WHOOP derives

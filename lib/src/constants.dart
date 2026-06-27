@@ -34,6 +34,7 @@ class Cmd {
   static const int linkValid = 0x01;
   static const int toggleRealtimeHr = 0x03;
   static const int setClock = 0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
+  static const int getClock = 0x0B; // → strap RTC epoch (ClockRef correlation)
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
   static const int historicalDataResult = 0x17; // the batch ACK
@@ -56,6 +57,8 @@ class Cmd {
   static const int toggleOpticalMode = 0x6C;
   static const int runHapticsPattern = 0x4F;
   static const int stopHaptics = 0x7A;
+  static const int enterHighFreqSync = 0x60;
+  static const int exitHighFreqSync = 0x61; // defensive stuck-strap recovery
   static const int togglePersistentR21 = 0x9A; // DANGER
 }
 

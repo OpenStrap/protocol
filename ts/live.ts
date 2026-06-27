@@ -20,9 +20,9 @@
 // RR/HRV: the historical source is R24 (records.ts, rr_count@18 / rr@19). Live RR is
 // also carried by the compact-HR (0x28) and R10 records — see realtimeRr() below.
 // The separate "type-17 / Labrador" RR record (count@24/rr@26 in our Python probe) is
-// NOT shipped: an independent implementation (reference implementation) has no such record type and
-// reads live RR from 0x28/R10 instead, so our type-17 offsets are uncorroborated. RR
-// unit is raw u16 ms (confirmed across both implementations); callers MUST physiologically
+// NOT shipped: an independent reference implementation has no such record type and reads
+// live RR from 0x28/R10 instead, so our type-17 offsets are uncorroborated. RR unit is
+// raw u16 ms (confirmed); callers MUST physiologically
 // gate (300–2000 ms) so an unvalidated offset yields droppable garbage, never corruption.
 
 import { parse_r24 } from './records'
@@ -86,8 +86,8 @@ export function frameAccel(hex: string): ImuFrame | null {
 }
 
 // realtimeRr — extract beat-to-beat (R-R) intervals (ms) from the LIVE records that
-// carry them, mirroring the reference implementation layout (and cross-validated: reference's R10 RR
-// offset equals our R24's). Offsets are inner-relative (inner[0] = packet/record byte):
+// carry them (cross-validated against independent capture: R10 RR offset equals R24's).
+// Offsets are inner-relative (inner[0] = packet/record byte):
 //   • 0x28 REALTIME_DATA (compact HR): rr_count u8 @ [9],  rr i16 LE @ [10 + 2i]
 //   • R10  (rec_type 10, 0x2B/0x2F):   rr_count u8 @ [18], rr i16 LE @ [19 + 2i]
 // (R24 historical RR is decoded separately in records.ts / parse_r24.)
@@ -115,7 +115,7 @@ export function realtimeRr(hex: string): { ts: number; rr_ms: number[] } | null 
   const first = cntOff + 1
   for (let i = 0; i < n && first + 2 * i + 2 <= b.length; i++) {
     const v = view.getInt16(first + 2 * i, true)
-    if (v > 0) rr_ms.push(v) // drop 0-ms placeholders (matches R24 + reference)
+    if (v > 0) rr_ms.push(v) // drop 0-ms placeholders (matches R24)
   }
   return rr_ms.length ? { ts, rr_ms } : null
 }

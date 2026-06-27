@@ -81,7 +81,7 @@ void main() {
         metaInner[13 + i] = token[i];
       }
       final endFrame = buildFrame(metaInner);
-      // frame[17:25] is the metadata.data[10:18] slice reference acks verbatim.
+      // frame[17:25] is the metadata.data[10:18] slice the band acks verbatim.
       expect(endFrame.sublist(17, 25), token);
 
       final parsed = parseFrame(endFrame)!;

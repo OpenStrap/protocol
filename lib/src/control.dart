@@ -209,8 +209,48 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
     final end = payload.indexOf(0, s);
     final nameBytes = payload.sublist(s, end < 0 ? payload.length : end);
     dec['strap_name'] = String.fromCharCodes(nameBytes).trim();
+  } else if (op == Cmd.getClock) {
+    final c = _firstPlausibleUnix(payload);
+    if (c != null) dec['clock_epoch'] = c;
+  } else if (op == Cmd.getDataRange) {
+    final range = _plausibleUnixRange(payload);
+    if (range != null) {
+      dec['range_oldest'] = range[0];
+      dec['range_newest'] = range[1];
+    }
   }
   return CmdResponse(op, dec);
+}
+
+// Lower floor for a "this could be a real wall-clock epoch" u32 — kept local so
+// the protocol package has no dependency on the app's sync_policy constants. Any
+// time after 2023-11 and not absurdly far in the future is acceptable here; the
+// app applies the tighter session-relative gate.
+const int _minPlausibleUnix = 1700000000; // 2023-11
+const int _maxPlausibleUnix = 4102444800; // 2100-01
+
+/// First u32 LE in [payload] that looks like a real unix epoch — used to read the
+/// strap RTC out of a GET_CLOCK response without pinning a firmware-specific
+/// offset (the field has drifted across revisions, like HELLO).
+int? _firstPlausibleUnix(Uint8List payload) {
+  for (int o = 0; o + 4 <= payload.length; o++) {
+    final v = u32(payload, o);
+    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnix) return v;
+  }
+  return null;
+}
+
+/// [oldest, newest] from the two plausible-unix u32s in a GET_DATA_RANGE response
+/// (min and max of all plausible epochs found). Null if fewer than one is present.
+List<int>? _plausibleUnixRange(Uint8List payload) {
+  final found = <int>[];
+  for (int o = 0; o + 4 <= payload.length; o++) {
+    final v = u32(payload, o);
+    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnix) found.add(v);
+  }
+  if (found.isEmpty) return null;
+  found.sort();
+  return [found.first, found.last];
 }
 
 // ── METADATA (0x31) sync markers ─────────────────────────────────────────────

@@ -48,6 +48,11 @@ Uint8List cmdAbortHistorical(int seq) =>
     buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00]);
 Uint8List cmdSendHistorical(int seq) =>
     buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
+Uint8List cmdGetClock(int seq) => buildCommand(seq, Cmd.getClock, const []);
+Uint8List cmdGetDataRange(int seq) =>
+    buildCommand(seq, Cmd.getDataRange, const [0x00]);
+Uint8List cmdExitHighFreqSync(int seq) =>
+    buildCommand(seq, Cmd.exitHighFreqSync, const [0x00]);
 
 // Live streams. Optical is WRIST-GATED (0x6B only) — never force (0x6C) or
 // persist (0x9A); persistent causes the stuck-green-LED footgun ().
