@@ -134,17 +134,56 @@ HelloInfo parseHello(Uint8List payload) {
   if (payload.length > 5) info.charging = payload[5] != 0;
   if (payload.length > 116) info.wristOn = payload[116] != 0;
 
+  // Serial is a NUL-terminated ASCII token at a FIXED offset in the body:
+  // payload[16] (= inner[19]), immediately followed by the 64-char firmware
+  // commit hash. Verified on real captures (serial "4C2248092" @16 across builds).
+  // We read it at the offset rather than "first printable run from offset 6" —
+  // the bytes [0:16] are a volatile binary header (battery, counters, clock) that
+  // on some firmware contain printable bytes and made the scan latch onto junk
+  // (the "?*" the user saw). The serial is NOT derivable from the advertised name
+  // either: that is user-renamable (e.g. "Abdul's WHOOP").
+  const serialOffset = 16;
+  final s = _cstrAt(payload, serialOffset);
+  if (_validSerial(s)) info.serial = s;
+
+  // Commit = the long hex token. It sits right after the serial's NUL, but we
+  // locate it by content (first ≥16-char all-hex run) so a small layout shift
+  // can't drop it.
   const hexset = '0123456789abcdefABCDEF';
-  for (final r in _asciiRuns(payload, 6, 6)) {
-    if (info.serial == null && r.length >= 6 && r.length <= 13) {
-      info.serial = r;
-    } else if (info.commit == null &&
-        r.length >= 16 &&
-        r.split('').every((c) => hexset.contains(c))) {
+  for (final r in _asciiRuns(payload, serialOffset, 16)) {
+    if (r.length >= 16 && r.split('').every((c) => hexset.contains(c))) {
       info.commit = r;
+      break;
     }
   }
   return info;
+}
+
+/// Read the NUL-terminated ASCII token at [start]. Returns '' if the byte at
+/// [start] is non-printable (i.e. there is no clean token there) — so a wrong
+/// offset yields nothing rather than garbage.
+String _cstrAt(Uint8List b, int start) {
+  if (start < 0 || start >= b.length) return '';
+  final sb = StringBuffer();
+  for (int i = start; i < b.length; i++) {
+    final c = b[i];
+    if (c == 0) break; // NUL terminator
+    if (c < 0x20 || c >= 0x7F) return ''; // non-printable → not a clean token
+    sb.writeCharCode(c);
+  }
+  return sb.toString();
+}
+
+/// A WHOOP serial: 6–13 chars, alphanumeric only (no spaces/punctuation).
+bool _validSerial(String s) {
+  if (s.length < 6 || s.length > 13) return false;
+  for (final c in s.codeUnits) {
+    final isDigit = c >= 0x30 && c <= 0x39;
+    final isUpper = c >= 0x41 && c <= 0x5A;
+    final isLower = c >= 0x61 && c <= 0x7A;
+    if (!(isDigit || isUpper || isLower)) return false;
+  }
+  return true;
 }
 
 // ── EVENT (0x30) ─────────────────────────────────────────────────────────────
@@ -202,13 +241,7 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
   } else if (op == Cmd.getAlarmTime && payload.length >= 5) {
     dec['alarm_epoch'] = u32(payload, 1);
   } else if (op == Cmd.getAdvertisingNameHarvard) {
-    int s = 0;
-    while (s < payload.length && payload[s] < 0x20) {
-      s++;
-    }
-    final end = payload.indexOf(0, s);
-    final nameBytes = payload.sublist(s, end < 0 ? payload.length : end);
-    dec['strap_name'] = String.fromCharCodes(nameBytes).trim();
+    dec['strap_name'] = _decodeAdvName(payload);
   } else if (op == Cmd.getClock) {
     final c = _firstPlausibleUnix(payload);
     if (c != null) dec['clock_epoch'] = c;
@@ -220,6 +253,44 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
     }
   }
   return CmdResponse(op, dec);
+}
+
+/// Decode the GET_ADVERTISING_NAME response body. Verified layout (real capture):
+/// `[hdr 4B][len u8 @4][ASCII name @5 …][NUL padding]`.
+///
+/// We bound the name with the length byte and keep ONLY printable ASCII — so a
+/// name whose length byte is itself printable (≥0x20, i.e. a name ≥32 chars), a
+/// missing NUL terminator, or a stray high byte can't leak header/trailing junk
+/// into the string (the "?*" the user saw on repeat reads). Falls back to a
+/// skip-control-then-printable scan if the header isn't the expected shape.
+String _decodeAdvName(Uint8List p) {
+  // Primary: length-prefixed at the verified offset.
+  if (p.length > 5) {
+    final len = p[4];
+    if (len > 0 && len <= 20) {
+      // strap names are short (SET caps at 20)
+      final s = _printableRun(p, 5, 5 + len);
+      if (s.isNotEmpty) return s;
+    }
+  }
+  // Fallback: skip leading control bytes, then read the printable run.
+  var start = 0;
+  while (start < p.length && p[start] < 0x20) {
+    start++;
+  }
+  return _printableRun(p, start, p.length);
+}
+
+/// Build a string from [a, b) keeping only printable ASCII, stopping at the first
+/// NUL. Drops any byte ≥0x7f (which would otherwise render as "?").
+String _printableRun(Uint8List p, int a, int b) {
+  final sb = StringBuffer();
+  for (var i = a; i < b && i < p.length; i++) {
+    final c = p[i];
+    if (c == 0) break;
+    if (c >= 0x20 && c < 0x7f) sb.writeCharCode(c);
+  }
+  return sb.toString().trim();
 }
 
 // Lower floor for a "this could be a real wall-clock epoch" u32 — kept local so
