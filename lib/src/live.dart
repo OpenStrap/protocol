@@ -27,13 +27,13 @@ class DecodedSample {
   });
 
   Map<String, dynamic> toMap() => {
-        'ts': ts,
-        'hr': hr,
-        'activity': activity,
-        'steps_inc': stepsInc,
-        'wrist_on': wristOn,
-        'rec_type': recType,
-      };
+    'ts': ts,
+    'hr': hr,
+    'activity': activity,
+    'steps_inc': stepsInc,
+    'wrist_on': wristOn,
+    'rec_type': recType,
+  };
 }
 
 /// One IMU frame's accel as ordered magnitude samples (g) + its time + sub-order.
@@ -127,7 +127,8 @@ RealtimeRrResult? realtimeRr(String hex) {
   final ts = view.getUint32(tsOff, Endian.little);
   if (ts <= 0) return null;
   final n = b[cntOff];
-  if (n == 0 || n > 8) return null; // realtime carries 0–4; large count = wrong offset
+  if (n == 0 || n > 8)
+    return null; // realtime carries 0–4; large count = wrong offset
   final rrMs = <int>[];
   final first = cntOff + 1;
   for (int i = 0; i < n && first + 2 * i + 2 <= b.length; i++) {
@@ -252,7 +253,13 @@ DecodedSample? decodeRecord(String hex) {
     final ts = view.getUint32(2, Endian.little);
     final hr = b[8];
     return DecodedSample(
-        ts: ts, hr: hr, activity: 0, stepsInc: 0, wristOn: hr > 0, recType: 28);
+      ts: ts,
+      hr: hr,
+      activity: 0,
+      stepsInc: 0,
+      wristOn: hr > 0,
+      recType: 28,
+    );
   }
 
   // 0x33 — live IMU stream: raw-only (no sample emitted).
@@ -260,17 +267,18 @@ DecodedSample? decodeRecord(String hex) {
 
   if (b.length < 18) return null;
 
-  // R24 — type-24 historical telemetry.
-  if (recType == 24) {
+  // WHOOP 4 historical telemetry (v24 / v25 auto-routed by parseR24).
+  if (recType == 24 || recType == 25) {
     final d = parseR24(b);
     if (d == null) return null;
     return DecodedSample(
-        ts: d.tsEpoch,
-        hr: d.hr,
-        activity: 0,
-        stepsInc: 0,
-        wristOn: d.hr > 0,
-        recType: 24);
+      ts: d.tsEpoch,
+      hr: d.hr,
+      activity: 0,
+      stepsInc: 0,
+      wristOn: d.hr > 0,
+      recType: recType,
+    );
   }
 
   // R10 / 0x2B — ts@7, hr@17, IMU arrays → activity.
@@ -279,12 +287,13 @@ DecodedSample? decodeRecord(String hex) {
     final hr = b[17];
     final m = _r10Motion(view, b.length);
     return DecodedSample(
-        ts: ts,
-        hr: hr,
-        activity: m.activity,
-        stepsInc: m.steps,
-        wristOn: hr > 0,
-        recType: 10);
+      ts: ts,
+      hr: hr,
+      activity: m.activity,
+      stepsInc: m.steps,
+      wristOn: hr > 0,
+      recType: 10,
+    );
   }
 
   return null;
