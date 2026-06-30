@@ -5,10 +5,12 @@
 class GattUuids {
   static const String service = '61080001-8d6d-82b8-614a-1c8cb0f8dcc6';
   static const String cmdTo = '61080002-8d6d-82b8-614a-1c8cb0f8dcc6'; // write
-  static const String cmdFrom = '61080003-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
+  static const String cmdFrom =
+      '61080003-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
   static const String events = '61080004-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
   static const String data = '61080005-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
-  static const String memfault = '61080007-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
+  static const String memfault =
+      '61080007-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
 }
 
 const int sof = 0xAA; // start of frame
@@ -33,7 +35,9 @@ class PacketType {
 class Cmd {
   static const int linkValid = 0x01;
   static const int toggleRealtimeHr = 0x03;
-  static const int setClock = 0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
+  static const int reportVersionInfo = 0x07;
+  static const int setClock =
+      0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
   static const int getClock = 0x0B; // → strap RTC epoch (ClockRef correlation)
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
@@ -49,16 +53,20 @@ class Cmd {
   static const int getAlarmTime = 0x43;
   static const int disableAlarm = 0x45;
   static const int getAdvertisingNameHarvard = 0x4C;
-  static const int setAdvertisingNameHarvard = 0x4D; // [0x01][len u8][ascii name][u32 0]
+  static const int setAdvertisingNameHarvard =
+      0x4D; // [0x01][len u8][ascii name][u32 0]
   static const int getBodyLocationAndStatus = 0x54;
+  static const int enterHighFreqSync = 0x60;
+  static const int exitHighFreqSync = 0x61; // defensive stuck-strap recovery
   static const int getExtendedBatteryInfo = 0x62;
   static const int toggleImuMode = 0x6A;
   static const int enableOpticalData = 0x6B;
   static const int toggleOpticalMode = 0x6C;
   static const int runHapticsPattern = 0x4F;
   static const int stopHaptics = 0x7A;
-  static const int enterHighFreqSync = 0x60;
-  static const int exitHighFreqSync = 0x61; // defensive stuck-strap recovery
+  static const int selectWrist = 0x7B;
+  static const int getHello = 0x91;
+  static const int getBatteryPackInfo = 0x97;
   static const int togglePersistentR21 = 0x9A; // DANGER
 }
 

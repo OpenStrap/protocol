@@ -5,9 +5,23 @@ import 'dart:typed_data';
 import 'constants.dart';
 import 'framing.dart';
 
+enum WristSelection {
+  right(0x01),
+  left(0x02);
+
+  const WristSelection(this.value);
+  final int value;
+}
+
 /// Build a framed command packet: [type][seq][opcode][payload].
-Uint8List buildCommand(int seq, int opcode, [List<int> payload = const [0x00]]) {
-  final inner = <int>[PacketType.command, seq & 0xFF, opcode & 0xFF, ...payload];
+Uint8List buildCommand(int seq, int opcode,
+    [List<int> payload = const [0x00]]) {
+  final inner = <int>[
+    PacketType.command,
+    seq & 0xFF,
+    opcode & 0xFF,
+    ...payload
+  ];
   return buildFrame(inner);
 }
 
@@ -41,9 +55,14 @@ final List<Uint8List> initPackets = [
 ];
 
 // ── Convenience builders for live ops ──────────────────────────────────────
-Uint8List cmdLinkValid(int seq) => buildCommand(seq, Cmd.linkValid, const [0x00]);
-Uint8List cmdGetBattery(int seq) => buildCommand(seq, Cmd.getBatteryLevel, const []);
-Uint8List cmdGetHello(int seq) => buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
+Uint8List cmdLinkValid(int seq) =>
+    buildCommand(seq, Cmd.linkValid, const [0x00]);
+Uint8List cmdGetBattery(int seq) =>
+    buildCommand(seq, Cmd.getBatteryLevel, const []);
+Uint8List cmdGetHello(int seq) =>
+    buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
+Uint8List cmdGetHelloModern(int seq) =>
+    buildCommand(seq, Cmd.getHello, const [0x01]);
 Uint8List cmdAbortHistorical(int seq) =>
     buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00]);
 Uint8List cmdSendHistorical(int seq) =>
@@ -51,8 +70,34 @@ Uint8List cmdSendHistorical(int seq) =>
 Uint8List cmdGetClock(int seq) => buildCommand(seq, Cmd.getClock, const []);
 Uint8List cmdGetDataRange(int seq) =>
     buildCommand(seq, Cmd.getDataRange, const [0x00]);
+Uint8List cmdReportVersionInfo(int seq) =>
+    buildCommand(seq, Cmd.reportVersionInfo, const []);
+Uint8List cmdGetBodyLocationAndStatus(int seq) =>
+    buildCommand(seq, Cmd.getBodyLocationAndStatus, const []);
+Uint8List cmdGetBatteryPackInfo(int seq) =>
+    buildCommand(seq, Cmd.getBatteryPackInfo, const []);
 Uint8List cmdExitHighFreqSync(int seq) =>
-    buildCommand(seq, Cmd.exitHighFreqSync, const [0x00]);
+    buildCommand(seq, Cmd.exitHighFreqSync, const []);
+
+Uint8List cmdEnterHighFreqSync(int seq,
+    {required int intervalSeconds, required int durationSeconds}) {
+  if (intervalSeconds < 0 || intervalSeconds > 0xFFFF) {
+    throw ArgumentError.value(
+        intervalSeconds, 'intervalSeconds', 'must fit in u16');
+  }
+  if (durationSeconds < 0 || durationSeconds > 0xFFFF) {
+    throw ArgumentError.value(
+        durationSeconds, 'durationSeconds', 'must fit in u16');
+  }
+  final payload = ByteData(5)
+    ..setUint8(0, 0x02)
+    ..setUint16(1, intervalSeconds, Endian.little)
+    ..setUint16(3, durationSeconds, Endian.little);
+  return buildCommand(seq, Cmd.enterHighFreqSync, payload.buffer.asUint8List());
+}
+
+Uint8List cmdSelectWrist(int seq, WristSelection selection) =>
+    buildCommand(seq, Cmd.selectWrist, [revision1, selection.value]);
 
 // Live streams. Optical is WRIST-GATED (0x6B only) — never force (0x6C) or
 // persist (0x9A); persistent causes the stuck-green-LED footgun ().
