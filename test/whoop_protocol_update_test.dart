@@ -77,6 +77,15 @@ void main() {
       expect(info['payload_len'], 18);
       expect(info['raw_hex'], '00112233445566778899aabbccddeeff0011');
     });
+
+    test('0x7b select wrist response is modeled as an ack payload', () {
+      final inner = hexToBytes('24037b0102');
+      final resp = parseCommandResponse(inner)!;
+      final ack = resp.decoded['select_wrist'] as SelectWristResponse;
+      expect(resp.opcode, Cmd.selectWrist);
+      expect(ack.revision, 1);
+      expect(ack.payload, [0x01, 0x02]);
+    });
   });
 
   group('WHOOP realtime HR revision 2', () {

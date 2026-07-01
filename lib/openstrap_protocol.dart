@@ -61,6 +61,7 @@ export 'src/control.dart'
         BatteryPackType,
         BodyLocationStatusResponse,
         HighFreqSyncResponse,
+        SelectWristResponse,
         BatteryPackInfoResponse,
         RealtimeHrV2,
         parseRealtimeHrV2,

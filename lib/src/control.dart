@@ -97,6 +97,16 @@ class HighFreqSyncResponse {
   const HighFreqSyncResponse(this.opcode);
 }
 
+class SelectWristResponse {
+  final int revision;
+  final Uint8List payload;
+
+  const SelectWristResponse({
+    required this.revision,
+    required this.payload,
+  });
+}
+
 class BatteryPackInfoResponse {
   final int revision;
   final bool attached;
@@ -375,6 +385,11 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
     );
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
+  } else if (op == Cmd.selectWrist && payload.isNotEmpty) {
+    dec['select_wrist'] = SelectWristResponse(
+      revision: payload[0],
+      payload: Uint8List.fromList(payload),
+    );
   } else if (op == Cmd.getBatteryPackInfo && payload.length >= 28) {
     dec['battery_pack_info'] = BatteryPackInfoResponse(
       revision: payload[0],
