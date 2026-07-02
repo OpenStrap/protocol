@@ -35,6 +35,30 @@ void main() {
     });
   });
 
+  group('SET_ALARM (cmdSetAlarm)', () {
+    test('round-trip: valid frame, CRCs ok, opcode 0x42, epoch decodes back', () {
+      const epoch = 1735689600; // 2025-01-01T00:00:00Z, a plausible alarm time
+      const seq = 9;
+      final raw = cmdSetAlarm(seq, epoch);
+      final f = parseFrame(raw);
+      expect(f, isNotNull);
+      expect(f!.crc8Ok, isTrue);
+      expect(f.crc32Ok, isTrue);
+      expect(f.packetType, PacketType.command);
+      expect(f.opcode, Cmd.setAlarmTime);
+      expect(f.inner[1], seq);
+      // payload starts at inner[3]: u32 epoch LE, then u32 zero pad.
+      final bd =
+          f.inner.buffer.asByteData(f.inner.offsetInBytes, f.inner.length);
+      expect(bd.getUint32(3, Endian.little), epoch);
+      expect(bd.getUint32(7, Endian.little), 0); // pad
+    });
+
+    test('SET_ALARM is NOT in dangerousCmds (normal user action)', () {
+      expect(dangerousCmds.contains(Cmd.setAlarmTime), isFalse);
+    });
+  });
+
   group('batch ACK (the fragile breaking point)', () {
     test('ACK has the exact 12-byte inner shape [0x23][seq][0x17][0x01]+token', () {
       final token = List<int>.generate(8, (i) => i + 1);

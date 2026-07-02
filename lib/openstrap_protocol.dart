@@ -48,7 +48,8 @@ export 'src/commands.dart'
         cmdSendR10R11,
         cmdToggleImu,
         cmdEnableOptical,
-        cmdBuzz;
+        cmdBuzz,
+        cmdSetAlarm;
 
 // Control-plane parsers (HELLO / EVENT / METADATA / COMMAND_RESPONSE / dispatch).
 export 'src/control.dart'
