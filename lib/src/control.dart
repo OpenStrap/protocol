@@ -38,6 +38,117 @@ String _hex(Uint8List b) {
   return sb.toString();
 }
 
+enum GarmentDeviceLocation {
+  unknown(0),
+  wrist(1),
+  bicep(2),
+  calf(3),
+  sideTorso(4),
+  glute(5),
+  ankle(7),
+  notConclusive(128),
+  unknownGarment(160);
+
+  const GarmentDeviceLocation(this.value);
+  final int value;
+
+  static GarmentDeviceLocation? fromValue(int value) {
+    for (final location in values) {
+      if (location.value == value) return location;
+    }
+    return null;
+  }
+}
+
+enum BatteryPackType {
+  puffin(12),
+  penguin(14);
+
+  const BatteryPackType(this.value);
+  final int value;
+
+  static BatteryPackType? fromValue(int value) {
+    for (final type in values) {
+      if (type.value == value) return type;
+    }
+    return null;
+  }
+}
+
+class BodyLocationStatusResponse {
+  final int revision;
+  final int locationRaw;
+  final int confidence;
+  final int status;
+
+  const BodyLocationStatusResponse({
+    required this.revision,
+    required this.locationRaw,
+    required this.confidence,
+    required this.status,
+  });
+
+  GarmentDeviceLocation? get location =>
+      GarmentDeviceLocation.fromValue(locationRaw);
+}
+
+class HighFreqSyncResponse {
+  final int opcode;
+  const HighFreqSyncResponse(this.opcode);
+}
+
+class SelectWristResponse {
+  final int revision;
+  final Uint8List payload;
+
+  const SelectWristResponse({
+    required this.revision,
+    required this.payload,
+  });
+}
+
+class BatteryPackInfoResponse {
+  final int revision;
+  final bool attached;
+  final String identifier;
+  final String name;
+  final int batteryPackTypeRaw;
+  final int statusRaw;
+
+  const BatteryPackInfoResponse({
+    required this.revision,
+    required this.attached,
+    required this.identifier,
+    required this.name,
+    required this.batteryPackTypeRaw,
+    required this.statusRaw,
+  });
+
+  BatteryPackType? get batteryPackType =>
+      BatteryPackType.fromValue(batteryPackTypeRaw);
+}
+
+class RealtimeHrV2 {
+  final int revision;
+  final int hrBpm;
+  final int tsEpoch;
+  final int tsSubsecRaw;
+  final bool isOffBody;
+  final int locationRaw;
+
+  const RealtimeHrV2({
+    required this.revision,
+    required this.hrBpm,
+    required this.tsEpoch,
+    required this.tsSubsecRaw,
+    required this.isOffBody,
+    required this.locationRaw,
+  });
+
+  GarmentDeviceLocation? get location =>
+      GarmentDeviceLocation.fromValue(locationRaw);
+}
+
 // ── Header-only R10 (live HR) — the IMU arrays stay in the raw bytes. ────────
 class R10Lite {
   final int tsEpoch; // u32 @[7:11]
@@ -80,6 +191,20 @@ RealtimeHr? parseRealtimeHr(Uint8List body) {
   }
   final wearing = body.length > 15 ? body[15] == 1 : true;
   return RealtimeHr(hr, _round(hrPrecise, 2), rr, wearing, ts);
+}
+
+RealtimeHrV2? parseRealtimeHrV2(Uint8List body) {
+  if (body.length < 20) return null;
+  final revision = body[1];
+  if (revision != 2) return null;
+  return RealtimeHrV2(
+    revision: revision,
+    tsEpoch: u32(body, 2),
+    tsSubsecRaw: u16(body, 6),
+    hrBpm: body[8],
+    isOffBody: body[18] == 0,
+    locationRaw: body[19],
+  );
 }
 
 // ── HELLO identity ───────────────────────────────────────────────────────────
@@ -251,8 +376,45 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
       dec['range_oldest'] = range[0];
       dec['range_newest'] = range[1];
     }
+  } else if (op == Cmd.getBodyLocationAndStatus && payload.length >= 4) {
+    dec['body_location_status'] = BodyLocationStatusResponse(
+      revision: payload[0],
+      locationRaw: payload[1],
+      confidence: payload[2],
+      status: payload[3],
+    );
+  } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
+    dec['high_freq_sync'] = HighFreqSyncResponse(op);
+  } else if (op == Cmd.selectWrist && payload.isNotEmpty) {
+    dec['select_wrist'] = SelectWristResponse(
+      revision: payload[0],
+      payload: Uint8List.fromList(payload),
+    );
+  } else if (op == Cmd.getBatteryPackInfo && payload.length >= 28) {
+    dec['battery_pack_info'] = BatteryPackInfoResponse(
+      revision: payload[0],
+      attached: payload[1] == 1,
+      identifier: _batteryPackId(payload),
+      name: _batteryPackName(payload),
+      batteryPackTypeRaw: payload[26],
+      statusRaw: payload[27],
+    );
+  } else if (op == Cmd.reportVersionInfo) {
+    dec['version_info'] = <String, dynamic>{
+      'payload_len': payload.length,
+      'raw_hex': _hex(payload),
+    };
   }
   return CmdResponse(op, dec);
+}
+
+String _batteryPackId(Uint8List payload) {
+  final bytes = payload.sublist(2, 8);
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
+}
+
+String _batteryPackName(Uint8List payload) {
+  return _printableRun(payload, 8, 24);
 }
 
 /// Decode the GET_ADVERTISING_NAME response body. Verified layout (real capture):
@@ -353,7 +515,8 @@ MetaMarker? parseMetadata(Uint8List inner) {
   Uint8List? token;
   int? batchId;
   if (sub == SyncMeta.historyEnd && inner.length >= 21) {
-    token = Uint8List.fromList(inner.sublist(13, 21)); // the 8 bytes the ACK echoes
+    token =
+        Uint8List.fromList(inner.sublist(13, 21)); // the 8 bytes the ACK echoes
     batchId = u32(inner, 17);
   }
   return MetaMarker(sub, name, token, batchId);
@@ -410,7 +573,8 @@ Decoded _decodeDataRecord(Uint8List inner) {
   final recType = inner.length > 1 ? inner[1] : -1;
   // Compact realtime stream (small packet).
   if (inner.length < 64) {
-    final body = inner.length > 3 ? Uint8List.sublistView(inner, 3) : Uint8List(0);
+    final body =
+        inner.length > 3 ? Uint8List.sublistView(inner, 3) : Uint8List(0);
     final hr = parseRealtimeHr(body);
     if (hr != null) {
       return Decoded('realtime_hr', {
@@ -427,7 +591,8 @@ Decoded _decodeDataRecord(Uint8List inner) {
   if (recType == Record.r10) {
     final r = parseR10Lite(inner);
     if (r != null && r.hr > 0) {
-      return Decoded('realtime_hr', {'rec_type': recType, 'hr': r.hr, 'wearing': true});
+      return Decoded(
+          'realtime_hr', {'rec_type': recType, 'hr': r.hr, 'wearing': true});
     }
   }
   // R24: delegate to the native Dart full-record decoder (Source 1).

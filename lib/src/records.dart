@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 /// Decoded Type-24 historical biometric record.
 class R24 {
+  final int histVersion; // historical layout version byte @ [1]
   final int tsEpoch; // unix seconds @ [7:11]
   final int tsSubsec; // sub-seconds @ [11:13]
   final int counter; // record counter @ [3:7]
@@ -43,6 +44,7 @@ class R24 {
   final String rawTail;
 
   R24({
+    required this.histVersion,
     required this.tsEpoch,
     required this.tsSubsec,
     required this.counter,
@@ -99,14 +101,66 @@ double _pow10(int n) {
   return p;
 }
 
-/// Decode a Type-24 historical biometric record. `inner` starts at the
-/// packet-type byte. Returns null if too short (< 89 bytes).
+ByteData _view(Uint8List b) =>
+    b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
+
+double _gravI16(Uint8List inner, int offset) {
+  final v = _view(inner).getInt16(offset, Endian.little);
+  return _round(v / 16384.0, 4);
+}
+
+R24? _parseV25(Uint8List inner) {
+  if (inner.length < 75) return null;
+  final view = _view(inner);
+  // The documented v25 layout uses absolute frame offsets. Our decoder
+  // receives the inner record starting at packet type 0x2f, so subtract the
+  // 4-byte transport prefix: unix 11->7 and gravity 73/75/77->69/71/73.
+  final gx = _gravI16(inner, 69);
+  final gy = _gravI16(inner, 71);
+  final gz = _gravI16(inner, 73);
+  final mag = (gx * gx + gy * gy + gz * gz);
+  if (mag < 0.25 || mag > 2.25) return null; // ~0.5g..1.5g
+  return R24(
+    histVersion: 25,
+    tsEpoch: view.getUint32(7, Endian.little),
+    tsSubsec: 0,
+    counter: view.getUint32(3, Endian.little),
+    hr: 0,
+    rrCount: 0,
+    rrIntervalsMs: const [],
+    ppgGreen: 0,
+    ppgRedIr: 0,
+    accelG: [gx, gy, gz],
+    skinContact: 0,
+    spo2RedRaw: 0,
+    spo2IrRaw: 0,
+    skinTempRaw: 0,
+    ambientRaw: 0,
+    rawTail: _hexFrom(inner, 13),
+  );
+}
+
+/// Decode a WHOOP 4 historical biometric record. `inner` starts at the
+/// packet-type byte. Auto-routes supported layout versions (`24`, `25`).
+/// Returns null if too short or if the version-specific decode fails.
 R24? parseR24(Uint8List inner) {
+  if (inner.length < 2) {
+    return null;
+  }
+
+  final version = inner[1];
+  if (version == 25) return _parseV25(inner);
+  if (version != 24 && version != 12) {
+    return null;
+  }
   if (inner.length < 89) {
     return null;
   }
 
-  final view = inner.buffer.asByteData(inner.offsetInBytes, inner.lengthInBytes);
+  final view = inner.buffer.asByteData(
+    inner.offsetInBytes,
+    inner.lengthInBytes,
+  );
 
   // R-R intervals: rr_count @ [18], then rr_count signed int16 LE from [19].
   final rrCount = inner[18];
@@ -117,6 +171,7 @@ R24? parseR24(Uint8List inner) {
   }
 
   return R24(
+    histVersion: version,
     tsEpoch: view.getUint32(7, Endian.little),
     tsSubsec: view.getUint16(11, Endian.little),
     counter: view.getUint32(3, Endian.little),
