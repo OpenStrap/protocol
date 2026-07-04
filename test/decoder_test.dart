@@ -3,6 +3,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
@@ -21,7 +22,8 @@ void main() {
         }
       }
       if (f == null) {
-        throw StateError('whoop_hist.jsonl fixture not found (looked in $candidates)');
+        throw StateError(
+            'whoop_hist.jsonl fixture not found (looked in $candidates)');
       }
       records = f
           .readAsLinesSync()
@@ -45,6 +47,20 @@ void main() {
       expect((r.accelG[0] - -0.150).abs() < 0.001, isTrue);
       expect((r.accelG[1] - -0.331).abs() < 0.001, isTrue);
       expect((r.accelG[2] - 1.001).abs() < 0.001, isTrue);
+    });
+
+    test('v24 optical offsets are inner-relative, not frame-absolute', () {
+      final r = parseR24(hexToBytes(records[0]['hex'] as String))!;
+      final b = hexToBytes(records[0]['hex'] as String);
+      final view = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
+
+      // `parseR24` consumes the inner record starting at packet type 0x2f.
+      // So the WHOOP 4 v24 optical block documented at frame[68/70/72/74]
+      // is read here at inner[64/66/68/70].
+      expect(r.spo2RedRaw, view.getUint16(64, Endian.little));
+      expect(r.spo2IrRaw, view.getUint16(66, Endian.little));
+      expect(r.skinTempRaw, view.getUint16(68, Endian.little));
+      expect(r.ambientRaw, view.getUint16(70, Endian.little));
     });
 
     test('all 550 records decode without throwing / null', () {
