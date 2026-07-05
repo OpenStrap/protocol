@@ -109,6 +109,11 @@ double _gravI16(Uint8List inner, int offset) {
   return _round(v / 16384.0, 4);
 }
 
+/// Decode a v25 (PPG-derived) historical record. Unlike v24, the v25 field map
+/// comes purely from our own device captures — it has no independent
+/// cross-reference, so it is LOWER-CONFIDENCE: we decode timing + gravity and
+/// deliberately leave HR at 0 (v25 carries no honest 1 Hz beat). It is gated on
+/// a gravity-magnitude sanity check to avoid emitting garbage.
 R24? _parseV25(Uint8List inner) {
   if (inner.length < 75) return null;
   final view = _view(inner);
@@ -140,8 +145,47 @@ R24? _parseV25(Uint8List inner) {
   );
 }
 
+/// HR-byte offset within the record inner, keyed by the layout version byte
+/// (inner[1]). The header (counter @ [3], ts @ [7], subsec @ [11]) is shared
+/// across versions; only the HR byte moves. Established from our own hardware
+/// captures across the layout versions the strap has served us.
+const Map<int, int> _hrOffsetByVersion = {
+  7: 27,
+  9: 17,
+  12: 17,
+  18: 14,
+  24: 17,
+};
+
+/// Physiological plausibility gate for a best-effort decode: the gravity vector
+/// must have magnitude ≈ 1 g (0.5–1.8 g) AND HR must be in a live human range
+/// (25–230 bpm). Used to guard speculative decodes (unrecognised versions, or
+/// versions where only the HR offset — not the full field map — is confirmed).
+/// Compared on magnitude-squared to avoid a sqrt.
+bool _physiologicallyPlausible(List<double> accelG, int hr) {
+  if (hr < 25 || hr > 230) return false;
+  if (accelG.length != 3) return false;
+  final magSq = accelG[0] * accelG[0] +
+      accelG[1] * accelG[1] +
+      accelG[2] * accelG[2];
+  return magSq >= 0.25 && magSq <= 3.24; // 0.5 g .. 1.8 g
+}
+
 /// Decode a WHOOP 4 historical biometric record. `inner` starts at the
-/// packet-type byte. Auto-routes supported layout versions (`24`, `25`).
+/// packet-type byte.
+///
+/// Routing:
+///   - v25 → the PPG-derived layout ([_parseV25]).
+///   - v24 / v12 → our hardware-validated field map, returned as-is.
+///   - v18 / v9 / v7 → the SAME field map but with the HR byte read at that
+///     version's offset (only the HR offset is independently confirmed for
+///     these, so the decode is returned only if it passes a physiological
+///     plausibility gate — otherwise null).
+///   - any other version → treated as an unknown/future layout: we attempt the
+///     v24 field map and return it only if it is physiologically plausible.
+///     This degrades a firmware layout change to a validated best-effort read
+///     instead of emitting garbage.
+///
 /// Returns null if too short or if the version-specific decode fails.
 R24? parseR24(Uint8List inner) {
   if (inner.length < 2) {
@@ -150,9 +194,23 @@ R24? parseR24(Uint8List inner) {
 
   final version = inner[1];
   if (version == 25) return _parseV25(inner);
-  if (version != 24 && version != 12) {
-    return null;
-  }
+
+  // v24 / v12 are our validated map and are trusted verbatim; every other
+  // version is a best-effort decode gated on physiological plausibility.
+  final trusted = version == 24 || version == 12;
+  final hrOffset = _hrOffsetByVersion[version] ?? 17;
+  return _parseV24Layout(inner, version, hrOffset: hrOffset, validate: !trusted);
+}
+
+/// Decode the WHOOP 4 v24 field map with a parameterised HR offset. When
+/// [validate] is set the result is returned only if it passes
+/// [_physiologicallyPlausible]; otherwise (v24/v12) it is returned verbatim.
+R24? _parseV24Layout(
+  Uint8List inner,
+  int version, {
+  required int hrOffset,
+  required bool validate,
+}) {
   if (inner.length < 89) {
     return null;
   }
@@ -170,21 +228,28 @@ R24? parseR24(Uint8List inner) {
     if (v > 0) rrIntervalsMs.add(v);
   }
 
+  final hr = inner[hrOffset];
+  final accelG = [
+    _round(view.getFloat32(36, Endian.little), 4),
+    _round(view.getFloat32(40, Endian.little), 4),
+    _round(view.getFloat32(44, Endian.little), 4),
+  ];
+
+  if (validate && !_physiologicallyPlausible(accelG, hr)) {
+    return null;
+  }
+
   return R24(
     histVersion: version,
     tsEpoch: view.getUint32(7, Endian.little),
     tsSubsec: view.getUint16(11, Endian.little),
     counter: view.getUint32(3, Endian.little),
-    hr: inner[17],
+    hr: hr,
     rrCount: rrCount,
     rrIntervalsMs: rrIntervalsMs,
     ppgGreen: view.getUint16(29, Endian.little),
     ppgRedIr: view.getUint16(31, Endian.little),
-    accelG: [
-      _round(view.getFloat32(36, Endian.little), 4),
-      _round(view.getFloat32(40, Endian.little), 4),
-      _round(view.getFloat32(44, Endian.little), 4),
-    ],
+    accelG: accelG,
     skinContact: inner[51],
     spo2RedRaw: view.getUint16(64, Endian.little),
     spo2IrRaw: view.getUint16(66, Endian.little),

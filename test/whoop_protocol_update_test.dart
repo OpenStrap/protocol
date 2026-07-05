@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 
@@ -30,6 +32,72 @@ void main() {
       final frame = parseFrame(cmdGetHelloModern(0x01))!;
       expect(frame.valid, isTrue);
       expect(frame.inner, [0x23, 0x01, 0x91, 0x01]);
+    });
+
+    // Export reachability: these are resolved via the public
+    // package:openstrap_protocol/openstrap_protocol.dart import above.
+    test('cmdGetClock is exported and payloadless (opcode 0x0B)', () {
+      final frame = parseFrame(cmdGetClock(0x05))!;
+      expect(frame.valid, isTrue);
+      // 3-byte inner + 1 byte of /4 frame padding.
+      expect(frame.inner, [0x23, 0x05, 0x0B, 0x00]);
+    });
+
+    test('cmdGetDataRange is exported with a [0x00] payload (opcode 0x22)', () {
+      final frame = parseFrame(cmdGetDataRange(0x06))!;
+      expect(frame.valid, isTrue);
+      expect(frame.inner, [0x23, 0x06, 0x22, 0x00]);
+    });
+
+    test('cmdSetClock builds the WHOOP-exact 8-byte sec+subsec payload', () {
+      // Fixed instant: sec = 0x12345678, millis = 500.
+      // subsec = 500 * 32768 ~/ 1000 = 16384 = 0x4000 (u16 LE, then 2 zero pad).
+      final now =
+          DateTime.fromMillisecondsSinceEpoch(0x12345678 * 1000 + 500);
+      final frame = parseFrame(cmdSetClock(0x09, now: now))!;
+      expect(frame.valid, isTrue);
+      expect(frame.inner, [
+        0x23, 0x09, Cmd.setClock, // header: COMMAND, seq, SET_CLOCK 0x0A
+        0x78, 0x56, 0x34, 0x12, // seconds u32 LE
+        0x00, 0x40, // subsec u16 LE (16384/32768 = 0.5 s)
+        0x00, 0x00, // zero pad — total payload exactly 8 bytes
+        0x00, // 1 byte of /4 frame padding (11-byte inner → 12)
+      ]);
+    });
+
+    test('cmdSetClock subsec stays in u16 range at 999 ms', () {
+      // subsec = 999 * 32768 ~/ 1000 = 32735 = 0x7FDF — never overflows u16.
+      final now = DateTime.fromMillisecondsSinceEpoch(1750000000 * 1000 + 999);
+      final frame = parseFrame(cmdSetClock(0x00, now: now))!;
+      expect(frame.valid, isTrue);
+      // header(3) + 8-byte payload = 11, padded /4 → 12 on the wire.
+      expect(frame.inner.length, 12);
+      expect(frame.inner.sublist(7, 11), [0xDF, 0x7F, 0x00, 0x00]);
+    });
+  });
+
+  group('WHOOP danger surface', () {
+    test('dangerousCmds covers trim, reboot, power-cycle, R21 and fw-load', () {
+      expect(
+        dangerousCmds,
+        containsAll([
+          Cmd.forceTrim,
+          Cmd.rebootStrap,
+          Cmd.powerCycleStrap,
+          Cmd.togglePersistentR21,
+          Cmd.startFirmwareLoad,
+          Cmd.loadFirmwareData,
+          Cmd.processFirmwareImage,
+        ]),
+      );
+      // 0x24 here is a Cmd opcode; PacketType.commandResponse (0x24) is a
+      // separate namespace (inner[0], not inner[2]).
+      expect(Cmd.startFirmwareLoad, 0x24);
+      expect(Cmd.powerCycleStrap, 0x20);
+      // 0x62 is GET_EXTENDED_BATTERY_INFO; there is no 0x63 command (the old
+      // "reset fuel gauge" opcode was a decode artifact and has been removed).
+      expect(Cmd.getExtendedBatteryInfo, 0x62);
+      expect(Cmd.getMaxProtocolVersion, 0x02);
     });
   });
 
@@ -107,6 +175,172 @@ void main() {
       expect(parsed.isOffBody, isTrue);
       expect(parsed.locationRaw, 2);
       expect(parsed.location, GarmentDeviceLocation.bicep);
+    });
+  });
+
+  group('WHOOP on-device alarm', () {
+    // Fixed instant: sec = 0x12345678, millis = 500.
+    // subsec = 500 * 32768 ~/ 1000 = 16384 = 0x4000 (u16 LE).
+    final when = DateTime.fromMillisecondsSinceEpoch(0x12345678 * 1000 + 500);
+
+    test('simple form is [0x01][u32 sec LE][u16 subsec LE]', () {
+      final frame = parseFrame(cmdSetAlarmSimple(0x0A, when))!;
+      expect(frame.valid, isTrue);
+      expect(frame.inner, [
+        0x23, 0x0A, Cmd.setAlarmTime, // COMMAND, seq, SET_ALARM_TIME 0x42
+        0x01, //                         time-only form marker
+        0x78, 0x56, 0x34, 0x12, //       epoch seconds u32 LE
+        0x00, 0x40, //                   sub-seconds u16 LE (16384 = 0.5 s)
+        0x00, 0x00, //                   /4 frame padding (10-byte inner → 12)
+      ]);
+    });
+
+    test('rich form carries the default 12-byte haptic pattern and fires', () {
+      final frame = parseFrame(cmdSetAlarm(0x0B, when))!;
+      expect(frame.valid, isTrue);
+      expect(frame.inner, [
+        0x23, 0x0B, Cmd.setAlarmTime, // COMMAND, seq, SET_ALARM_TIME 0x42
+        0x04, //                         rich-form marker (fires haptics)
+        0x00, //                         alarm slot index (default 0)
+        0x78, 0x56, 0x34, 0x12, //       epoch seconds u32 LE
+        0x00, 0x40, //                   sub-seconds u16 LE
+        47, 152, 0, 0, 0, 0, 0, 0, //    8× waveform effects
+        0, 0, //                         loopControl u16 LE
+        7, //                            overall waveform loop
+        30, //                           duration seconds
+        0x00, //                         /4 frame padding (23-byte inner → 24)
+      ]);
+      // The default pattern exported for callers matches what we serialise.
+      expect(kDefaultAlarmHaptics,
+          [47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 7, 30]);
+    });
+
+    test('rich form honours a custom index and haptic pattern', () {
+      final custom = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+      final frame =
+          parseFrame(cmdSetAlarm(0x00, when, index: 3, hapticPattern: custom))!;
+      expect(frame.inner.sublist(3, 11),
+          [0x04, 0x03, 0x78, 0x56, 0x34, 0x12, 0x00, 0x40]);
+      expect(frame.inner.sublist(11, 23), custom);
+    });
+
+    test('rich form rejects a wrong-length haptic pattern', () {
+      expect(() => cmdSetAlarm(0x00, when, hapticPattern: const [1, 2, 3]),
+          throwsArgumentError);
+    });
+
+    test('run alarm rev1 is [0x01], rev2 is [0x02][mode] (opcode 0x44)', () {
+      final rev1 = parseFrame(cmdRunAlarm(0x01))!;
+      expect(rev1.inner, [0x23, 0x01, Cmd.runAlarm, 0x01]);
+      final rev2 = parseFrame(cmdRunAlarm(0x02, mode: 0x05))!;
+      expect(rev2.inner.sublist(0, 5), [0x23, 0x02, Cmd.runAlarm, 0x02, 0x05]);
+    });
+
+    test('disable alarm rev1 is [0x01], rev2 is [0x02][0xFF] (opcode 0x45)', () {
+      final rev1 = parseFrame(cmdDisableAlarm(0x03))!;
+      expect(rev1.inner, [0x23, 0x03, Cmd.disableAlarm, 0x01]);
+      final rev2 = parseFrame(cmdDisableAlarm(0x04, revision: 2))!;
+      expect(
+          rev2.inner.sublist(0, 5), [0x23, 0x04, Cmd.disableAlarm, 0x02, 0xFF]);
+    });
+  });
+
+  group('WHOOP event ids', () {
+    test('newly confirmed ids resolve to their names', () {
+      expect(EventId.boot, 15);
+      expect(EventId.setRtc, 16);
+      expect(EventId.hapticsFired, 60);
+      expect(EventId.name(EventId.boot), 'BOOT');
+      expect(EventId.name(EventId.setRtc), 'SET_RTC');
+      expect(EventId.name(EventId.temperatureLevel), 'TEMPERATURE_LEVEL');
+      expect(EventId.name(EventId.trimAllData), 'TRIM_ALL_DATA');
+      expect(EventId.name(EventId.trimAllDataEnded), 'TRIM_ALL_DATA_ENDED');
+      expect(EventId.name(EventId.ch1Saturation), 'CH1_SATURATION_DETECTED');
+      expect(EventId.name(EventId.ch2Saturation), 'CH2_SATURATION_DETECTED');
+      expect(EventId.name(EventId.accelSaturation),
+          'ACCELEROMETER_SATURATION_DETECTED');
+      expect(EventId.name(EventId.rawDataCollectionOn), 'RAW_DATA_COLLECTION_ON');
+      expect(
+          EventId.name(EventId.rawDataCollectionOff), 'RAW_DATA_COLLECTION_OFF');
+      expect(EventId.name(EventId.strapDrivenAlarmSet), 'STRAP_DRIVEN_ALARM_SET');
+      expect(EventId.name(EventId.strapDrivenAlarmExecuted),
+          'STRAP_DRIVEN_ALARM_EXECUTED');
+      expect(EventId.name(EventId.appDrivenAlarmExecuted),
+          'APP_DRIVEN_ALARM_EXECUTED');
+      expect(EventId.name(EventId.strapDrivenAlarmDisabled),
+          'STRAP_DRIVEN_ALARM_DISABLED');
+    });
+
+    test('parseEvent decodes id@2, ts@4, subsec@8 and body@12', () {
+      // 0x30 EVENT: eid=16 (SET_RTC) @2, ts=0x12345678 @4, subsec=0x4000 @8,
+      // pad @10..12, body [0xAA,0xBB] @12.
+      final inner = Uint8List.fromList([
+        0x30, 0x00, //             packet type EVENT, seq
+        0x10, 0x00, //             event id u16 LE = 16
+        0x78, 0x56, 0x34, 0x12, // ts seconds u32 LE
+        0x00, 0x40, //             sub-seconds u16 LE
+        0x00, 0x00, //             pad to the body offset
+        0xAA, 0xBB, //             event body
+      ]);
+      final e = parseEvent(inner)!;
+      expect(e.eventId, EventId.setRtc);
+      expect(e.name, 'SET_RTC');
+      expect(e.tsEpoch, 0x12345678);
+      expect(e.tsSubsec, 0x4000);
+      expect(e.body, [0xAA, 0xBB]);
+    });
+  });
+
+  group('WHOOP historical record versions', () {
+    // Build a 96-byte record inner with a plausible ~1 g gravity vector and a
+    // given HR at [hrOffset].
+    Uint8List record(int version, {required int hr, required int hrOffset,
+        double gz = 1.0}) {
+      final b = Uint8List(96);
+      b[0] = 0x2f; // packet type (historical)
+      b[1] = version;
+      final bd = ByteData.sublistView(b);
+      bd.setUint32(3, 0x0A0B0C0D, Endian.little); // counter
+      bd.setUint32(7, 0x11223344, Endian.little); // ts seconds
+      bd.setUint16(11, 0x0102, Endian.little); // subsec
+      b[hrOffset] = hr;
+      bd.setFloat32(36, 0.0, Endian.little); // gravity x
+      bd.setFloat32(40, 0.0, Endian.little); // gravity y
+      bd.setFloat32(44, gz, Endian.little); // gravity z
+      return b;
+    }
+
+    test('v18 reads HR at offset 14', () {
+      final r = parseR24(record(18, hr: 60, hrOffset: 14))!;
+      expect(r.histVersion, 18);
+      expect(r.hr, 60);
+      expect(r.counter, 0x0A0B0C0D);
+      expect(r.tsEpoch, 0x11223344);
+      expect(r.tsSubsec, 0x0102);
+    });
+
+    test('v24 still reads HR at offset 17 (trusted, un-gated)', () {
+      // HR=0 (off-wrist) still decodes on the trusted path — no plausibility gate.
+      final r = parseR24(record(24, hr: 0, hrOffset: 17))!;
+      expect(r.histVersion, 24);
+      expect(r.hr, 0);
+    });
+
+    test('unknown version decodes via v24 map when physiologically plausible',
+        () {
+      final r = parseR24(record(200, hr: 72, hrOffset: 17))!;
+      expect(r.histVersion, 200);
+      expect(r.hr, 72);
+    });
+
+    test('best-effort decode is rejected when HR is implausible', () {
+      // v18 with HR below the human floor → null (only HR offset is confirmed).
+      expect(parseR24(record(18, hr: 5, hrOffset: 14)), isNull);
+    });
+
+    test('best-effort decode is rejected when gravity is implausible', () {
+      // Unknown version with near-zero gravity magnitude → null.
+      expect(parseR24(record(200, hr: 72, hrOffset: 17, gz: 0.05)), isNull);
     });
   });
 }

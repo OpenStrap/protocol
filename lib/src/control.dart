@@ -316,15 +316,37 @@ class EventInfo {
   final int eventId;
   final String name;
   final int tsEpoch;
+
+  /// Sub-second remainder of the event timestamp, u16 @ [8], in units of
+  /// 1/32768 s (the 32768 Hz RTC crystal). 0 when the frame is too short.
+  final int tsSubsec;
+
+  /// The event-specific body — the frame from offset [12] onward. Empty when
+  /// the frame carries no body. Kept raw so callers can decode per event id.
+  final Uint8List body;
+
   final Map<String, dynamic> decoded;
-  EventInfo(this.eventId, this.name, this.tsEpoch, this.decoded);
+  EventInfo(
+    this.eventId,
+    this.name,
+    this.tsEpoch,
+    this.decoded, {
+    this.tsSubsec = 0,
+    Uint8List? body,
+  }) : body = body ?? Uint8List(0);
 }
 
 EventInfo? parseEvent(Uint8List inner) {
   if (inner.length < 4 || inner[0] != PacketType.event) return null;
   final eid = u16(inner, 2);
   final name = EventId.name(eid);
+  // Timestamp: whole seconds u32 @ [4], sub-seconds u16 @ [8]; the event body
+  // begins at [12]. All guarded by length so short frames degrade cleanly.
   final ts = inner.length >= 8 ? u32(inner, 4) : 0;
+  final subsec = inner.length >= 10 ? u16(inner, 8) : 0;
+  final body = inner.length > 12
+      ? Uint8List.sublistView(inner, 12)
+      : Uint8List(0);
   final dec = <String, dynamic>{};
   switch (eid) {
     case EventId.chargingOn:
@@ -343,7 +365,7 @@ EventInfo? parseEvent(Uint8List inner) {
       dec['double_tap'] = true;
       break;
   }
-  return EventInfo(eid, name, ts, dec);
+  return EventInfo(eid, name, ts, dec, tsSubsec: subsec, body: body);
 }
 
 // ── COMMAND_RESPONSE (0x24) ──────────────────────────────────────────────────

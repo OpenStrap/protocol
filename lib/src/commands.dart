@@ -43,7 +43,7 @@ Uint8List buildBatchAck(int seq, List<int> token) {
   return buildFrame(inner);
 }
 
-/// The 5-packet INIT handshake (HCI-snoop verbatim, seq 0..4).
+/// The 5-packet INIT handshake (hardware-verified, seq 0..4).
 /// buildCommand regenerates these byte-for-byte (protocol test asserts it).
 /// Send one-at-a-time, ~120ms apart. seq4 triggers the flash drain.
 final List<Uint8List> initPackets = [
@@ -68,6 +68,41 @@ Uint8List cmdAbortHistorical(int seq) =>
 Uint8List cmdSendHistorical(int seq) =>
     buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
 Uint8List cmdGetClock(int seq) => buildCommand(seq, Cmd.getClock, const []);
+
+/// Set the strap RTC (SET_CLOCK = 0x0A) — WHOOP-EXACT 8-byte payload,
+/// hardware-verified by the edge app (`ble_engine.dart setClock()`).
+///
+/// Payload = TWO little-endian u32s:
+///   - `[0:4]` whole seconds (unix epoch, u32 LE)
+///   - `[4:8]` SUB-seconds in units of 1/32768 s (a 32768 Hz RTC crystal):
+///     `subsec = (millis % 1000) * 32768 ~/ 1000` — 0..32767, a u16 in the low
+///     half of the second word; bytes [6:8] stay zero.
+///
+/// ⚠ SET_CLOCK payload LENGTH IS FIRMWARE-SPECIFIC (8 vs 9 bytes) and
+/// load-bearing: a wrong-length set is ACK'd but NOT latched → the RTC stays
+/// "lost", the strap refuses to serve type-47 history and records come back
+/// dated to 1971. This builder emits the 8-byte form, verified on real
+/// hardware. After sending, read the clock back (GET_CLOCK,
+/// [cmdGetClock]) to confirm it latched.
+///
+/// [now] defaults to `DateTime.now()`; pass a fixed instant for tests.
+Uint8List cmdSetClock(int seq, {DateTime? now}) {
+  final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
+  final sec = ms ~/ 1000;
+  final subsec = ((ms % 1000) * 32768) ~/ 1000; // 0..32767, 1/32768 s units
+  final payload = <int>[
+    sec & 0xff,
+    (sec >> 8) & 0xff,
+    (sec >> 16) & 0xff,
+    (sec >> 24) & 0xff,
+    subsec & 0xff,
+    (subsec >> 8) & 0xff,
+    0,
+    0,
+  ];
+  return buildCommand(seq, Cmd.setClock, payload);
+}
+
 Uint8List cmdGetDataRange(int seq) =>
     buildCommand(seq, Cmd.getDataRange, const [0x00]);
 Uint8List cmdReportVersionInfo(int seq) =>
@@ -103,6 +138,12 @@ Uint8List cmdSelectWrist(int seq, WristSelection selection) =>
 // persist (0x9A); persistent causes the stuck-green-LED footgun ().
 Uint8List cmdToggleHr(int seq, bool on) =>
     buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00]);
+
+/// Toggle the realtime raw (R10/R11) stream (SEND_R10_R11_REALTIME = 0x3F).
+///
+/// NOTE: sending this with payload `[0x00]` (i.e. `cmdSendR10R11(seq, false)`)
+/// is the REAL persistent raw-flood OFF-switch — the off state persists across
+/// reconnects. STOP_RAW_DATA (0x52) does nothing. (PROTOCOL_FINDINGS.md:168-169)
 Uint8List cmdSendR10R11(int seq, bool on) =>
     buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00]);
 Uint8List cmdToggleImu(int seq, bool on) =>
@@ -112,34 +153,134 @@ Uint8List cmdEnableOptical(int seq, bool on) =>
 Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) =>
     buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0]);
 
-/// Set the band's on-device haptic alarm (SET_ALARM_TIME = 0x42). The firmware
-/// buzzes at [epochSeconds] (a wall-clock unix epoch, seconds) independently of
-/// the app, so the alarm fires even with no BLE connection.
+// ── On-device haptic alarm (SET_ALARM_TIME = 0x42) ─────────────────────────
+//
+// The strap runs a wall-clock alarm entirely on-device, so it buzzes at the
+// scheduled time even with no phone connected. The alarm time is a unix epoch
+// split into whole seconds + a 1/32768-s sub-second remainder, exactly like
+// SET_CLOCK (0x0A) — the strap's RTC ticks at 32768 Hz.
+//
+// The alarm has TWO on-wire forms, both hardware-verified from our own device
+// captures:
+//   • a SHORT form ([cmdSetAlarmSimple]) that carries only the time, and
+//   • a RICH form ([cmdSetAlarm]) that carries the time PLUS a haptic waveform
+//     pattern.
+// On real hardware only the RICH form actually makes the strap buzz: a short
+// "time only" write is accepted and ACK'd but the strap never fires it (there
+// is no waveform to play). Our earlier 8-byte `[u32 epoch][u32 pad]` attempt
+// silently failed for exactly this reason. Prefer [cmdSetAlarm].
+
+/// The strap's built-in alarm buzz. Two short waveform effects (47, 152) played
+/// with no per-effect loop, the overall waveform looped 7×, for 30 s — this is
+/// the default we observed the strap firing for its on-device wake alarm.
+const List<int> kDefaultAlarmHaptics = <int>[
+  47, 152, 0, 0, 0, 0, 0, 0, // 8× waveform-effect slots (2 active, 6 idle)
+  0, 0, //                       loopControlForEffects (u16 LE) = 0
+  7, //                          overallWaveformLoopControl = 7
+  30, //                         alarmDurationInSeconds = 30
+];
+
+// Split a wall-clock instant into the strap's (u32 seconds, u16 sub-seconds)
+// representation. Sub-seconds are in units of 1/32768 s (32768 Hz RTC crystal),
+// identical to SET_CLOCK.
+int _alarmEpochSec(DateTime when) => when.millisecondsSinceEpoch ~/ 1000;
+int _alarmSubsec(DateTime when) =>
+    ((when.millisecondsSinceEpoch % 1000) * 32768) ~/ 1000; // 0..32767
+
+/// SHORT alarm form (SET_ALARM_TIME = 0x42).
 ///
-/// Payload layout: `[u32 epoch LE][u32 0 pad]` — 8 bytes, mirroring SET_CLOCK
-/// (0x0A), which is the directly-analogous "write a wall-clock u32" command.
+/// Payload = 7 bytes: `[0x01][u32 epoch-seconds LE][u16 sub-seconds LE]`.
+///   - `0x01` — the form/revision marker for the time-only alarm.
+///   - epoch seconds — `when` as a unix epoch, u32 LE.
+///   - sub-seconds — `(millis % 1000) * 32768 ~/ 1000`, u16 LE (1/32768 s units).
 ///
-/// CONFIRMED:
-///   - Opcode 0x42 is the SET counterpart of GET_ALARM_TIME (0x43); DISABLE is
-///     a separate opcode (0x45). The GET_ALARM_TIME *response* decodes its epoch
-///     as a u32 LE (see parseCommandResponse → `alarm_epoch = u32(payload, 1)`),
-///     confirming the alarm time is a u32 LE unix epoch in SECONDS.
-///
-/// INFERRED (verify on real hardware):
-///   - The exact SET payload length/shape. We use the same `[u32 epoch, u32 pad]`
-///     8-byte shape as SET_CLOCK because alarm time is the same kind of value and
-///     the constants table already annotates 0x42 as `[u32 epoch LE, 0,0,0,0]`.
-///     NOTE: prior art shows SET_CLOCK's accepted length is FIRMWARE-SPECIFIC —
-///     a wrong length may ACK without latching. If the alarm fails to stick on
-///     hardware, try trimming/padding this payload to match the firmware.
-///   - The GET response has a leading byte before the epoch (decoded at offset 1,
-///     and GET is sent with a `[0x01]` read/revision byte). The SET direction is
-///     assumed NOT to need that leading byte (matching SET_CLOCK, which sends the
-///     u32 first with no toggle prefix). If SET is rejected, prepend `revision1`.
-Uint8List cmdSetAlarm(int seq, int epochSeconds) {
-  final p = Uint8List(8);
-  final bd = ByteData.sublistView(p);
-  bd.setUint32(0, epochSeconds & 0xFFFFFFFF, Endian.little);
-  // bytes [4:8] stay zero — the u32 pad, as with SET_CLOCK.
+/// ⚠ This form sets the alarm TIME but ships no haptic waveform, so on real
+/// hardware the strap ACKs it yet never buzzes. Use [cmdSetAlarm] to actually
+/// arm a firing alarm; this is kept for parity / diagnostics only.
+Uint8List cmdSetAlarmSimple(int seq, DateTime when) {
+  final sec = _alarmEpochSec(when);
+  final subsec = _alarmSubsec(when);
+  final p = <int>[
+    0x01,
+    sec & 0xff,
+    (sec >> 8) & 0xff,
+    (sec >> 16) & 0xff,
+    (sec >> 24) & 0xff,
+    subsec & 0xff,
+    (subsec >> 8) & 0xff,
+  ];
   return buildCommand(seq, Cmd.setAlarmTime, p);
+}
+
+/// RICH alarm form (SET_ALARM_TIME = 0x42) — THE form that actually fires.
+///
+/// Payload = 20 bytes:
+/// ```
+///   [0x04]                     form/revision marker for the rich alarm
+///   [u8  index]                alarm slot index (default 0)
+///   [u32 epoch-seconds LE]     when, as a unix epoch (u32 LE)
+///   [u16 sub-seconds   LE]     (millis % 1000) * 32768 ~/ 1000 (1/32768 s)
+///   [12-byte haptic pattern]   see [kDefaultAlarmHaptics] for the layout
+/// ```
+/// The 12-byte haptic pattern is:
+/// ```
+///   [8× u8 waveform-effect]    the effect sequence to play (0 = idle slot)
+///   [u16 loopControl LE]       per-effect loop control
+///   [u8  overallLoop]          how many times to loop the whole waveform
+///   [u8  durationSeconds]      max time to keep buzzing
+/// ```
+///
+/// A haptic pattern is REQUIRED for the alarm to actually buzz — the time-only
+/// [cmdSetAlarmSimple] form ACKs without firing. [hapticPattern] defaults to
+/// [kDefaultAlarmHaptics] (the strap's stock wake buzz); pass your own 12 bytes
+/// to customise. The strap confirms the alarm latched via the
+/// STRAP_DRIVEN_ALARM_SET (56) event and its firing via
+/// STRAP_DRIVEN_ALARM_EXECUTED (57) / HAPTICS_FIRED (60).
+Uint8List cmdSetAlarm(
+  int seq,
+  DateTime when, {
+  int index = 0,
+  List<int>? hapticPattern,
+}) {
+  final pattern = hapticPattern ?? kDefaultAlarmHaptics;
+  if (pattern.length != 12) {
+    throw ArgumentError.value(
+        pattern.length, 'hapticPattern.length', 'haptic pattern must be 12 bytes');
+  }
+  final sec = _alarmEpochSec(when);
+  final subsec = _alarmSubsec(when);
+  final p = <int>[
+    0x04,
+    index & 0xff,
+    sec & 0xff,
+    (sec >> 8) & 0xff,
+    (sec >> 16) & 0xff,
+    (sec >> 24) & 0xff,
+    subsec & 0xff,
+    (subsec >> 8) & 0xff,
+    ...pattern.map((b) => b & 0xff),
+  ];
+  return buildCommand(seq, Cmd.setAlarmTime, p);
+}
+
+/// Fire / test the alarm haptics immediately (RUN_ALARM = 0x44).
+///
+/// Two forms:
+///   - revision 1 (default, [mode] == null): payload `[0x01]`.
+///   - revision 2 ([mode] set): payload `[0x02][u8 mode]`, where `mode` selects
+///     the run behaviour understood by the firmware.
+Uint8List cmdRunAlarm(int seq, {int? mode}) {
+  final p = mode == null ? const [0x01] : [0x02, mode & 0xff];
+  return buildCommand(seq, Cmd.runAlarm, p);
+}
+
+/// Disable / cancel the on-device alarm (DISABLE_ALARM = 0x45).
+///
+/// Payload is the revision byte:
+///   - revision 1 (default): `[0x01]`.
+///   - revision 2: `[0x02][0xFF]` — the trailing 0xFF is the firmware's
+///     "clear all" sentinel for the rev-2 disable.
+Uint8List cmdDisableAlarm(int seq, {int revision = 1}) {
+  final p = revision == 2 ? const [0x02, 0xFF] : [revision & 0xff];
+  return buildCommand(seq, Cmd.disableAlarm, p);
 }

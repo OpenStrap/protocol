@@ -38,6 +38,9 @@ export 'src/commands.dart'
         cmdGetHelloModern,
         cmdAbortHistorical,
         cmdSendHistorical,
+        cmdGetClock,
+        cmdGetDataRange,
+        cmdSetClock,
         cmdReportVersionInfo,
         cmdGetBodyLocationAndStatus,
         cmdGetBatteryPackInfo,
@@ -49,7 +52,11 @@ export 'src/commands.dart'
         cmdToggleImu,
         cmdEnableOptical,
         cmdBuzz,
-        cmdSetAlarm;
+        cmdSetAlarm,
+        cmdSetAlarmSimple,
+        cmdRunAlarm,
+        cmdDisableAlarm,
+        kDefaultAlarmHaptics;
 
 // Control-plane parsers (HELLO / EVENT / METADATA / COMMAND_RESPONSE / dispatch).
 export 'src/control.dart'

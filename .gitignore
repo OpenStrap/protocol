@@ -2,6 +2,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# macOS
+.DS_Store
+
 # Dart
 .dart_tool/
 .packages
