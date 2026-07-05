@@ -364,6 +364,15 @@ EventInfo? parseEvent(Uint8List inner) {
     case EventId.doubleTap:
       dec['double_tap'] = true;
       break;
+    case EventId.highFreqSyncPrompt:
+      dec['high_freq_sync'] = 'prompt';
+      break;
+    case EventId.highFreqSyncEnabled:
+      dec['high_freq_sync'] = 'enabled';
+      break;
+    case EventId.highFreqSyncDisabled:
+      dec['high_freq_sync'] = 'disabled';
+      break;
   }
   return EventInfo(eid, name, ts, dec, tsSubsec: subsec, body: body);
 }
@@ -512,9 +521,16 @@ List<int>? _plausibleUnixRange(Uint8List payload) {
 class MetaMarker {
   final int sub;
   final String name;
+  final int? expectedPacketCount;
   final Uint8List? token; // 8-byte batch token (HistoryEnd only)
   final int? batchId;
-  MetaMarker(this.sub, this.name, this.token, this.batchId);
+  MetaMarker(
+    this.sub,
+    this.name,
+    this.expectedPacketCount,
+    this.token,
+    this.batchId,
+  );
 }
 
 MetaMarker? parseMetadata(Uint8List inner) {
@@ -534,14 +550,18 @@ MetaMarker? parseMetadata(Uint8List inner) {
     default:
       name = 'META_$sub';
   }
+  int? expectedPacketCount;
   Uint8List? token;
   int? batchId;
+  if (sub == SyncMeta.historyEnd && inner.length >= 13) {
+    expectedPacketCount = u32(inner, 9);
+  }
   if (sub == SyncMeta.historyEnd && inner.length >= 21) {
     token =
         Uint8List.fromList(inner.sublist(13, 21)); // the 8 bytes the ACK echoes
     batchId = u32(inner, 17);
   }
-  return MetaMarker(sub, name, token, batchId);
+  return MetaMarker(sub, name, expectedPacketCount, token, batchId);
 }
 
 // ── decode_frame dispatch (for live UI / logging) ────────────────────────────

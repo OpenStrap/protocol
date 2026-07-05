@@ -1,43 +1,49 @@
 // records.dart — 1:1 Dart port of ts/records.ts.
-// Owns the Type-24 historical biometric record (96 bytes, 1 Hz) decode.
+// Owns the WHOOP historical biometric record decode used by type-47 payloads.
 // PURE Dart — dart:typed_data only.
 
 import 'dart:typed_data';
 
 /// Decoded Type-24 historical biometric record.
 class R24 {
-  final int histVersion; // historical layout version byte @ [1]
-  final int tsEpoch; // unix seconds @ [7:11]
-  final int tsSubsec; // sub-seconds @ [11:13]
-  final int counter; // record counter @ [3:7]
-  final int hr; // heart rate bpm @ [17]
+  final int histVersion; // historical layout version byte @ inner[1] (frame[5])
+  final int tsEpoch; // unix seconds @ inner[7:11] (frame[11:15])
+  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12)
+  final int counter; // record counter @ inner[3:7] (frame[7:11])
+  final int hr; // heart rate bpm @ inner[17] (frame[21], v24/v12)
 
   /// Beat-to-beat (R-R) intervals in ms for this 1 s record, 0–4 of them.
   final int rrCount;
   final List<int> rrIntervalsMs;
 
-  /// Raw green-LED PPG ADC count @ [29].
+  /// Raw green-LED PPG ADC count @ inner[29] (frame[33]).
   final int ppgGreen;
 
-  /// Raw red/IR-LED PPG ADC count @ [31].
+  /// Raw red/IR-LED PPG ADC count @ inner[31] (frame[35]).
   final int ppgRedIr;
 
-  /// Gravity/accel vector (g), 3× float32 @ [36:48], rounded to 4 decimals.
+  /// Gravity/accel vector (g), 3x float32 @ inner[36:48] (frame[40:52]),
+  /// rounded to 4 decimals.
   final List<double> accelG;
 
-  /// Skin-contact quality @ [51] (u8, 0–198).
+  /// Skin-contact quality @ inner[51] (frame[55]) (u8, 0-198).
   final int skinContact;
 
-  /// Raw red-channel ADC @ [64] (relative).
+  /// Raw red-channel ADC @ inner[64] (frame[68], WHOOP 4 v24/v12).
+  ///
+  /// Note: WHOOP offsets are often quoted in FRAME-absolute coordinates.
+  /// `parseR24` receives the INNER record starting at packet type `0x2f`, so
+  /// every frame-absolute offset is 4 bytes lower here. That is why the v24
+  /// optical block is 64/66/68/70 in this file but 68/70/72/74 frame-absolute.
   final int spo2RedRaw;
 
-  /// Raw IR-channel ADC @ [66] (relative).
+  /// Raw IR-channel ADC @ inner[66] (frame[70], WHOOP 4 v24/v12).
   final int spo2IrRaw;
 
-  /// Raw skin-temperature ADC @ [68] (relative).
+  /// Raw skin-temperature ADC @ inner[68] (frame[72], WHOOP 4 v24/v12).
   final int skinTempRaw;
 
-  /// Raw ambient-light ADC @ [70] (relative).
+  /// Raw ambient-light ADC @ inner[70] (frame[74], WHOOP 4 v24/v12).
   final int ambientRaw;
 
   /// Untouched payload [13:] as hex — kept for re-decode as the map improves.
@@ -117,9 +123,19 @@ double _gravI16(Uint8List inner, int offset) {
 R24? _parseV25(Uint8List inner) {
   if (inner.length < 75) return null;
   final view = _view(inner);
-  // The documented v25 layout uses absolute frame offsets. Our decoder
+  // The documented v25 layout uses frame-absolute offsets. Our decoder
   // receives the inner record starting at packet type 0x2f, so subtract the
   // 4-byte transport prefix: unix 11->7 and gravity 73/75/77->69/71/73.
+  //
+  // What is KNOWN for v25:
+  //   - unix is stable at inner[7:11]
+  //   - gravity is stable at inner[69/71/73] as i16/16384
+  // What is NOT solved here:
+  //   - exact red/IR scalar offsets inside the v25 optical region
+  //   - any true SpO2% decode
+  //
+  // So v25 intentionally surfaces motion + time only and leaves the optical
+  // fields zero rather than inventing a bogus decode.
   final gx = _gravI16(inner, 69);
   final gy = _gravI16(inner, 71);
   final gz = _gravI16(inner, 73);
@@ -185,7 +201,6 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 ///     v24 field map and return it only if it is physiologically plausible.
 ///     This degrades a firmware layout change to a validated best-effort read
 ///     instead of emitting garbage.
-///
 /// Returns null if too short or if the version-specific decode fails.
 R24? parseR24(Uint8List inner) {
   if (inner.length < 2) {

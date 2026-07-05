@@ -5,6 +5,23 @@ import 'package:test/test.dart';
 
 void main() {
   group('WHOOP command builders', () {
+    test('history result success uses cmd 0x17 + success byte + token', () {
+      final frame = parseFrame(
+        buildHistoryResultOk(0x21, hexToBytes('1122334455667788')),
+      )!;
+      expect(frame.valid, isTrue);
+      expect(
+        frame.inner,
+        [0x23, 0x21, 0x17, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+      );
+    });
+
+    test('history result failure uses cmd 0x17 + failure byte', () {
+      final frame = parseFrame(buildHistoryResultFail(0x22))!;
+      expect(frame.valid, isTrue);
+      expect(frame.inner, [0x23, 0x22, 0x17, 0x00]);
+    });
+
     test('enter high-frequency sync uses revision 2 + little-endian u16s', () {
       final frame = parseFrame(
         cmdEnterHighFreqSync(0x12, intervalSeconds: 300, durationSeconds: 900),
@@ -341,6 +358,37 @@ void main() {
     test('best-effort decode is rejected when gravity is implausible', () {
       // Unknown version with near-zero gravity magnitude → null.
       expect(parseR24(record(200, hr: 72, hrOffset: 17, gz: 0.05)), isNull);
+    });
+  });
+
+  group('WHOOP event decode', () {
+    test('high-frequency prompt/enabled/disabled events are modeled', () {
+      final prompt = parseEvent(hexToBytes('3001600001020304'))!;
+      final enabled = parseEvent(hexToBytes('3001610001020304'))!;
+      final disabled = parseEvent(hexToBytes('3001620001020304'))!;
+
+      expect(prompt.eventId, EventId.highFreqSyncPrompt);
+      expect(prompt.name, 'HIGH_FREQ_SYNC_PROMPT');
+      expect(prompt.decoded['high_freq_sync'], 'prompt');
+
+      expect(enabled.eventId, EventId.highFreqSyncEnabled);
+      expect(enabled.name, 'HIGH_FREQ_SYNC_ENABLED');
+      expect(enabled.decoded['high_freq_sync'], 'enabled');
+
+      expect(disabled.eventId, EventId.highFreqSyncDisabled);
+      expect(disabled.name, 'HIGH_FREQ_SYNC_DISABLED');
+      expect(disabled.decoded['high_freq_sync'], 'disabled');
+    });
+  });
+
+  group('WHOOP metadata decode', () {
+    test('history end exposes expected packet count and ack token', () {
+      final m = parseMetadata(
+        hexToBytes('3100020000000000002a0000001122334455667788'),
+      )!;
+      expect(m.sub, SyncMeta.historyEnd);
+      expect(m.expectedPacketCount, 42);
+      expect(m.token, hexToBytes('1122334455667788'));
     });
   });
 }

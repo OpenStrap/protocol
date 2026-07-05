@@ -29,6 +29,8 @@ export 'src/framing.dart'
 export 'src/commands.dart'
     show
         buildCommand,
+        buildHistoryResultOk,
+        buildHistoryResultFail,
         buildBatchAck,
         initPackets,
         WristSelection,

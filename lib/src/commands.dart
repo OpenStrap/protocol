@@ -25,11 +25,10 @@ Uint8List buildCommand(int seq, int opcode,
   return buildFrame(inner);
 }
 
-/// The historical-sync acknowledgement (cmd 0x17).
-/// Inner = [0x23][seq][0x17][0x01] + token(8B)  -> 12-byte inner, 20-byte frame.
-/// `token` is bytes inner[13:21] of the HistoryEnd METADATA marker.
-/// THIS IS THE FRAGILE BREAKING POINT — verified byte-exact ().
-Uint8List buildBatchAck(int seq, List<int> token) {
+/// WHOOP's positive historical-burst result (cmd 0x17).
+/// Inner = [0x23][seq][0x17][0x01] + token(8B).
+/// `token` is the two 4-byte slices from the HistoryEnd METADATA marker.
+Uint8List buildHistoryResultOk(int seq, List<int> token) {
   if (token.length != 8) {
     throw ArgumentError('batch token must be 8 bytes, got ${token.length}');
   }
@@ -42,6 +41,15 @@ Uint8List buildBatchAck(int seq, List<int> token) {
   ];
   return buildFrame(inner);
 }
+
+/// The strap's negative historical-burst result (cmd 0x17).
+/// Payload is a single FAILURE result byte (the band only needs the code).
+Uint8List buildHistoryResultFail(int seq) =>
+    buildCommand(seq, Cmd.historicalDataResult, const [0x00]);
+
+/// Legacy alias used by the app transport.
+Uint8List buildBatchAck(int seq, List<int> token) =>
+    buildHistoryResultOk(seq, token);
 
 /// The 5-packet INIT handshake (hardware-verified, seq 0..4).
 /// buildCommand regenerates these byte-for-byte (protocol test asserts it).

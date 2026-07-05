@@ -152,6 +152,8 @@ class EventId {
   static const int hapticsFired = 60;
   static const int extendedBatteryInformation = 63;
   static const int highFreqSyncPrompt = 96;
+  static const int highFreqSyncEnabled = 97;
+  static const int highFreqSyncDisabled = 98;
 
   static String name(int id) {
     switch (id) {
@@ -211,6 +213,10 @@ class EventId {
         return 'EXTENDED_BATTERY_INFORMATION';
       case highFreqSyncPrompt:
         return 'HIGH_FREQ_SYNC_PROMPT';
+      case highFreqSyncEnabled:
+        return 'HIGH_FREQ_SYNC_ENABLED';
+      case highFreqSyncDisabled:
+        return 'HIGH_FREQ_SYNC_DISABLED';
       default:
         return 'EVENT_$id';
     }
