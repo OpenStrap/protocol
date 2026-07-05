@@ -34,6 +34,9 @@ class PacketType {
 /// Command opcodes (inside a 0x23 COMMAND) —. Subset we use.
 class Cmd {
   static const int linkValid = 0x01;
+  // Report the highest wire-protocol revision the strap understands. Response
+  // carries the max protocol version — used for firmware/feature gating.
+  static const int getMaxProtocolVersion = 0x02;
   static const int toggleRealtimeHr = 0x03;
   static const int reportVersionInfo = 0x07;
   static const int setClock =
@@ -42,15 +45,30 @@ class Cmd {
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
   static const int historicalDataResult = 0x17; // the batch ACK
-  static const int forceTrim = 0x19; // DANGER — never send
+  // DANGER — never send. Body is NOT empty: two LE i32 range args
+  // (full erase = both 0xFEFEFEFE). See PROTOCOL_FINDINGS.md.
+  static const int forceTrim = 0x19;
   static const int getBatteryLevel = 0x1A;
   static const int rebootStrap = 0x1D; // DANGER
+  // Hard power-cycle the strap (like pulling the battery). DANGER — never
+  // auto-fire; only a deliberate, user-driven recovery action.
+  static const int powerCycleStrap = 0x20; // DANGER
   static const int setReadPointer = 0x21;
   static const int getDataRange = 0x22;
   static const int getHelloHarvard = 0x23;
+  // Firmware-load opcodes (Cmd opcode space — distinct from PacketType 0x24
+  // COMMAND_RESPONSE, which is inner[0], not a command opcode).
+  // DANGER — never send (per PROTOCOL_FINDINGS.md destructive list).
+  static const int startFirmwareLoad = 0x24; // DANGER
+  static const int loadFirmwareData = 0x25; // DANGER
+  static const int processFirmwareImage = 0x26; // DANGER
   static const int sendR10R11Realtime = 0x3F;
-  static const int setAlarmTime = 0x42; // [u32 epoch LE, 0,0,0,0] — smart alarm
+  // On-device haptic alarm. SET carries a wall-clock epoch + a haptic waveform
+  // pattern (see cmdSetAlarm in commands.dart for the exact, hardware-verified
+  // layout). The short "epoch only" form ACKs but never buzzes.
+  static const int setAlarmTime = 0x42;
   static const int getAlarmTime = 0x43;
+  static const int runAlarm = 0x44; // fire/test the alarm haptics immediately
   static const int disableAlarm = 0x45;
   static const int getAdvertisingNameHarvard = 0x4C;
   static const int setAdvertisingNameHarvard =
@@ -75,6 +93,10 @@ const Set<int> dangerousCmds = {
   Cmd.forceTrim,
   Cmd.togglePersistentR21,
   Cmd.rebootStrap,
+  Cmd.powerCycleStrap,
+  Cmd.startFirmwareLoad,
+  Cmd.loadFirmwareData,
+  Cmd.processFirmwareImage,
 };
 
 /// Historical-data record type (inner[1] of a 0x2F / data packet).
@@ -101,12 +123,37 @@ class EventId {
   static const int wristOff = 10;
   static const int rtcLost = 13;
   static const int doubleTap = 14;
+  static const int boot = 15;
+  // The strap's RTC latched a new wall-clock time (emitted after a successful
+  // SET_CLOCK). This is our authoritative confirmation the clock stuck.
+  static const int setRtc = 16;
+  static const int temperatureLevel = 17;
   static const int batteryPackConnected = 21;
   static const int batteryPackRemoved = 22;
   static const int bleBonded = 23;
+  // Full-flash trim (data erase) started / finished on the strap.
+  static const int trimAllData = 26;
+  static const int trimAllDataEnded = 27;
   static const int flashInitComplete = 28;
+  // Optical / accel front-end saturation warnings.
+  static const int ch1Saturation = 40;
+  static const int ch2Saturation = 41;
+  static const int accelSaturation = 42;
+  static const int rawDataCollectionOn = 46;
+  static const int rawDataCollectionOff = 47;
+  // Alarm lifecycle events — how the strap tells us the alarm latched and fired.
+  // "strap-driven" = the strap's own scheduled alarm; "app-driven" = one we
+  // triggered over BLE. These 56–59 events are the confirmation that our
+  // SET_ALARM_TIME write actually took (the older short form never emitted them).
+  static const int strapDrivenAlarmSet = 56;
+  static const int strapDrivenAlarmExecuted = 57;
+  static const int appDrivenAlarmExecuted = 58;
+  static const int strapDrivenAlarmDisabled = 59;
+  static const int hapticsFired = 60;
   static const int extendedBatteryInformation = 63;
   static const int highFreqSyncPrompt = 96;
+  static const int highFreqSyncEnabled = 97;
+  static const int highFreqSyncDisabled = 98;
 
   static String name(int id) {
     switch (id) {
@@ -124,18 +171,52 @@ class EventId {
         return 'RTC_LOST';
       case doubleTap:
         return 'DOUBLE_TAP';
+      case boot:
+        return 'BOOT';
+      case setRtc:
+        return 'SET_RTC';
+      case temperatureLevel:
+        return 'TEMPERATURE_LEVEL';
       case batteryPackConnected:
         return 'BATTERY_PACK_CONNECTED';
       case batteryPackRemoved:
         return 'BATTERY_PACK_REMOVED';
       case bleBonded:
         return 'BLE_BONDED';
+      case trimAllData:
+        return 'TRIM_ALL_DATA';
+      case trimAllDataEnded:
+        return 'TRIM_ALL_DATA_ENDED';
       case flashInitComplete:
         return 'FLASH_INIT_COMPLETE';
+      case ch1Saturation:
+        return 'CH1_SATURATION_DETECTED';
+      case ch2Saturation:
+        return 'CH2_SATURATION_DETECTED';
+      case accelSaturation:
+        return 'ACCELEROMETER_SATURATION_DETECTED';
+      case rawDataCollectionOn:
+        return 'RAW_DATA_COLLECTION_ON';
+      case rawDataCollectionOff:
+        return 'RAW_DATA_COLLECTION_OFF';
+      case strapDrivenAlarmSet:
+        return 'STRAP_DRIVEN_ALARM_SET';
+      case strapDrivenAlarmExecuted:
+        return 'STRAP_DRIVEN_ALARM_EXECUTED';
+      case appDrivenAlarmExecuted:
+        return 'APP_DRIVEN_ALARM_EXECUTED';
+      case strapDrivenAlarmDisabled:
+        return 'STRAP_DRIVEN_ALARM_DISABLED';
+      case hapticsFired:
+        return 'HAPTICS_FIRED';
       case extendedBatteryInformation:
         return 'EXTENDED_BATTERY_INFORMATION';
       case highFreqSyncPrompt:
         return 'HIGH_FREQ_SYNC_PROMPT';
+      case highFreqSyncEnabled:
+        return 'HIGH_FREQ_SYNC_ENABLED';
+      case highFreqSyncDisabled:
+        return 'HIGH_FREQ_SYNC_DISABLED';
       default:
         return 'EVENT_$id';
     }

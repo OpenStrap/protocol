@@ -10,7 +10,7 @@ String _hex(List<int> b) =>
 
 void main() {
   group('framing + CRC (INIT byte-exactness)', () {
-    // HCI-snoop verbatim. Matching them validates buildFrame, crc8, crc32.
+    // Hardware-verified INIT bytes. Matching them validates buildFrame, crc8, crc32.
     const expected = [
       'aa0800a823002300ada86a2d',
       'aa0800a823014c00f2b5cdce',
@@ -39,7 +39,8 @@ void main() {
     test('round-trip: valid frame, CRCs ok, opcode 0x42, epoch decodes back', () {
       const epoch = 1735689600; // 2025-01-01T00:00:00Z, a plausible alarm time
       const seq = 9;
-      final raw = cmdSetAlarm(seq, epoch);
+      final when = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+      final raw = cmdSetAlarm(seq, when);
       final f = parseFrame(raw);
       expect(f, isNotNull);
       expect(f!.crc8Ok, isTrue);
@@ -47,11 +48,15 @@ void main() {
       expect(f.packetType, PacketType.command);
       expect(f.opcode, Cmd.setAlarmTime);
       expect(f.inner[1], seq);
-      // payload starts at inner[3]: u32 epoch LE, then u32 zero pad.
+      // Rich form: [0x04][index][u32 epoch LE][u16 subsec LE][12-byte pattern].
+      expect(f.inner[3], 0x04); // rich-form marker (the form that fires)
+      expect(f.inner[4], 0x00); // default slot index
       final bd =
           f.inner.buffer.asByteData(f.inner.offsetInBytes, f.inner.length);
-      expect(bd.getUint32(3, Endian.little), epoch);
-      expect(bd.getUint32(7, Endian.little), 0); // pad
+      expect(bd.getUint32(5, Endian.little), epoch);
+      expect(bd.getUint16(9, Endian.little), 0); // subsec (whole-second alarm)
+      // Trailing 12 bytes are the haptic pattern (default buzz).
+      expect(f.inner.sublist(11, 23), kDefaultAlarmHaptics);
     });
 
     test('SET_ALARM is NOT in dangerousCmds (normal user action)', () {

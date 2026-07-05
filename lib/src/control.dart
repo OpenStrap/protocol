@@ -316,15 +316,37 @@ class EventInfo {
   final int eventId;
   final String name;
   final int tsEpoch;
+
+  /// Sub-second remainder of the event timestamp, u16 @ [8], in units of
+  /// 1/32768 s (the 32768 Hz RTC crystal). 0 when the frame is too short.
+  final int tsSubsec;
+
+  /// The event-specific body — the frame from offset [12] onward. Empty when
+  /// the frame carries no body. Kept raw so callers can decode per event id.
+  final Uint8List body;
+
   final Map<String, dynamic> decoded;
-  EventInfo(this.eventId, this.name, this.tsEpoch, this.decoded);
+  EventInfo(
+    this.eventId,
+    this.name,
+    this.tsEpoch,
+    this.decoded, {
+    this.tsSubsec = 0,
+    Uint8List? body,
+  }) : body = body ?? Uint8List(0);
 }
 
 EventInfo? parseEvent(Uint8List inner) {
   if (inner.length < 4 || inner[0] != PacketType.event) return null;
   final eid = u16(inner, 2);
   final name = EventId.name(eid);
+  // Timestamp: whole seconds u32 @ [4], sub-seconds u16 @ [8]; the event body
+  // begins at [12]. All guarded by length so short frames degrade cleanly.
   final ts = inner.length >= 8 ? u32(inner, 4) : 0;
+  final subsec = inner.length >= 10 ? u16(inner, 8) : 0;
+  final body = inner.length > 12
+      ? Uint8List.sublistView(inner, 12)
+      : Uint8List(0);
   final dec = <String, dynamic>{};
   switch (eid) {
     case EventId.chargingOn:
@@ -342,8 +364,17 @@ EventInfo? parseEvent(Uint8List inner) {
     case EventId.doubleTap:
       dec['double_tap'] = true;
       break;
+    case EventId.highFreqSyncPrompt:
+      dec['high_freq_sync'] = 'prompt';
+      break;
+    case EventId.highFreqSyncEnabled:
+      dec['high_freq_sync'] = 'enabled';
+      break;
+    case EventId.highFreqSyncDisabled:
+      dec['high_freq_sync'] = 'disabled';
+      break;
   }
-  return EventInfo(eid, name, ts, dec);
+  return EventInfo(eid, name, ts, dec, tsSubsec: subsec, body: body);
 }
 
 // ── COMMAND_RESPONSE (0x24) ──────────────────────────────────────────────────
@@ -490,9 +521,16 @@ List<int>? _plausibleUnixRange(Uint8List payload) {
 class MetaMarker {
   final int sub;
   final String name;
+  final int? expectedPacketCount;
   final Uint8List? token; // 8-byte batch token (HistoryEnd only)
   final int? batchId;
-  MetaMarker(this.sub, this.name, this.token, this.batchId);
+  MetaMarker(
+    this.sub,
+    this.name,
+    this.expectedPacketCount,
+    this.token,
+    this.batchId,
+  );
 }
 
 MetaMarker? parseMetadata(Uint8List inner) {
@@ -512,14 +550,18 @@ MetaMarker? parseMetadata(Uint8List inner) {
     default:
       name = 'META_$sub';
   }
+  int? expectedPacketCount;
   Uint8List? token;
   int? batchId;
+  if (sub == SyncMeta.historyEnd && inner.length >= 13) {
+    expectedPacketCount = u32(inner, 9);
+  }
   if (sub == SyncMeta.historyEnd && inner.length >= 21) {
     token =
         Uint8List.fromList(inner.sublist(13, 21)); // the 8 bytes the ACK echoes
     batchId = u32(inner, 17);
   }
-  return MetaMarker(sub, name, token, batchId);
+  return MetaMarker(sub, name, expectedPacketCount, token, batchId);
 }
 
 // ── decode_frame dispatch (for live UI / logging) ────────────────────────────

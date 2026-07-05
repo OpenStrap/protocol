@@ -1,43 +1,49 @@
 // records.dart — 1:1 Dart port of ts/records.ts.
-// Owns the Type-24 historical biometric record (96 bytes, 1 Hz) decode.
+// Owns the WHOOP historical biometric record decode used by type-47 payloads.
 // PURE Dart — dart:typed_data only.
 
 import 'dart:typed_data';
 
 /// Decoded Type-24 historical biometric record.
 class R24 {
-  final int histVersion; // historical layout version byte @ [1]
-  final int tsEpoch; // unix seconds @ [7:11]
-  final int tsSubsec; // sub-seconds @ [11:13]
-  final int counter; // record counter @ [3:7]
-  final int hr; // heart rate bpm @ [17]
+  final int histVersion; // historical layout version byte @ inner[1] (frame[5])
+  final int tsEpoch; // unix seconds @ inner[7:11] (frame[11:15])
+  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12)
+  final int counter; // record counter @ inner[3:7] (frame[7:11])
+  final int hr; // heart rate bpm @ inner[17] (frame[21], v24/v12)
 
   /// Beat-to-beat (R-R) intervals in ms for this 1 s record, 0–4 of them.
   final int rrCount;
   final List<int> rrIntervalsMs;
 
-  /// Raw green-LED PPG ADC count @ [29].
+  /// Raw green-LED PPG ADC count @ inner[29] (frame[33]).
   final int ppgGreen;
 
-  /// Raw red/IR-LED PPG ADC count @ [31].
+  /// Raw red/IR-LED PPG ADC count @ inner[31] (frame[35]).
   final int ppgRedIr;
 
-  /// Gravity/accel vector (g), 3× float32 @ [36:48], rounded to 4 decimals.
+  /// Gravity/accel vector (g), 3x float32 @ inner[36:48] (frame[40:52]),
+  /// rounded to 4 decimals.
   final List<double> accelG;
 
-  /// Skin-contact quality @ [51] (u8, 0–198).
+  /// Skin-contact quality @ inner[51] (frame[55]) (u8, 0-198).
   final int skinContact;
 
-  /// Raw red-channel ADC @ [64] (relative).
+  /// Raw red-channel ADC @ inner[64] (frame[68], WHOOP 4 v24/v12).
+  ///
+  /// Note: WHOOP offsets are often quoted in FRAME-absolute coordinates.
+  /// `parseR24` receives the INNER record starting at packet type `0x2f`, so
+  /// every frame-absolute offset is 4 bytes lower here. That is why the v24
+  /// optical block is 64/66/68/70 in this file but 68/70/72/74 frame-absolute.
   final int spo2RedRaw;
 
-  /// Raw IR-channel ADC @ [66] (relative).
+  /// Raw IR-channel ADC @ inner[66] (frame[70], WHOOP 4 v24/v12).
   final int spo2IrRaw;
 
-  /// Raw skin-temperature ADC @ [68] (relative).
+  /// Raw skin-temperature ADC @ inner[68] (frame[72], WHOOP 4 v24/v12).
   final int skinTempRaw;
 
-  /// Raw ambient-light ADC @ [70] (relative).
+  /// Raw ambient-light ADC @ inner[70] (frame[74], WHOOP 4 v24/v12).
   final int ambientRaw;
 
   /// Untouched payload [13:] as hex — kept for re-decode as the map improves.
@@ -109,12 +115,27 @@ double _gravI16(Uint8List inner, int offset) {
   return _round(v / 16384.0, 4);
 }
 
+/// Decode a v25 (PPG-derived) historical record. Unlike v24, the v25 field map
+/// comes purely from our own device captures — it has no independent
+/// cross-reference, so it is LOWER-CONFIDENCE: we decode timing + gravity and
+/// deliberately leave HR at 0 (v25 carries no honest 1 Hz beat). It is gated on
+/// a gravity-magnitude sanity check to avoid emitting garbage.
 R24? _parseV25(Uint8List inner) {
   if (inner.length < 75) return null;
   final view = _view(inner);
-  // The documented v25 layout uses absolute frame offsets. Our decoder
+  // The documented v25 layout uses frame-absolute offsets. Our decoder
   // receives the inner record starting at packet type 0x2f, so subtract the
   // 4-byte transport prefix: unix 11->7 and gravity 73/75/77->69/71/73.
+  //
+  // What is KNOWN for v25:
+  //   - unix is stable at inner[7:11]
+  //   - gravity is stable at inner[69/71/73] as i16/16384
+  // What is NOT solved here:
+  //   - exact red/IR scalar offsets inside the v25 optical region
+  //   - any true SpO2% decode
+  //
+  // So v25 intentionally surfaces motion + time only and leaves the optical
+  // fields zero rather than inventing a bogus decode.
   final gx = _gravI16(inner, 69);
   final gy = _gravI16(inner, 71);
   final gz = _gravI16(inner, 73);
@@ -140,8 +161,46 @@ R24? _parseV25(Uint8List inner) {
   );
 }
 
+/// HR-byte offset within the record inner, keyed by the layout version byte
+/// (inner[1]). The header (counter @ [3], ts @ [7], subsec @ [11]) is shared
+/// across versions; only the HR byte moves. Established from our own hardware
+/// captures across the layout versions the strap has served us.
+const Map<int, int> _hrOffsetByVersion = {
+  7: 27,
+  9: 17,
+  12: 17,
+  18: 14,
+  24: 17,
+};
+
+/// Physiological plausibility gate for a best-effort decode: the gravity vector
+/// must have magnitude ≈ 1 g (0.5–1.8 g) AND HR must be in a live human range
+/// (25–230 bpm). Used to guard speculative decodes (unrecognised versions, or
+/// versions where only the HR offset — not the full field map — is confirmed).
+/// Compared on magnitude-squared to avoid a sqrt.
+bool _physiologicallyPlausible(List<double> accelG, int hr) {
+  if (hr < 25 || hr > 230) return false;
+  if (accelG.length != 3) return false;
+  final magSq = accelG[0] * accelG[0] +
+      accelG[1] * accelG[1] +
+      accelG[2] * accelG[2];
+  return magSq >= 0.25 && magSq <= 3.24; // 0.5 g .. 1.8 g
+}
+
 /// Decode a WHOOP 4 historical biometric record. `inner` starts at the
-/// packet-type byte. Auto-routes supported layout versions (`24`, `25`).
+/// packet-type byte.
+///
+/// Routing:
+///   - v25 → the PPG-derived layout ([_parseV25]).
+///   - v24 / v12 → our hardware-validated field map, returned as-is.
+///   - v18 / v9 / v7 → the SAME field map but with the HR byte read at that
+///     version's offset (only the HR offset is independently confirmed for
+///     these, so the decode is returned only if it passes a physiological
+///     plausibility gate — otherwise null).
+///   - any other version → treated as an unknown/future layout: we attempt the
+///     v24 field map and return it only if it is physiologically plausible.
+///     This degrades a firmware layout change to a validated best-effort read
+///     instead of emitting garbage.
 /// Returns null if too short or if the version-specific decode fails.
 R24? parseR24(Uint8List inner) {
   if (inner.length < 2) {
@@ -150,9 +209,23 @@ R24? parseR24(Uint8List inner) {
 
   final version = inner[1];
   if (version == 25) return _parseV25(inner);
-  if (version != 24 && version != 12) {
-    return null;
-  }
+
+  // v24 / v12 are our validated map and are trusted verbatim; every other
+  // version is a best-effort decode gated on physiological plausibility.
+  final trusted = version == 24 || version == 12;
+  final hrOffset = _hrOffsetByVersion[version] ?? 17;
+  return _parseV24Layout(inner, version, hrOffset: hrOffset, validate: !trusted);
+}
+
+/// Decode the WHOOP 4 v24 field map with a parameterised HR offset. When
+/// [validate] is set the result is returned only if it passes
+/// [_physiologicallyPlausible]; otherwise (v24/v12) it is returned verbatim.
+R24? _parseV24Layout(
+  Uint8List inner,
+  int version, {
+  required int hrOffset,
+  required bool validate,
+}) {
   if (inner.length < 89) {
     return null;
   }
@@ -170,21 +243,28 @@ R24? parseR24(Uint8List inner) {
     if (v > 0) rrIntervalsMs.add(v);
   }
 
+  final hr = inner[hrOffset];
+  final accelG = [
+    _round(view.getFloat32(36, Endian.little), 4),
+    _round(view.getFloat32(40, Endian.little), 4),
+    _round(view.getFloat32(44, Endian.little), 4),
+  ];
+
+  if (validate && !_physiologicallyPlausible(accelG, hr)) {
+    return null;
+  }
+
   return R24(
     histVersion: version,
     tsEpoch: view.getUint32(7, Endian.little),
     tsSubsec: view.getUint16(11, Endian.little),
     counter: view.getUint32(3, Endian.little),
-    hr: inner[17],
+    hr: hr,
     rrCount: rrCount,
     rrIntervalsMs: rrIntervalsMs,
     ppgGreen: view.getUint16(29, Endian.little),
     ppgRedIr: view.getUint16(31, Endian.little),
-    accelG: [
-      _round(view.getFloat32(36, Endian.little), 4),
-      _round(view.getFloat32(40, Endian.little), 4),
-      _round(view.getFloat32(44, Endian.little), 4),
-    ],
+    accelG: accelG,
     skinContact: inner[51],
     spo2RedRaw: view.getUint16(64, Endian.little),
     spo2IrRaw: view.getUint16(66, Endian.little),
