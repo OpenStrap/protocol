@@ -127,8 +127,9 @@ RealtimeRrResult? realtimeRr(String hex) {
   final ts = view.getUint32(tsOff, Endian.little);
   if (ts <= 0) return null;
   final n = b[cntOff];
-  if (n == 0 || n > 8)
+  if (n == 0 || n > 8) {
     return null; // realtime carries 0–4; large count = wrong offset
+  }
   final rrMs = <int>[];
   final first = cntOff + 1;
   for (int i = 0; i < n && first + 2 * i + 2 <= b.length; i++) {
