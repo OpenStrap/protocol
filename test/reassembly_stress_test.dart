@@ -4,8 +4,6 @@
 // Reproduces the "first read correct, second read garbled (esp. name)" report if
 // the reassembler carries state between reads.
 
-import 'dart:typed_data';
-
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 

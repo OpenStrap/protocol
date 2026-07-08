@@ -359,6 +359,94 @@ void main() {
       // Unknown version with near-zero gravity magnitude → null.
       expect(parseR24(record(200, hr: 72, hrOffset: 17, gz: 0.05)), isNull);
     });
+
+    // Regression: a real device (user export, 2026-07) sent 11k+ consecutive
+    // v12 records that were all exactly 88 bytes — one under parseR24's
+    // 89-byte floor — and every one was silently archived as
+    // "undecodable_rec_v12". That's a total sync outage for that user, not a
+    // cosmetic gap. Fix: parseR24 itself stays exactly as validated (never
+    // loosened); FirmwareAwareR24Decoder tries it first, then a 72-byte
+    // fallback layout, before giving up.
+    test('bare parseR24 still rejects an 88-byte v12 record (unchanged)', () {
+      final full = record(12, hr: 65, hrOffset: 17);
+      final short88 = Uint8List.sublistView(full, 0, 88);
+      expect(parseR24(short88), isNull);
+    });
+
+    test(
+        'FirmwareAwareR24Decoder recovers the 88-byte v12 record via the '
+        'fallback chain', () {
+      final full = record(12, hr: 65, hrOffset: 17);
+      final short88 = Uint8List.sublistView(full, 0, 88);
+      final decoder = FirmwareAwareR24Decoder();
+      final r = decoder.decode(short88)!;
+      expect(r.histVersion, 12);
+      expect(r.hr, 65);
+      expect(r.counter, 0x0A0B0C0D);
+      expect(r.tsEpoch, 0x11223344);
+      expect(decoder.detectedStrategies[12], 'short_frame_72b');
+    });
+
+    test(
+        'FirmwareAwareR24Decoder decodes the exact real-world 88-byte v12 '
+        'record (raw capture)', () {
+      // Captured verbatim from a user's raw_archive export.
+      final r = FirmwareAwareR24Decoder().decode(hexToBytes(
+        '2f0c05ab7c4a019e814e6a300180644001560000000000000000000060c803'
+        'f2a08df23c5c4b033f29d84b3f5c9f16be007c39c65c4b033f29d84b3f5c9f1'
+        '6be41027b020a047b024601a006010ba2070000009052f20001',
+      ))!;
+      expect(r.histVersion, 12);
+    });
+
+    test(
+        'FirmwareAwareR24Decoder still returns null below the 72-byte floor',
+        () {
+      final full = record(12, hr: 65, hrOffset: 17);
+      final tooShort = Uint8List.sublistView(full, 0, 71);
+      expect(FirmwareAwareR24Decoder().decode(tooShort), isNull);
+    });
+
+    test(
+        'FirmwareAwareR24Decoder keeps v12 trusted/un-gated at the shorter '
+        'length', () {
+      // HR=0 (off-wrist) must still decode on the trusted path at 72 bytes —
+      // the fallback layout must not accidentally start gating v12.
+      final full = record(12, hr: 0, hrOffset: 17, gz: 0.0);
+      final atMin = Uint8List.sublistView(full, 0, 72);
+      final r = FirmwareAwareR24Decoder().decode(atMin)!;
+      expect(r.histVersion, 12);
+      expect(r.hr, 0);
+    });
+
+    test(
+        'FirmwareAwareR24Decoder prefers the FIRST-detected strategy on '
+        'later calls, but re-probes if it stops matching', () {
+      final decoder = FirmwareAwareR24Decoder();
+      final full89 = record(12, hr: 70, hrOffset: 17);
+      final short88 = Uint8List.sublistView(record(12, hr: 71, hrOffset: 17), 0, 88);
+
+      // First record is full-length → legacy strategy wins and is remembered.
+      expect(decoder.decode(full89)!.hr, 70);
+      expect(decoder.detectedStrategies[12], 'legacy_89b');
+
+      // A later record from the same "detected" version that's actually
+      // short must still decode by falling through, and detection updates.
+      expect(decoder.decode(short88)!.hr, 71);
+      expect(decoder.detectedStrategies[12], 'short_frame_72b');
+    });
+
+    test('FirmwareAwareR24Decoder detects independently per record version',
+        () {
+      final decoder = FirmwareAwareR24Decoder();
+      final v12Short =
+          Uint8List.sublistView(record(12, hr: 65, hrOffset: 17), 0, 88);
+      final v24Full = record(24, hr: 80, hrOffset: 17);
+      decoder.decode(v12Short);
+      decoder.decode(v24Full);
+      expect(decoder.detectedStrategies[12], 'short_frame_72b');
+      expect(decoder.detectedStrategies[24], 'legacy_89b');
+    });
   });
 
   group('WHOOP event decode', () {

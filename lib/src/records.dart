@@ -217,16 +217,39 @@ R24? parseR24(Uint8List inner) {
   return _parseV24Layout(inner, version, hrOffset: hrOffset, validate: !trusted);
 }
 
+/// The original, hardware-validated minimum length for the v24 field map.
+/// This is the FIRST thing [FirmwareAwareR24Decoder] tries for every record
+/// — it must never be loosened here. (2026-07: a real device was found
+/// sending well-formed, otherwise-valid v12 records at only 88 bytes; rather
+/// than weaken this validated baseline for everyone, that firmware variant
+/// gets its own fallback layout below — see [_shortFrameMinLength] and
+/// [FirmwareAwareR24Decoder].)
+const int _legacyMinLength = 89;
+
+/// The minimum length actually required to read every field this layout
+/// touches — the last one is `ambientRaw`, a u16 at inner[70:72]. Firmware
+/// that omits the (apparently unused-by-us) trailing bytes between 72 and 89
+/// still decodes correctly against this shorter threshold. Only reached via
+/// [FirmwareAwareR24Decoder] AFTER the legacy 89-byte attempt has failed —
+/// never used as the default, so devices matching the original validated
+/// shape are completely unaffected.
+const int _shortFrameMinLength = 72;
+
 /// Decode the WHOOP 4 v24 field map with a parameterised HR offset. When
 /// [validate] is set the result is returned only if it passes
 /// [_physiologicallyPlausible]; otherwise (v24/v12) it is returned verbatim.
+/// [minLength] defaults to the original hardware-validated [_legacyMinLength]
+/// so every existing direct caller (i.e. [parseR24]) is byte-for-byte
+/// unchanged; [FirmwareAwareR24Decoder] is the only caller that passes a
+/// shorter fallback value.
 R24? _parseV24Layout(
   Uint8List inner,
   int version, {
   required int hrOffset,
   required bool validate,
+  int minLength = _legacyMinLength,
 }) {
-  if (inner.length < 89) {
+  if (inner.length < minLength) {
     return null;
   }
 
@@ -280,4 +303,95 @@ String _hexFrom(Uint8List b, int start) {
     sb.write(b[i].toRadixString(16).padLeft(2, '0'));
   }
   return sb.toString();
+}
+
+/// One decode attempt for a historical-record version, tried in order by
+/// [FirmwareAwareR24Decoder]. `name` is diagnostics-only (surfaced via
+/// [FirmwareAwareR24Decoder.detectedStrategy]) and has no effect on decode
+/// behavior.
+class R24DecodeStrategy {
+  const R24DecodeStrategy(this.name, this.decode);
+  final String name;
+  final R24? Function(Uint8List inner) decode;
+}
+
+/// The ordered fallback chain [FirmwareAwareR24Decoder] tries for every
+/// record version routed through [_parseV24Layout] (i.e. every version
+/// except v25, which has its own dedicated layout). Index 0 is always
+/// [parseR24] itself — the original, hardware-validated decoder — completely
+/// unmodified. Later entries are progressively looser, real-firmware-driven
+/// fallbacks: add new ones here (never reorder or remove existing ones)
+/// as new firmware variants are identified.
+final List<R24DecodeStrategy> _v24FallbackChain = [
+  R24DecodeStrategy('legacy_89b', parseR24),
+  R24DecodeStrategy('short_frame_72b', (inner) {
+    if (inner.length < 2) return null;
+    final version = inner[1];
+    if (version == 25) return null; // v25 has no known length variant; handled by parseR24 alone.
+    final trusted = version == 24 || version == 12;
+    final hrOffset = _hrOffsetByVersion[version] ?? 17;
+    return _parseV24Layout(
+      inner,
+      version,
+      hrOffset: hrOffset,
+      validate: !trusted,
+      minLength: _shortFrameMinLength,
+    );
+  }),
+];
+
+/// Firmware-aware, per-session historical-record decoder.
+///
+/// Different physical WHOOP 4 units have been observed sending the exact
+/// same record version at a different wire length than the one we
+/// originally validated hardware against (2026-07: a real device sent 11k+
+/// consecutive, otherwise-well-formed v12 records at 88 bytes — one under
+/// the 89-byte floor [parseR24] requires). Rather than loosen the validated
+/// decoder for every device, each record is tried against [_v24FallbackChain]
+/// IN ORDER — the original decoder first, newer fallbacks after — and the
+/// strategy that first succeeds for a given version byte is remembered so
+/// the rest of the session skips straight to it instead of re-probing every
+/// record. If every strategy fails, [decode] returns null exactly like
+/// [parseR24] would, so the caller's existing "archive as undecodable"
+/// handling (raw_archive) is unchanged.
+///
+/// Construct ONE instance per BLE session/connection (like
+/// [FrameReassembler]) — detected-firmware state must not leak across a
+/// different physical band pairing.
+class FirmwareAwareR24Decoder {
+  final Map<int, String> _detectedByVersion = {};
+
+  /// The strategy name detected so far this session, keyed by record version
+  /// byte — diagnostics/telemetry only (e.g. surfacing "this band needed the
+  /// 72-byte v12 fallback"). Never affects decode behavior.
+  Map<int, String> get detectedStrategies => Map.unmodifiable(_detectedByVersion);
+
+  R24? decode(Uint8List inner) {
+    if (inner.length < 2) return null;
+    final version = inner[1];
+    if (version == 25) return parseR24(inner); // no known firmware variant for v25 yet.
+
+    final knownName = _detectedByVersion[version];
+    if (knownName != null) {
+      final known = _v24FallbackChain.firstWhere(
+        (s) => s.name == knownName,
+        orElse: () => _v24FallbackChain.first,
+      );
+      final r = known.decode(inner);
+      if (r != null) return r;
+      // The previously-detected strategy stopped working for this record
+      // (e.g. a mid-session firmware update, or one anomalous frame) — fall
+      // through and re-probe the full chain below rather than permanently
+      // failing every subsequent record from this version.
+    }
+
+    for (final strategy in _v24FallbackChain) {
+      final r = strategy.decode(inner);
+      if (r != null) {
+        _detectedByVersion[version] = strategy.name;
+        return r;
+      }
+    }
+    return null; // every strategy failed — caller archives as undecodable, as before.
+  }
 }

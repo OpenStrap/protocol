@@ -7,7 +7,8 @@
 library openstrap_protocol;
 
 // Source 1 — record decoders.
-export 'src/records.dart' show R24, parseR24;
+export 'src/records.dart'
+    show R24, parseR24, FirmwareAwareR24Decoder, R24DecodeStrategy;
 export 'src/live.dart'
     show
         DecodedSample,
