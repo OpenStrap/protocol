@@ -41,9 +41,12 @@ class ImuFrame {
   final int ts;
   final int idx;
   final List<double> mags;
-  ImuFrame(this.ts, this.idx, this.mags);
+  final List<double>? xs;
+  final List<double>? ys;
+  final List<double>? zs;
+  ImuFrame(this.ts, this.idx, this.mags, [this.xs, this.ys, this.zs]);
 
-  Map<String, dynamic> toMap() => {'ts': ts, 'idx': idx, 'mags': mags};
+  Map<String, dynamic> toMap() => {'ts': ts, 'idx': idx, 'mags': mags, 'xs': xs, 'ys': ys, 'zs': zs};
 }
 
 Uint8List hexToBytes(String hex) {
@@ -76,25 +79,37 @@ ImuFrame? frameAccel(String hex) {
     final ts = view.getUint32(4, Endian.little);
     final idx = view.getUint16(14, Endian.little);
     final mags = <double>[];
+    final xs = <double>[];
+    final ys = <double>[];
+    final zs = <double>[];
     for (int i = 0; i < 10; i++) {
       final x = view.getInt16(24 + 2 * i, Endian.little);
       final y = view.getInt16(24 + 2 * (10 + i), Endian.little);
       final z = view.getInt16(24 + 2 * (20 + i), Endian.little);
+      xs.add(x.toDouble());
+      ys.add(y.toDouble());
+      zs.add(z.toDouble());
       mags.add(math.sqrt(x * x + y * y + z * z) / 4096);
     }
-    return ts > 0 ? ImuFrame(ts, idx, mags) : null;
+    return ts > 0 ? ImuFrame(ts, idx, mags, xs, ys, zs) : null;
   }
   // R10: rec 0x0A, ts@7, accel X@85/Y@285/Z@485 (100 int16 each).
   if (rec == 0x0a && b.length >= 685) {
     final ts = view.getUint32(7, Endian.little);
     final mags = <double>[];
+    final xs = <double>[];
+    final ys = <double>[];
+    final zs = <double>[];
     for (int i = 0; i < 100; i++) {
       final x = view.getInt16(85 + 2 * i, Endian.little);
       final y = view.getInt16(285 + 2 * i, Endian.little);
       final z = view.getInt16(485 + 2 * i, Endian.little);
+      xs.add(x.toDouble());
+      ys.add(y.toDouble());
+      zs.add(z.toDouble());
       mags.add(math.sqrt(x * x + y * y + z * z) / 4096);
     }
-    return ts > 0 ? ImuFrame(ts, 0, mags) : null;
+    return ts > 0 ? ImuFrame(ts, 0, mags, xs, ys, zs) : null;
   }
   return null;
 }
