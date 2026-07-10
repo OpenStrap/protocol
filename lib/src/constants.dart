@@ -102,6 +102,7 @@ const Set<int> dangerousCmds = {
 /// Historical-data record type (inner[1] of a 0x2F / data packet).
 class Record {
   static const int r10 = 10;
+  static const int r12 = 12;
   static const int r21 = 21;
   static const int r24 = 24;
   static const int r25 = 25;
