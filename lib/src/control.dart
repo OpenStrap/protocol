@@ -172,25 +172,29 @@ class RealtimeHr {
   RealtimeHr(this.hrBpm, this.hrPrecise, this.rrMs, this.wearing, this.tsRaw);
 }
 
-/// 0x28 HR payload: [0:4]ts [4:6]HR u16/256 [6]rr_count [7:9]rr1 [9:11]rr2 [15]wearing.
-RealtimeHr? parseRealtimeHr(Uint8List body) {
-  if (body.length < 7) return null;
-  final ts = u32(body, 0);
-  final hrPrecise = u16(body, 4) / 256.0;
-  final hr = hrPrecise.round();
+// was reading ts/hr one byte off from the real layout (used to slice off 3
+// header bytes before calling this, which put hr at the wrong spot). checked
+// against live.dart's realtimeRr/decodeRecord which are already verified
+// against the ts parity oracle, and lines up like this instead:
+// ts@2 (u32), hr@8 (u8, not u16/256), rr_count@9, rr1@10, rr2@12, wearing@18.
+// so this now just takes the whole inner frame, not a pre-sliced body.
+RealtimeHr? parseRealtimeHr(Uint8List inner) {
+  if (inner.length < 9) return null;
+  final ts = u32(inner, 2);
+  final hr = inner[8];
   if (hr < 1 || hr > 250) return null;
   final rr = <int>[];
-  final n = body[6];
-  if (n > 0 && body.length >= 9) {
-    final v = u16(body, 7);
+  final n = inner[9];
+  if (n > 0 && inner.length >= 12) {
+    final v = u16(inner, 10);
     if (v >= 200 && v <= 2500) rr.add(v);
   }
-  if (n > 1 && body.length >= 11) {
-    final v = u16(body, 9);
+  if (n > 1 && inner.length >= 14) {
+    final v = u16(inner, 12);
     if (v >= 200 && v <= 2500) rr.add(v);
   }
-  final wearing = body.length > 15 ? body[15] == 1 : true;
-  return RealtimeHr(hr, _round(hrPrecise, 2), rr, wearing, ts);
+  final wearing = inner.length > 18 ? inner[18] == 1 : true;
+  return RealtimeHr(hr, hr.toDouble(), rr, wearing, ts);
 }
 
 RealtimeHrV2? parseRealtimeHrV2(Uint8List body) {
@@ -615,9 +619,7 @@ Decoded _decodeDataRecord(Uint8List inner) {
   final recType = inner.length > 1 ? inner[1] : -1;
   // Compact realtime stream (small packet).
   if (inner.length < 64) {
-    final body =
-        inner.length > 3 ? Uint8List.sublistView(inner, 3) : Uint8List(0);
-    final hr = parseRealtimeHr(body);
+    final hr = parseRealtimeHr(inner);
     if (hr != null) {
       return Decoded('realtime_hr', {
         'rec_type': recType,

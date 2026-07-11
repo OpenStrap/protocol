@@ -59,6 +59,10 @@ Frame? parseFrame(Uint8List raw) {
   if (raw.length < 8 || raw[0] != sof) return null;
   final bd = raw.buffer.asByteData(raw.offsetInBytes, raw.length);
   final declared = bd.getUint16(1, Endian.little);
+  // declared has to be at least 4 (the trailing crc32) or the inner slice
+  // math below goes negative and sublistView throws instead of us just
+  // saying "not a valid frame" like the length checks above already do.
+  if (declared < 4) return null;
   final crc8Ok = raw[3] == crc8(Uint8List.sublistView(raw, 1, 3));
   const innerStart = 4;
   final total = 4 + declared;

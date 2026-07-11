@@ -49,8 +49,12 @@ String? _diff(dynamic actual, dynamic expected, String path) {
       if (d != null) return d;
     }
     // Ensure actual carries no extra keys that expected lacks (1:1 shape).
+    // xs/ys/zs got added to ImuFrame.toMap() for raw-axis diagnostics after
+    // these fixtures were generated from the TS oracle, so they're not in
+    // `expected` here - allow just those, still fail on anything else new.
+    const allowedExtras = {'xs', 'ys', 'zs'};
     for (final k in actual.keys) {
-      if (!expected.containsKey(k)) {
+      if (!expected.containsKey(k) && !allowedExtras.contains(k)) {
         return 'at $path.$k: unexpected extra key (value ${actual[k]})';
       }
     }
