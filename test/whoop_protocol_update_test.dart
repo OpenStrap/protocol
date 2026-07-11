@@ -497,9 +497,30 @@ void main() {
 
       final decoded = decodeFrame(Frame(b, true, true));
       expect(decoded.kind, 'realtime_hr');
+      // copilot review flagged this - the whole point of the bug was
+      // corrupted timestamps, and this test never actually checked one.
+      expect(decoded.fields['ts_epoch'], 1780840486);
       expect(decoded.fields['hr'], 65);
       expect(decoded.fields['rr_ms'], [900]);
       expect(decoded.fields['wearing'], isTrue);
+    });
+
+    // copilot review also caught a real one: a 9-byte packet (ts+hr, no
+    // rr_count byte at all) would read inner[9] out of bounds and throw
+    // instead of decoding. fixed to treat a missing rr_count byte as "no RR
+    // intervals" rather than crashing.
+    test('a 9-byte packet (ts+hr only, no rr_count byte) decodes instead of throwing', () {
+      final b = Uint8List(9);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x28;
+      bd.setUint32(2, 1780840486, Endian.little);
+      b[8] = 65;
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      expect(decoded.fields['ts_epoch'], 1780840486);
+      expect(decoded.fields['hr'], 65);
+      expect(decoded.fields['rr_ms'], isEmpty);
     });
   });
 }

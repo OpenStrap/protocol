@@ -184,7 +184,10 @@ RealtimeHr? parseRealtimeHr(Uint8List inner) {
   final hr = inner[8];
   if (hr < 1 || hr > 250) return null;
   final rr = <int>[];
-  final n = inner[9];
+  // a 9-byte packet has ts+hr but nothing past it - inner[9] (rr_count) would
+  // be one byte out of bounds. no rr_count byte just means no RR intervals,
+  // not "reject this decode" (copilot review caught this, real bug).
+  final n = inner.length > 9 ? inner[9] : 0;
   if (n > 0 && inner.length >= 12) {
     final v = u16(inner, 10);
     if (v >= 200 && v <= 2500) rr.add(v);
@@ -623,6 +626,7 @@ Decoded _decodeDataRecord(Uint8List inner) {
     if (hr != null) {
       return Decoded('realtime_hr', {
         'rec_type': recType,
+        'ts_epoch': hr.tsRaw,
         'hr': hr.hrBpm,
         'hr_precise': hr.hrPrecise,
         'rr_ms': hr.rrMs,
