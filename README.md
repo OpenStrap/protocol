@@ -1,87 +1,113 @@
 # OpenStrap protocol
 
-These are the decoders. You hand them an already-unwrapped chunk of bytes from the band,
-they hand you back a record with named fields. That's the whole job. No Bluetooth, no
-CRCs, no reassembly, just bytes turning into meaning. The
-[backend](https://github.com/OpenStrap/backend) calls these server-side to make sense of
-the frames your phone uploads.
+Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
+band, it hands you back a record with named fields, or a decoded command/event. That's
+the whole job.
 
-It's small because it's only the part the production stack actually runs in TypeScript.
-If you want the full picture, the byte-by-byte map, the framing, the command set, the sync
-handshake, that all lives in the [research repo](https://github.com/OpenStrap/research)
-in `PROTOCOL.md`. This is the working subset, ported and trimmed.
+This isn't backend-side anymore — the app ([edge](https://github.com/OpenStrap/edge))
+depends on this package directly and calls it on-device. There's no cloud, no upload, no
+server that ever sees your raw bytes.
 
 > Not affiliated with WHOOP. This is for reading your own band's data.
 
+## What's actually in here
+
+- `records.dart` — the record decoders (`R24`, `parseR24`, and the firmware-aware
+  fallback chain for older/short frames — see below).
+- `live.dart` — the live/high-rate stuff: R10, the 0x28 compact-HR stream, the 0x33 IMU
+  stream, RR-interval extraction.
+- `framing.dart` — the actual byte-level framing: `0xAA` start-of-frame, CRC8 length
+  check, CRC32 payload check, the length-based reassembler. This lives HERE, not
+  upstream — a previous version of this README claimed there was no framing code in this
+  package at all, which stopped being true a while ago.
+- `crc.dart` — crc8/crc32.
+- `commands.dart` / `control.dart` — command builders (SET_CLOCK, alarms, sync commands,
+  etc.) and the control-plane decoders (HELLO, events, command responses, metadata/sync
+  markers).
+- `constants.dart` — the GATT UUIDs, opcode tables, event IDs.
+
 ## The one record that matters most
 
-`parse_r24` decodes the 1 Hz historical record, which is the bulk of what comes off the
-band during a sync, one of these per second of wear. Give it the inner payload (89 bytes
-or more) and you get back this, or `null` if it's too short:
+`parseR24` decodes the 1 Hz historical record — the bulk of what comes off the band
+during a sync, one of these per second of wear. Give it the inner payload and you get
+back an `R24`, or `null` if it doesn't decode:
 
-```ts
-interface R24 {
-  ts_epoch: number;          // [7:11]   unix seconds
-  ts_subsec: number;         // [11:13]
-  counter: number;           // [3:7]    goes up by one each record
-  hr: number;                // [17]     heart rate, 0 means no reading
-  spo2: number;              // [72]     blood oxygen %
-  skin_temp_c: number;       // [70]/4   skin temperature in °C
-  resting_hr: number;        // [88]     a held baseline, not your live HR
-  accel_g: [number, number, number]; // [36:48]  three little-endian floats, in g
-  raw_tail: string;          // [13:]    the whole payload as hex, kept untouched
+```dart
+class R24 {
+  final int histVersion;     // layout version byte @ inner[1]
+  final int tsEpoch;         // unix seconds @ inner[7:11]
+  final int tsSubsec;        // sub-seconds @ inner[11:13]
+  final int counter;         // record counter @ inner[3:7]
+  final int hr;               // heart rate bpm @ inner[17] — 0 means off-wrist, not bradycardia
+  final int rrCount;          // 0-4 beat-to-beat intervals this second
+  final List<int> rrIntervalsMs;
+  final int ppgGreen;         // raw green-LED PPG ADC @ inner[29]
+  final int ppgRedIr;         // raw red/IR-LED PPG ADC @ inner[31]
+  final List<double> accelG;  // 3x float32 gravity vector @ inner[36:48]
+  final int skinContact;      // contact QUALITY @ inner[51] — NOT wear/on-wrist state
+  final int spo2RedRaw;       // raw red-channel ADC @ inner[64]
+  final int spo2IrRaw;        // raw IR-channel ADC @ inner[66]
+  final int skinTempRaw;      // raw skin-temp ADC @ inner[68]
+  final int ambientRaw;       // raw ambient-light ADC @ inner[70]
+  // ...
 }
 ```
 
-```ts
-import { parse_r24 } from 'openstrap-protocol/ts/records'
-const sample = parse_r24(inner)
-if (sample) console.log(sample.hr, new Date(sample.ts_epoch * 1000))
+```dart
+import 'package:openstrap_protocol/openstrap_protocol.dart';
+
+final sample = parseR24(inner);
+if (sample != null) {
+  print('${sample.hr} bpm at ${DateTime.fromMillisecondsSinceEpoch(sample.tsEpoch * 1000)}');
+}
 ```
 
-## What I'm sure of and what I'm not
+All the SpO2/skin-temp/ambient fields are **raw relative ADC counts**, not calibrated
+units — there's no absolute % or °C conversion here, and there shouldn't be one anywhere
+downstream either. `skinContact` is a contact-quality signal, not a wear-state flag —
+don't use it to decide if the band is on the wrist.
 
-I want to be honest about this because it's the difference between a decoder you can trust
-and one that quietly lies to you.
+Historical records don't all ship the same layout. `parseR24` decodes v24/v12 verbatim;
+`FirmwareAwareR24Decoder` (chain-of-responsibility) is the one to actually reach for on
+real devices — it tries the validated 89-byte layout first, then falls back to a
+72-byte-floor layout (the true minimum every field it reads actually needs) for older
+firmware that sends shorter frames, remembering per-record-version which strategy worked.
+Other versions (v7/v9/v18/unknown) route through the v24 field map at a per-version HR
+offset, gated by a physiological-plausibility check (HR 25-230bpm AND accel magnitude²
+0.25-3.24) so an implausible unknown-version record doesn't get decoded as if it were
+real.
 
-The header and the heart rate? Solid. I've watched `hr` at byte `[17]` track the live
-stream within a beat or two on a band I was actually wearing. That one's real.
+## What's verified and what's a plausible read
 
-Everything after the header is a best guess. The band relays most of this record straight
-to WHOOP's cloud without decoding it, so there's no clean reference to check against. The
-accelerometer at `[36:48]`, the temperature at `[70]`, the SpO₂ at `[72]`, the resting HR
-at `[88]`, I worked those out by watching how the bytes moved against things I could
-verify: acceleration sits around 1g when the band is still, the temperature byte climbs
-when you put the band on, SpO₂ parks in the low 90s at rest. Plausible. Consistent. Not
-confirmed. They're labelled empirical in the code and you should read them that way.
+The header and heart rate are solid — `hr` at `inner[17]` has been checked against a live
+stream on a real worn band.
 
-That's also why every record keeps its `raw_tail`: the full payload as hex, nothing
-dropped. If someone someday nails down what byte 68 actually is, we re-decode every record
-we ever stored and the old data just gets better. Nothing is lost to a bad early guess.
-
-## Where the bytes get unwrapped
-
-You'll notice there's no frame parsing in here, no CRC checks, no `0xAA` handling. By the
-time `parse_r24` runs, someone upstream has already pulled the inner payload out of the
-frame and confirmed it's intact. That work lives in the clients: the Flutter app
-([edge](https://github.com/OpenStrap/edge), in `lib/protocol/`) and the Python reference
-client ([research](https://github.com/OpenStrap/research)) each carry their own
-reassembler. `PROTOCOL.md` documents the envelope and the packet types if you need to
-build one.
+The PPG/accel/optical fields further into the record are a real, working decode (this
+whole map is checked against a frozen TypeScript oracle — `decode_parity_cases.json`,
+2934 real captured cases, all passing) — but "decodes correctly" and "means something
+diagnostic" aren't the same claim. SpO2/skin-temp/ambient are raw ADC counts with no
+calibration curve; treat them as relative-only, ever.
 
 ## Build it
 
+Pure Dart, no Flutter dependency:
+
 ```bash
-npx tsc                          # compile ts/ to dist/
-npx tsx ts/test_decoder.ts       # run it against a fixture capture
+dart pub get
+dart test          # 70 tests, incl. the 2934-case TS-parity suite
 ```
+
+Run tests from the repo root — the parity fixture (`decode_parity_cases.json`) is
+resolved relative to it.
 
 ## Adding or fixing a decoder
 
-If you've figured out a field, or want to add `parse_r10` or any of the others on the TS
-side, write a function that takes the inner `Uint8Array` and returns a typed object or
-`null`. Read multi-byte values little-endian with a `DataView`. Label every field as
-verified or empirical, and be honest about which it is, a confident wrong label is worse
-than no label. Keep the untouched tail around. And if you've actually pinned down one of
-the empirical fields with real evidence, that's exactly the kind of thing I want in an
-issue or a PR.
+If you've figured out a field or want to add a new record type: read multi-byte values
+little-endian, return `null` (never throw) on malformed/short input, and label anything
+you're not 100% sure of as empirical, not verified — a confident wrong label is worse than
+an honest "not sure." If you're touching `records.dart`'s multi-version decode chain,
+check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
+shape rather than needing a new one.
+
+Cross-checking against `_external/noop` (a separate open WHOOP reference project,
+PolyForm Noncommercial license) for facts/techniques is fine; copying its code is not.
