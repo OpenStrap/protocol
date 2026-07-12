@@ -141,5 +141,4 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against `_external/noop` (a separate open WHOOP reference project,
-PolyForm Noncommercial license) for facts/techniques is fine; copying its code is not.
+Cross-checking against `_external/noop/`  `bWanShiTong/reverse-engineering-whoop-post/`  for facts/techniques is fine; copying its code is not.
