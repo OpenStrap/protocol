@@ -67,26 +67,58 @@ units — there's no absolute % or °C conversion here, and there shouldn't be o
 downstream either. `skinContact` is a contact-quality signal, not a wear-state flag —
 don't use it to decide if the band is on the wrist.
 
-Historical records don't all ship the same layout. `parseR24` decodes v24/v12 verbatim;
-`FirmwareAwareR24Decoder` (chain-of-responsibility) is the one to actually reach for on
-real devices — it tries the validated 89-byte layout first, then falls back to a
-72-byte-floor layout (the true minimum every field it reads actually needs) for older
-firmware that sends shorter frames, remembering per-record-version which strategy worked.
-Other versions (v7/v9/v18/unknown) route through the v24 field map at a per-version HR
-offset, gated by a physiological-plausibility check (HR 25-230bpm AND accel magnitude²
-0.25-3.24) so an implausible unknown-version record doesn't get decoded as if it were
-real.
+Historical records don't all ship the same layout, and finding that out cost more time
+than it should have. `parseR24` decodes v24/v12 verbatim; `FirmwareAwareR24Decoder`
+(chain-of-responsibility) is the one to actually reach for on real devices — it tries the
+validated 89-byte layout first, then falls back to a 72-byte-floor layout (the true
+minimum every field it reads actually needs) for older firmware sending shorter frames,
+remembering per-record-version which strategy worked. Other versions (v7/v9/v18/unknown)
+route through the v24 field map at a per-version HR offset, gated by a
+physiological-plausibility check (HR 25-230bpm AND accel magnitude² 0.25-3.24) — because
+without that gate, an implausible unknown-version record gets decoded as if it were real,
+and you don't find out until your heart rate graph has a 400 bpm spike in it.
 
-## What's verified and what's a plausible read
+## What's actually verified vs. a plausible read
 
 The header and heart rate are solid — `hr` at `inner[17]` has been checked against a live
-stream on a real worn band.
+stream on a real worn band, not just inferred from the byte layout looking right.
 
-The PPG/accel/optical fields further into the record are a real, working decode (this
+The PPG/accel/optical fields further into the record are a real, working decode too (the
 whole map is checked against a frozen TypeScript oracle — `decode_parity_cases.json`,
-2934 real captured cases, all passing) — but "decodes correctly" and "means something
-diagnostic" aren't the same claim. SpO2/skin-temp/ambient are raw ADC counts with no
-calibration curve; treat them as relative-only, ever.
+2934 real captured cases, all passing). But "decodes correctly" and "means something
+diagnostic" are two different claims, and it's easy to blur them if you're not careful.
+SpO2/skin-temp/ambient are raw ADC counts, no calibration curve behind them — relative
+only, always, no exceptions.
+
+## How a sync with the band actually goes
+
+This package doesn't own a Bluetooth connection, it just builds/decodes the bytes. But if
+you're integrating it — or just curious what the app built around it actually does — the
+conversation with the band looks like this.
+
+Connect, bond, bump the MTU, subscribe to the notify characteristics. Then send
+`cmdSetClock`. The band ships with its real-time clock unset, and skip this step and
+every record you pull off it gets a garbage timestamp — nothing tells you this up front,
+you just find out later when your sleep data says you went to bed in 1970. Then fire
+`initPackets` (five packets), which tells the band to start draining its history.
+
+History comes off in batches. After each one, the band sends a marker carrying an 8-byte
+token — echo it back exactly with `buildHistoryResultOk`, using a write that waits for
+acknowledgement, not fire-and-forget. Get the bytes wrong, or don't wait for the ack, and
+the band just re-sends the same batch forever, since as far as it's concerned nothing was
+ever confirmed. Whatever's consuming these decoded records needs to actually commit them
+to storage before that acknowledgement goes out, not after — a crash mid-sync shouldn't
+be able to lose data or tell the band to trim flash it never actually saved.
+
+A couple of other things worth knowing if you're writing a client: live high-rate streams
+(R10/0x33) and the historical 1 Hz records use separate sequence-number ranges, so acks
+across the two never collide. And `dangerousCmds` in `constants.dart` (flash erase,
+reboot, firmware push) exist for a reason — gate them behind an explicit user action,
+never auto-send. You really don't want to brick one of these.
+
+The actual client implementation of all this — the real Bluetooth connection, the retry
+logic, all of it — lives in [edge](https://github.com/OpenStrap/edge)'s `ble_engine.dart`,
+if you want to see it wired up end to end.
 
 ## Build it
 
@@ -109,5 +141,4 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against `_external/noop` (a separate open WHOOP reference project,
-PolyForm Noncommercial license) for facts/techniques is fine; copying its code is not.
+Cross-checking against `_external/noop/`  `bWanShiTong/reverse-engineering-whoop-post/`  for facts/techniques is fine; copying its code is not.
