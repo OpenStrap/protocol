@@ -90,6 +90,36 @@ diagnostic" are two different claims, and it's easy to blur them if you're not c
 SpO2/skin-temp/ambient are raw ADC counts, no calibration curve behind them — relative
 only, always, no exceptions.
 
+## How a sync with the band actually goes
+
+This package doesn't own a Bluetooth connection, it just builds/decodes the bytes. But if
+you're integrating it — or just curious what the app built around it actually does — the
+conversation with the band looks like this.
+
+Connect, bond, bump the MTU, subscribe to the notify characteristics. Then send
+`cmdSetClock`. The band ships with its real-time clock unset, and skip this step and
+every record you pull off it gets a garbage timestamp — nothing tells you this up front,
+you just find out later when your sleep data says you went to bed in 1970. Then fire
+`initPackets` (five packets), which tells the band to start draining its history.
+
+History comes off in batches. After each one, the band sends a marker carrying an 8-byte
+token — echo it back exactly with `buildHistoryResultOk`, using a write that waits for
+acknowledgement, not fire-and-forget. Get the bytes wrong, or don't wait for the ack, and
+the band just re-sends the same batch forever, since as far as it's concerned nothing was
+ever confirmed. Whatever's consuming these decoded records needs to actually commit them
+to storage before that acknowledgement goes out, not after — a crash mid-sync shouldn't
+be able to lose data or tell the band to trim flash it never actually saved.
+
+A couple of other things worth knowing if you're writing a client: live high-rate streams
+(R10/0x33) and the historical 1 Hz records use separate sequence-number ranges, so acks
+across the two never collide. And `dangerousCmds` in `constants.dart` (flash erase,
+reboot, firmware push) exist for a reason — gate them behind an explicit user action,
+never auto-send. You really don't want to brick one of these.
+
+The actual client implementation of all this — the real Bluetooth connection, the retry
+logic, all of it — lives in [edge](https://github.com/OpenStrap/edge)'s `ble_engine.dart`,
+if you want to see it wired up end to end.
+
 ## Build it
 
 Pure Dart, no Flutter dependency:
