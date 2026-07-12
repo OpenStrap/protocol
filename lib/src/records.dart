@@ -233,6 +233,11 @@ const int _legacyMinLength = 89;
 /// [FirmwareAwareR24Decoder] AFTER the legacy 89-byte attempt has failed —
 /// never used as the default, so devices matching the original validated
 /// shape are completely unaffected.
+// note: edge's live BLE path pads 88-byte v12 frames up to 89 before it ever
+// calls the decoder now, so this tier doesn't actually get hit for that
+// anymore - but db.dart / substrate.dart's raw-hex re-derive paths see the
+// un-padded bytes directly and still need it. don't remove this thinking
+// it's dead, it's just dead for the one case it was originally written for.
 const int _shortFrameMinLength = 72;
 
 /// Decode the WHOOP 4 v24 field map with a parameterised HR offset. When

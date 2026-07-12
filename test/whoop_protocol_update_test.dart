@@ -479,4 +479,48 @@ void main() {
       expect(m.token, hexToBytes('1122334455667788'));
     });
   });
+
+  group('compact 0x28 realtime HR decode', () {
+    // used to read ts one byte early (off inner[3] instead of inner[2], left
+    // over from a 3-byte header skip) and hr as a fake u16/256 value instead
+    // of the plain byte it actually is - found this against a real capture
+    // where it decoded to some year-2089 garbage timestamp.
+    test('reads ts/hr/rr from the real layout, not shifted by the old header skip', () {
+      final b = Uint8List(20);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x28;
+      bd.setUint32(2, 1780840486, Endian.little); // ts
+      b[8] = 65; // hr
+      b[9] = 1; // rr_count
+      bd.setInt16(10, 900, Endian.little); // rr1
+      b[18] = 1; // wearing
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      // copilot review flagged this - the whole point of the bug was
+      // corrupted timestamps, and this test never actually checked one.
+      expect(decoded.fields['ts_epoch'], 1780840486);
+      expect(decoded.fields['hr'], 65);
+      expect(decoded.fields['rr_ms'], [900]);
+      expect(decoded.fields['wearing'], isTrue);
+    });
+
+    // copilot review also caught a real one: a 9-byte packet (ts+hr, no
+    // rr_count byte at all) would read inner[9] out of bounds and throw
+    // instead of decoding. fixed to treat a missing rr_count byte as "no RR
+    // intervals" rather than crashing.
+    test('a 9-byte packet (ts+hr only, no rr_count byte) decodes instead of throwing', () {
+      final b = Uint8List(9);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x28;
+      bd.setUint32(2, 1780840486, Endian.little);
+      b[8] = 65;
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      expect(decoded.fields['ts_epoch'], 1780840486);
+      expect(decoded.fields['hr'], 65);
+      expect(decoded.fields['rr_ms'], isEmpty);
+    });
+  });
 }
