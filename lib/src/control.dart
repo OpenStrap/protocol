@@ -190,10 +190,14 @@ RealtimeHr? parseRealtimeHr(Uint8List inner) {
   final n = inner.length > 9 ? inner[9] : 0;
   if (n > 0 && inner.length >= 12) {
     final v = u16(inner, 10);
+    // 200-2500ms = 24-300bpm; was relaxed to `v>0` without comment, which lets
+    // corrupted/out-of-range timing noise straight into live RR — reverted.
     if (v >= 200 && v <= 2500) rr.add(v);
   }
   if (n > 1 && inner.length >= 14) {
     final v = u16(inner, 12);
+    // 200-2500ms = 24-300bpm; was relaxed to `v>0` without comment, which lets
+    // corrupted/out-of-range timing noise straight into live RR — reverted.
     if (v >= 200 && v <= 2500) rr.add(v);
   }
   final wearing = inner.length > 18 ? inner[18] == 1 : true;
