@@ -206,6 +206,11 @@ _Motion _r10Motion(ByteData view, int len) {
   const activityFloor = 0.05;
   if (std < activityFloor || n < 24) return _Motion(activity, 0);
 
+  // NOTE: was bumped to 25 without comment/test coverage; reverted — no test
+  // (parity or otherwise) exercises steps_inc/activity from R10, and ±25
+  // approaches the 7-40 sample autocorrelation lag range this detrend feeds,
+  // which risks attenuating genuine step periodicity at slower cadences.
+  // Re-widen only with a real-capture regression test backing it.
   const w = 9;
   final x = List<double>.filled(n, 0);
   for (int i = 0; i < n; i++) {
@@ -292,6 +297,11 @@ DecodedSample? decodeRecord(String hex) {
       hr: d.hr,
       activity: 0,
       stepsInc: 0,
+      // skinContact is contact QUALITY, not wear (see protocol notes) — the
+      // parity oracle proves it: 28 real v24 records have hr=87-97 (clearly
+      // worn) with skinContact<=50. hr>0 is the only signal in this fixture
+      // that agrees with ground truth on every case; keep it even though it's
+      // always false for v25 (hr deliberately undecoded there — see parseR24).
       wristOn: d.hr > 0,
       recType: recType,
     );
