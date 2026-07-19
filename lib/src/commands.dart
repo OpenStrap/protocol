@@ -4,6 +4,7 @@
 import 'dart:typed_data';
 import 'constants.dart';
 import 'framing.dart';
+import 'band.dart';
 
 enum WristSelection {
   right(0x01),
@@ -14,21 +15,25 @@ enum WristSelection {
 }
 
 /// Build a framed command packet: [type][seq][opcode][payload].
+/// [profile] selects the generation's frame envelope (default gen4 = WHOOP 4).
+/// The inner bytes are identical across generations — command opcodes are
+/// shared — so only the envelope differs.
 Uint8List buildCommand(int seq, int opcode,
-    [List<int> payload = const [0x00]]) {
+    [List<int> payload = const [0x00], BandProfile profile = BandProfile.gen4]) {
   final inner = <int>[
     PacketType.command,
     seq & 0xFF,
     opcode & 0xFF,
     ...payload
   ];
-  return buildFrame(inner);
+  return buildFrame(inner, profile: profile);
 }
 
 /// WHOOP's positive historical-burst result (cmd 0x17).
 /// Inner = [0x23][seq][0x17][0x01] + token(8B).
 /// `token` is the two 4-byte slices from the HistoryEnd METADATA marker.
-Uint8List buildHistoryResultOk(int seq, List<int> token) {
+Uint8List buildHistoryResultOk(int seq, List<int> token,
+    {BandProfile profile = BandProfile.gen4}) {
   if (token.length != 8) {
     throw ArgumentError('batch token must be 8 bytes, got ${token.length}');
   }
@@ -39,17 +44,19 @@ Uint8List buildHistoryResultOk(int seq, List<int> token) {
     revision1,
     ...token,
   ];
-  return buildFrame(inner);
+  return buildFrame(inner, profile: profile);
 }
 
 /// The strap's negative historical-burst result (cmd 0x17).
 /// Payload is a single FAILURE result byte (the band only needs the code).
-Uint8List buildHistoryResultFail(int seq) =>
-    buildCommand(seq, Cmd.historicalDataResult, const [0x00]);
+Uint8List buildHistoryResultFail(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.historicalDataResult, const [0x00], profile);
 
 /// Legacy alias used by the app transport.
-Uint8List buildBatchAck(int seq, List<int> token) =>
-    buildHistoryResultOk(seq, token);
+Uint8List buildBatchAck(int seq, List<int> token,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildHistoryResultOk(seq, token, profile: profile);
 
 /// The 5-packet INIT handshake (hardware-verified, seq 0..4).
 /// buildCommand regenerates these byte-for-byte (protocol test asserts it).
@@ -292,3 +299,32 @@ Uint8List cmdDisableAlarm(int seq, {int revision = 1}) {
   final p = revision == 2 ? const [0x02, 0xFF] : [revision & 0xff];
   return buildCommand(seq, Cmd.disableAlarm, p);
 }
+
+// ── WHOOP 5 (gen5 / "fd4b") handshake + offload ────────────────────────────
+//
+// gen5 differs from gen4's 5-packet INIT: the link opens with a single
+// CLIENT_HELLO (GET_HELLO = 0x91) written with-response to trigger the
+// just-works bond, then the offload is driven by GET_DATA_RANGE (0x22) and
+// SEND_HISTORICAL_DATA (0x16) — the SAME opcodes as gen4, but with EMPTY
+// payloads (gen4 sends a single 0x00). The HISTORY_END ACK
+// ([buildHistoryResultOk]) is byte-structured identically; only the frame
+// envelope differs, so pass `profile: BandProfile.gen5`.
+
+/// The gen5 CLIENT_HELLO frame (GET_HELLO = 0x91, payload [0x01]).
+///
+/// Built through [buildFrame] with the gen5 profile; this reproduces the
+/// canonical, hardware-observed 16-byte hello byte-for-byte:
+/// `aa 01 08 00 00 01 e6 71 23 01 91 01 36 3e 5c 8d`. A `gen5_test` asserts
+/// this equality, which simultaneously validates crc16-modbus + crc32 + the
+/// gen5 header layout. Sequence defaults to 1 to match that canonical frame.
+Uint8List gen5ClientHello({int seq = 1}) =>
+    buildCommand(seq, Cmd.getHello, const [0x01], BandProfile.gen5);
+
+/// gen5 GET_DATA_RANGE (0x22) with the EMPTY payload gen5 expects.
+Uint8List cmdGetDataRangeGen5(int seq) =>
+    buildCommand(seq, Cmd.getDataRange, const [], BandProfile.gen5);
+
+/// gen5 SEND_HISTORICAL_DATA (0x16) with the EMPTY payload gen5 expects — the
+/// command that starts the flash drain.
+Uint8List cmdSendHistoricalGen5(int seq) =>
+    buildCommand(seq, Cmd.sendHistoricalData, const [], BandProfile.gen5);
