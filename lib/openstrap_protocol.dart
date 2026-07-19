@@ -6,9 +6,12 @@
 /// only.
 library openstrap_protocol;
 
+// Source 0 — multi-band wire-format profile (gen4 / gen5).
+export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
+
 // Source 1 — record decoders.
 export 'src/records.dart'
-    show R24, parseR24, FirmwareAwareR24Decoder, R24DecodeStrategy;
+    show R24, parseR24, parseGen5Record, FirmwareAwareR24Decoder, R24DecodeStrategy;
 export 'src/live.dart'
     show
         DecodedSample,
@@ -23,7 +26,7 @@ export 'src/live.dart'
         decodeBatch;
 
 // Source 2 — CRC, constants, framing, commands.
-export 'src/crc.dart' show crc8, crc32;
+export 'src/crc.dart' show crc8, crc32, crc16Modbus;
 export 'src/constants.dart';
 export 'src/framing.dart'
     show Frame, pad4, buildFrame, parseFrame, FrameReassembler;
@@ -59,7 +62,10 @@ export 'src/commands.dart'
         cmdSetAlarmSimple,
         cmdRunAlarm,
         cmdDisableAlarm,
-        kDefaultAlarmHaptics;
+        kDefaultAlarmHaptics,
+        gen5ClientHello,
+        cmdGetDataRangeGen5,
+        cmdSendHistoricalGen5;
 
 // Control-plane parsers (HELLO / EVENT / METADATA / COMMAND_RESPONSE / dispatch).
 export 'src/control.dart'

@@ -400,3 +400,65 @@ class FirmwareAwareR24Decoder {
     return null; // every strategy failed — caller archives as undecodable, as before.
   }
 }
+
+/// gen5 (WHOOP 5) normal-history record versions carrying a 1 Hz HR marker at
+/// inner[17]. Empirically, real WHOOP 5.0 ("Goose") firmware serves K24 for its
+/// per-second history; K9/K12 share the same thin layout / HR offset.
+const Set<int> _gen5NormalHistoryVersions = {9, 12, 24};
+
+/// Decode a WHOOP 5 (gen5) historical 1 Hz record. `inner` starts at the
+/// packet-type byte (0x2F), exactly like [parseR24] — the frame layer has
+/// already stripped the (8-byte) gen5 header, so the INNER offsets here are the
+/// same coordinates gen4 uses.
+///
+/// gen5's per-second record (K24 family) is DELIBERATELY THIN versus gen4's
+/// rich R24: on validated owned captures, ONLY HR rides the 1 Hz cadence.
+/// Everything else gen4 packed into R24 is either absent or lives elsewhere:
+///
+///   • HR       — inner[17], direct bpm, gated 25..230 (0 kept: warming device)
+///   • accelG   — EMPTY. No 1 Hz accel on gen5 — motion arrives on separate
+///                K10/K21 streams whose accel/gyro offsets are IDENTICAL to
+///                gen4's live R10 (decode via [decodeR10Imu]).
+///   • RR       — EMPTY. Real captures carry no RR here; gen5 sources beat
+///                timing from the R17 optical stream, not the 1 Hz record.
+///                A speculative RR decode here would poison HRV, so we don't.
+///   • skinTemp — EMPTY. Temperature is NOT in the 1 Hz record: it arrives via
+///                the TEMPERATURE_LEVEL event (id 17). (An earlier guess of a
+///                u16 at inner[16] was proven to be HR<<8 aliasing, not a real
+///                reading — decoding it would emit a fake temp that tracks HR.)
+///   • SpO2     — EMPTY. Not exposed at any offset we have validated.
+///
+/// Running gen5 bytes through gen4's v24 optical/accel map reads all-zero
+/// garbage on real captures, so we decode ONLY the confirmed HR and leave the
+/// rest empty (honest-null, never fabricated).
+///
+/// Returns null for non-normal-history versions (e.g. K10/K21 motion) or records
+/// too short to carry the HR byte — the caller archives those to `raw_archive`.
+R24? parseGen5Record(Uint8List inner) {
+  if (inner.length < 18) return null;
+  final version = inner[1];
+  if (!_gen5NormalHistoryVersions.contains(version)) return null;
+
+  final view = _view(inner);
+  final hr = inner[17];
+  if (hr != 0 && (hr < 25 || hr > 230)) return null; // implausible → archive
+
+  return R24(
+    histVersion: version,
+    tsEpoch: view.getUint32(7, Endian.little),
+    tsSubsec: view.getUint16(11, Endian.little),
+    counter: view.getUint32(3, Endian.little),
+    hr: hr,
+    rrCount: 0,
+    rrIntervalsMs: const [],
+    ppgGreen: 0,
+    ppgRedIr: 0,
+    accelG: const [], // no 1 Hz accel on gen5
+    skinContact: 0,
+    spo2RedRaw: 0, // not exposed at a validated offset yet
+    spo2IrRaw: 0,
+    skinTempRaw: 0, // gen5 temp arrives via TEMPERATURE_LEVEL event, not here
+    ambientRaw: 0,
+    rawTail: _hexFrom(inner, 13),
+  );
+}
