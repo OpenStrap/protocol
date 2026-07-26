@@ -1,5 +1,8 @@
 # OpenStrap protocol
 
+[![test](https://github.com/OpenStrap/protocol/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/protocol/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
 band, it hands you back a record with named fields, or a decoded command/event. That's
 the whole job.
@@ -126,7 +129,7 @@ Pure Dart, no Flutter dependency:
 
 ```bash
 dart pub get
-dart test          # 70 tests, incl. the 2934-case TS-parity suite
+dart test          # 71 tests, incl. the 2934-case TS-parity suite
 ```
 
 Run tests from the repo root — the parity fixture (`decode_parity_cases.json`) is
@@ -142,3 +145,20 @@ check `FirmwareAwareR24Decoder` first — chances are your case fits the existin
 shape rather than needing a new one.
 
 Cross-checking against `_external/noop/`  `bWanShiTong/reverse-engineering-whoop-post/`  for facts/techniques is fine; copying its code is not.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — which repo a change belongs in, how to run the
+tests, and the rules that keep this package honest. Security issues go through
+[SECURITY.md](SECURITY.md), not a public issue.
+
+## Support the work
+
+Free, MIT, no company behind it. If OpenStrap gave your band a second life,
+[DONATE.md](https://github.com/OpenStrap/edge/blob/main/DONATE.md) has BTC and EVM
+addresses. Protocol findings and bug reports are worth more than money, though.
+
+---
+
+Not affiliated with, endorsed by, or connected to WHOOP. "WHOOP" is their trademark, used
+only to say which device this talks to.

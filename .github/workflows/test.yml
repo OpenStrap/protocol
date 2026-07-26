@@ -1,0 +1,47 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only: this job only builds and tests. Nothing here needs write access,
+# and it executes code from pull requests.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pubspec declares `sdk: ^3.5.0`, so 3.5.0 is a claim this package makes
+        # to anyone depending on it. Test it, rather than only testing whatever
+        # `stable` happens to be — otherwise the lower bound is a guess.
+        sdk: ['3.5.0', 'stable']
+    name: test (Dart ${{ matrix.sdk }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config where PR-authored test code
+          # could read it. Nothing in this job pushes back to the repo.
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      # The golden capture (whoop_hist.jsonl) is a real band recording kept
+      # beside the repo rather than committed to it, so the tests that need it
+      # SKIP here and run locally. Everything else — including the 2934-case
+      # decode_parity_cases.json oracle and the 550 dart_header.json cases —
+      # is tracked in-repo and runs on every PR.
+      - name: Test
+        run: dart test --reporter=expanded
