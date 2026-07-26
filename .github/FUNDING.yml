@@ -1,0 +1,3 @@
+# GitHub funding config only accepts URLs, not raw wallet addresses.
+custom:
+  - https://github.com/OpenStrap/edge/blob/main/DONATE.md

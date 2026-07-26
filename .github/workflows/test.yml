@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+        continue-on-error: true
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      # The golden capture (whoop_hist.jsonl) is a real band recording kept
+      # beside the repo rather than committed to it, so the tests that need it
+      # SKIP here and run locally. Everything else — including the 2934-case
+      # decode_parity_cases.json oracle and the 550 dart_header.json cases —
+      # is tracked in-repo and runs on every PR.
+      - name: Test
+        run: dart test --reporter=expanded
