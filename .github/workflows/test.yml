@@ -14,6 +14,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pubspec declares `sdk: ^3.5.0`, so 3.5.0 is a claim this package makes
+        # to anyone depending on it. Test it, rather than only testing whatever
+        # `stable` happens to be — otherwise the lower bound is a guess.
+        sdk: ['3.5.0', 'stable']
+    name: test (Dart ${{ matrix.sdk }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,7 +30,7 @@ jobs:
           persist-credentials: false
       - uses: dart-lang/setup-dart@v1
         with:
-          sdk: stable
+          sdk: ${{ matrix.sdk }}
 
       - name: Install dependencies
         run: dart pub get
