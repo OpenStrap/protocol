@@ -2,6 +2,8 @@
 
 [![test](https://github.com/OpenStrap/protocol/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/protocol/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![stars](https://img.shields.io/github/stars/OpenStrap/protocol?style=flat&color=e2825f)](https://github.com/OpenStrap/protocol/stargazers)
+[![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
 
 Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
 band, it hands you back a record with named fields, or a decoded command/event. That's
@@ -154,9 +156,17 @@ tests, and the rules that keep this package honest. Security issues go through
 
 ## Support the work
 
-Free, MIT, no company behind it. If OpenStrap gave your band a second life,
-[DONATE.md](https://github.com/OpenStrap/edge/blob/main/DONATE.md) has BTC and EVM
-addresses. Protocol findings and bug reports are worth more than money, though.
+No subscription, no paywall, no company behind this. If OpenStrap gave your band a second
+life, a small tip genuinely helps:
+
+- **BTC** — `bc1qvtcch38dcwp967ar764uu6eetw7tf907844wfq`
+- **EVM** (Ethereum · Base · Arbitrum · Optimism · Polygon) —
+  `0x8310C89393366b7eBCD47ABa82e1dfB5ECeFFbD9`
+
+[What donations actually pay for →](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
+
+Nothing is gated behind paying, and nothing ever will be. Protocol findings and bug
+reports are worth more than money, though.
 
 ---
 
