@@ -12,10 +12,21 @@ import 'records.dart';
 class DecodedSample {
   final int ts; // unix seconds
   final int hr; // bpm (0 = off-wrist / no reading)
-  final double activity; // motion magnitude (stddev of |accel(g)|), 0 if no IMU
-  final int stepsInc; // steps detected in this record's IMU window (R10 only)
+
+  /// Motion magnitude (stddev of |accel(g)|) over this record's IMU window.
+  ///
+  /// NULL means "this record carried no usable IMU data" — an R10 frame that
+  /// was truncated before the accel arrays. That is NOT the same claim as
+  /// `0.0`, which means "the IMU was read and the wrist was still". The old
+  /// code returned 0.0 for both, so a truncated frame was indistinguishable
+  /// from a genuine zero-motion reading downstream.
+  final double? activity;
+
+  /// Steps detected in this record's IMU window (R10 only). Null when the IMU
+  /// window was unreadable (see [activity]); `0` means "read, no gait found".
+  final int? stepsInc;
   final bool wristOn; // worn proxy (hr>0)
-  final int recType; // 10 | 24 | 28
+  final int recType; // 7 | 9 | 10 | 12 | 18 | 24 | 25 | 28
 
   DecodedSample({
     required this.ts,
@@ -170,8 +181,13 @@ class _Motion {
 }
 
 // Decode the R10 IMU arrays into (activity, steps) over the 100-sample window.
-_Motion _r10Motion(ByteData view, int len) {
-  if (len < 685) return _Motion(0, 0);
+// Returns NULL when the frame is too short to contain the accel arrays at all
+// — "we could not measure motion", which the caller surfaces as a null
+// activity/steps rather than a fabricated 0.0/0 that reads like a real
+// zero-motion sample. A non-null result with steps==0 IS a measurement: the
+// window was read and no gait rhythm was found.
+_Motion? _r10Motion(ByteData view, int len) {
+  if (len < 685) return null;
   const acc = 1 / 4096;
   List<int> arr(int off) {
     final out = <int>[];
@@ -184,7 +200,7 @@ _Motion _r10Motion(ByteData view, int len) {
 
   final ax = arr(85), ay = arr(285), az = arr(485);
   final n = math.min(ax.length, math.min(ay.length, az.length));
-  if (n == 0) return _Motion(0, 0);
+  if (n == 0) return null; // nothing measured — same absence as a short frame.
   final mags = <double>[];
   for (int i = 0; i < n; i++) {
     final x = ax[i] * acc, y = ay[i] * acc, z = az[i] * acc;
@@ -283,8 +299,13 @@ DecodedSample? decodeRecord(String hex) {
 
   if (b.length < 18) return null;
 
-  // WHOOP 4 historical telemetry (v24 / v25 auto-routed by parseR24).
-  if (recType == 24 || recType == 25) {
+  // WHOOP 4 historical telemetry — EVERY layout version parseR24 has a field
+  // map for, not just v24/v25. v12 in particular is real, shipping firmware
+  // (Record.r12); routing it to null here cost the caller the record's own
+  // timestamp, so a multi-day backfill collapsed onto the capture time.
+  // parseR24 owns the per-version HR offset and the plausibility gate, so the
+  // versions it cannot decode honestly still come back null.
+  if (kKnownRecordVersions.contains(recType)) {
     final d = parseR24(b);
     if (d == null) return null;
     return DecodedSample(
@@ -301,12 +322,14 @@ DecodedSample? decodeRecord(String hex) {
   if (recType == 10) {
     final ts = view.getUint32(7, Endian.little);
     final hr = b[17];
+    // Null motion = the frame carried no readable IMU window; propagate that
+    // absence instead of reporting a measured zero.
     final m = _r10Motion(view, b.length);
     return DecodedSample(
       ts: ts,
       hr: hr,
-      activity: m.activity,
-      stepsInc: m.steps,
+      activity: m?.activity,
+      stepsInc: m?.steps,
       wristOn: hr > 0,
       recType: 10,
     );
