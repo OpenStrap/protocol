@@ -41,11 +41,18 @@ company with an on-call rota:
 
 ## Where your data actually is
 
-Worth knowing before you go looking: OpenStrap computes and stores everything
-on-device. There's no account and no server holding your health data. The
-optional companion worker exists for legacy import, an update pointer, and two
-opt-in features that are off by default and compiled out of store builds
-entirely. See [edge's PRIVACY.md](https://github.com/OpenStrap/edge/blob/main/PRIVACY.md).
+Worth knowing before you go looking: OpenStrap computes and stores your health
+data on-device, and there's no account or server holding it. Two qualifications,
+so the boundary is exact:
+
+- **Anonymous diagnostics** (Firebase crash/performance, never health data) are
+  **on by default in GitHub release builds** and absent from App Store / Play
+  Store builds. Switchable off in-app.
+- **Health-data contribution** uploads the local database, but is opt-in, off by
+  default, and compiled out of store builds entirely.
+
+Everything else the companion worker does — legacy import, an update pointer —
+is optional and carries no health data. See [edge's PRIVACY.md](https://github.com/OpenStrap/edge/blob/main/PRIVACY.md).
 
 That means the realistic attack surface is the phone, the Bluetooth link, and
 the local database — not a cloud backend. Reports focused there are the most

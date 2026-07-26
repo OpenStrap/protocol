@@ -6,21 +6,26 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only: this job only builds and tests. Nothing here needs write access,
+# and it executes code from pull requests.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config where PR-authored test code
+          # could read it. Nothing in this job pushes back to the repo.
+          persist-credentials: false
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
 
       - name: Install dependencies
         run: dart pub get
-
-      - name: Verify formatting
-        run: dart format --output=none --set-exit-if-changed lib test
-        continue-on-error: true
 
       - name: Analyze
         run: dart analyze --fatal-infos
