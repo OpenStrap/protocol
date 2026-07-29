@@ -388,4 +388,29 @@ void main() {
       expect(() => cmdBuzz(0, 0), returnsNormally);
     });
   });
+
+  group('hexToBytes', () {
+    test('decodes both cases and tolerates surrounding whitespace', () {
+      expect(hexToBytes('  0aFF10 '), equals([0x0a, 0xff, 0x10]));
+      expect(hexToBytes(''), isEmpty);
+    });
+
+    test('rawTail snapshots the record, even if the buffer is reused', () {
+      final inner = hexToBytes(_goodV24);
+      final before = inner[13];
+      final rec = parseR24(inner)!;
+      // rawTail is encoded lazily, so the record must own its bytes: mutating
+      // the caller's buffer afterwards must not change what it reports.
+      inner[13] = before ^ 0xFF;
+      expect(rec.rawTail.substring(0, 2),
+          before.toRadixString(16).padLeft(2, '0'),
+          reason: 'rawTail must reflect parse time, not later mutation');
+    });
+
+    test('throws on non-hex input instead of fabricating bytes', () {
+      for (final bad in ['0g', 'zz', '0x', '00 11', 'a', 'abc']) {
+        expect(() => hexToBytes(bad), throwsFormatException, reason: bad);
+      }
+    });
+  });
 }
