@@ -60,11 +60,28 @@ class ImuFrame {
   Map<String, dynamic> toMap() => {'ts': ts, 'idx': idx, 'mags': mags, 'xs': xs, 'ys': ys, 'zs': zs};
 }
 
+/// Nibble value for an ASCII hex code unit, or -1 if it is not a hex digit.
+int _nibble(int c) {
+  if (c >= 0x30 && c <= 0x39) return c - 0x30; // 0-9
+  if (c >= 0x61 && c <= 0x66) return c - 0x57; // a-f
+  if (c >= 0x41 && c <= 0x46) return c - 0x37; // A-F
+  return -1;
+}
+
 Uint8List hexToBytes(String hex) {
   final trimmed = hex.trim();
   final out = Uint8List(trimmed.length ~/ 2);
   for (int i = 0; i < out.length; i++) {
-    out[i] = int.parse(trimmed.substring(i * 2, i * 2 + 2), radix: 16);
+    final hi = _nibble(trimmed.codeUnitAt(i * 2));
+    final lo = _nibble(trimmed.codeUnitAt(i * 2 + 1));
+    // Keep throwing on non-hex input. Callers rely on it: live.dart,
+    // substrate.dart, db.dart and ble_engine.dart all treat a FormatException
+    // as "this string is not a record", and a lookup that returned 0 instead
+    // would hand them fabricated bytes.
+    if (hi < 0 || lo < 0) {
+      throw FormatException('not a hex byte', trimmed, i * 2);
+    }
+    out[i] = (hi << 4) | lo;
   }
   return out;
 }

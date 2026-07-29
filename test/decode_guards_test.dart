@@ -388,4 +388,17 @@ void main() {
       expect(() => cmdBuzz(0, 0), returnsNormally);
     });
   });
+
+  group('hexToBytes', () {
+    test('decodes both cases and tolerates surrounding whitespace', () {
+      expect(hexToBytes('  0aFF10 '), equals([0x0a, 0xff, 0x10]));
+      expect(hexToBytes(''), isEmpty);
+    });
+
+    test('throws on non-hex input instead of fabricating bytes', () {
+      for (final bad in ['0g', 'zz', '0x', '00 11']) {
+        expect(() => hexToBytes(bad), throwsFormatException, reason: bad);
+      }
+    });
+  });
 }

@@ -53,7 +53,13 @@ class R24 {
   final int ambientRaw;
 
   /// Untouched payload [13:] as hex — kept for re-decode as the map improves.
-  final String rawTail;
+  ///
+  /// Encoded on first read, not at parse time. Nothing in the stack reads it
+  /// today, and eagerly hex-encoding 83 bytes per record dominated parseR24's
+  /// cost on the offload path.
+  String get rawTail => _rawTailHex ??= _hexFrom(_rawTailBytes, 0);
+  final Uint8List _rawTailBytes;
+  String? _rawTailHex;
 
   R24({
     required this.histVersion,
@@ -71,8 +77,8 @@ class R24 {
     required this.spo2IrRaw,
     required this.skinTempRaw,
     required this.ambientRaw,
-    required this.rawTail,
-  });
+    required Uint8List rawTailBytes,
+  }) : _rawTailBytes = rawTailBytes;
 
   /// Map matching the TS `out` shape (snake_case keys) for parity comparison.
   Map<String, dynamic> toMap() => {
@@ -204,7 +210,8 @@ R24? _parseV25(Uint8List inner) {
     spo2IrRaw: 0,
     skinTempRaw: 0,
     ambientRaw: 0,
-    rawTail: _hexFrom(inner, 13),
+    rawTailBytes:
+        inner.length > 13 ? Uint8List.sublistView(inner, 13) : Uint8List(0),
   );
 }
 
@@ -368,7 +375,8 @@ R24? _parseV24Layout(
     spo2IrRaw: view.getUint16(66, Endian.little),
     skinTempRaw: view.getUint16(68, Endian.little),
     ambientRaw: view.getUint16(70, Endian.little),
-    rawTail: _hexFrom(inner, 13),
+    rawTailBytes:
+        inner.length > 13 ? Uint8List.sublistView(inner, 13) : Uint8List(0),
   );
 }
 
