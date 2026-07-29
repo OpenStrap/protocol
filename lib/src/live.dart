@@ -70,6 +70,12 @@ int _nibble(int c) {
 
 Uint8List hexToBytes(String hex) {
   final trimmed = hex.trim();
+  // An odd-length string is a truncated record, not a shorter one. Flooring to
+  // whole bytes would drop the trailing nibble and hand the caller a payload
+  // that decodes cleanly at the wrong length.
+  if (trimmed.length.isOdd) {
+    throw FormatException('odd-length hex', trimmed, trimmed.length);
+  }
   final out = Uint8List(trimmed.length ~/ 2);
   for (int i = 0; i < out.length; i++) {
     final hi = _nibble(trimmed.codeUnitAt(i * 2));

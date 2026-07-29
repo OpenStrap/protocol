@@ -210,8 +210,11 @@ R24? _parseV25(Uint8List inner) {
     spo2IrRaw: 0,
     skinTempRaw: 0,
     ambientRaw: 0,
+    // COPY, not sublistView: a view aliases the caller's buffer, and rawTail
+    // is now encoded lazily, so a later mutation of `inner` would change bytes
+    // that were supposed to be a snapshot of parse time.
     rawTailBytes:
-        inner.length > 13 ? Uint8List.sublistView(inner, 13) : Uint8List(0),
+        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
   );
 }
 
@@ -375,8 +378,11 @@ R24? _parseV24Layout(
     spo2IrRaw: view.getUint16(66, Endian.little),
     skinTempRaw: view.getUint16(68, Endian.little),
     ambientRaw: view.getUint16(70, Endian.little),
+    // COPY, not sublistView: a view aliases the caller's buffer, and rawTail
+    // is now encoded lazily, so a later mutation of `inner` would change bytes
+    // that were supposed to be a snapshot of parse time.
     rawTailBytes:
-        inner.length > 13 ? Uint8List.sublistView(inner, 13) : Uint8List(0),
+        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
   );
 }
 
