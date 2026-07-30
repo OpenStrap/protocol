@@ -183,7 +183,10 @@ RealtimeRrResult? realtimeRr(String hex) {
   final first = cntOff + 1;
   for (int i = 0; i < n && first + 2 * i + 2 <= b.length; i++) {
     final v = view.getInt16(first + 2 * i, Endian.little);
-    if (v > 0) rrMs.add(v);
+    // Same physiological range records.dart and control.dart gate on — a
+    // misaligned or corrupted slot should not reach live HRV/breathing
+    // compute as a beat just because this decoder forgot to check it too.
+    if (v >= kMinRrMs && v <= kMaxRrMs) rrMs.add(v);
   }
   return rrMs.isNotEmpty ? RealtimeRrResult(ts, rrMs) : null;
 }
@@ -334,8 +337,13 @@ DecodedSample? decodeRecord(String hex) {
     return DecodedSample(
       ts: d.tsEpoch,
       hr: d.hr,
-      activity: 0,
-      stepsInc: 0,
+      // This record family carries no IMU stepping window at all — that is
+      // "no usable IMU data", the same absence [DecodedSample.activity]'s
+      // doc comment describes for a truncated R10, not a measured 0.0/0.
+      // Fabricating zero here is the exact bug this decoder family was just
+      // fixed to stop making for R10.
+      activity: null,
+      stepsInc: null,
       wristOn: d.hr > 0,
       recType: recType,
     );

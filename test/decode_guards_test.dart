@@ -204,6 +204,19 @@ void main() {
       // decodeRecord never invents a timestamp for a layout we cannot read.
       expect(decodeRecord(_patched(_goodV24, {1: 11})), isNull);
     });
+
+    test('the routed historical family reports null activity/steps, not 0/0',
+        () {
+      // v7/v9/v12/v18/v24 carry no IMU stepping window at all — that is the
+      // same "no usable IMU data" absence as a truncated R10, not a measured
+      // zero-motion reading. Fabricating 0 here silently misreports "this
+      // record type cannot say" as "the wrist was still".
+      for (final version in [9, 12, 18, 24]) {
+        final s = decodeRecord(_patched(_goodV24, {1: version}))!;
+        expect(s.activity, isNull, reason: 'v$version activity');
+        expect(s.stepsInc, isNull, reason: 'v$version stepsInc');
+      }
+    });
   });
 
   // ── 4. parseRealtimeHr reads every declared R-R slot ─────────────────────
@@ -248,6 +261,43 @@ void main() {
         rrMs: [800, 5, 3000, 830],
       );
       expect(parseRealtimeHr(f)!.rrMs, [800, 830]);
+    });
+  });
+
+  // ── 4b. live.dart realtimeRr shares the same physiological RR bound ──────
+  group('realtimeRr is bounded like parseRealtimeHr', () {
+    test('out-of-range slot values are dropped, in-range ones kept', () {
+      // 5ms (12,000bpm) and 3000ms are outside kMinRrMs..kMaxRrMs; a
+      // misaligned/corrupted 0x28 frame must not hand these to live HRV
+      // compute just because realtimeRr forgot the bound control.dart and
+      // records.dart both apply.
+      final f = _realtimeHrFrame(
+        ts: 1775395266,
+        hr: 62,
+        declaredCount: 4,
+        rrMs: [800, 5, 3000, 830],
+      );
+      expect(realtimeRr(_hex(f))!.rrMs, [800, 830]);
+    });
+
+    test('a frame with only out-of-range values yields no result at all', () {
+      final f = _realtimeHrFrame(
+        ts: 1775395266,
+        hr: 62,
+        declaredCount: 2,
+        rrMs: [5, 32000],
+      );
+      expect(realtimeRr(_hex(f)), isNull);
+    });
+
+    test('it still agrees with parseRealtimeHr once both are bounded', () {
+      final f = _realtimeHrFrame(
+        ts: 1775395266,
+        hr: 62,
+        declaredCount: 4,
+        rrMs: [800, 5, 3000, 830],
+      );
+      expect(realtimeRr(_hex(f))!.rrMs, parseRealtimeHr(f)!.rrMs);
     });
   });
 
