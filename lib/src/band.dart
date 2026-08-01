@@ -83,13 +83,52 @@ class BandProfile {
   /// (gen4 = 1, gen5 = 2). `declared` counts the padded inner + 4-byte CRC32.
   final int sizeFieldOffset;
 
-  const BandProfile._(this.type, this.headerLen, this.sizeFieldOffset);
+  /// gen5 header bytes[4:6] when WE are the sender of a COMMAND-type frame
+  /// (host → strap). Null on gen4, which has no such field at all (4-byte
+  /// header).
+  ///
+  /// FINDING (byte-verified against 8 real gen5 fixtures, not stated
+  /// correctly by either upstream reference repo — both assumed a single
+  /// universal `[0x00,0x01]`): these bytes are NOT a fixed constant. Every
+  /// host→strap COMMAND frame carries `[0x00,0x01]`; every strap→host frame
+  /// of every OTHER packet type (METADATA, HISTORICAL_DATA, REALTIME_DATA,
+  /// EVENT, COMMAND_RESPONSE, CONSOLE_LOGS) carries `[0x01,0x00]` instead —
+  /// it is a direction/session marker, not a magic validity constant. The
+  /// CRC16 covers whichever bytes are actually there, so a wrong assumption
+  /// here was never a CRC-validity bug, only a semantic one.
+  ///
+  /// [buildHeader] uses [outboundDirectionMarker] because every existing
+  /// builder in this package constructs an outbound COMMAND frame. Nothing in
+  /// this package gates *inbound*-frame validity on these bytes — do not add
+  /// such a gate, or every real strap→host gen5 frame (i.e. almost
+  /// everything a live BLE session receives) would be rejected.
+  final List<int>? outboundDirectionMarker;
+
+  /// gen5 header bytes[4:6] on a real strap→host frame of any packet type
+  /// other than COMMAND. Documentation-only (no code path currently gates on
+  /// it) — kept as profile data per the multiband port plan's Layer-1
+  /// recommendation, so a future band's direction convention (if any) is data
+  /// here, not a literal buried in framing/BLE code.
+  final List<int>? inboundDirectionMarker;
+
+  const BandProfile._(
+    this.type,
+    this.headerLen,
+    this.sizeFieldOffset, {
+    this.outboundDirectionMarker,
+    this.inboundDirectionMarker,
+  });
 
   static const BandProfile gen4 = BandProfile._(DeviceType.gen4, 4, 1);
-  static const BandProfile gen5 = BandProfile._(DeviceType.gen5, 8, 2);
+  static const BandProfile gen5 = BandProfile._(
+    DeviceType.gen5,
+    8,
+    2,
+    outboundDirectionMarker: [0x00, 0x01],
+    inboundDirectionMarker: [0x01, 0x00],
+  );
 
-  static BandProfile of(DeviceType t) =>
-      t == DeviceType.gen5 ? gen5 : gen4;
+  static BandProfile of(DeviceType t) => t == DeviceType.gen5 ? gen5 : gen4;
 
   bool get isGen5 => type == DeviceType.gen5;
 
@@ -118,7 +157,12 @@ class BandProfile {
 
   /// Build the frame header for a given declared length.
   ///   gen4: `[0xAA][u16 declared LE][crc8]`
-  ///   gen5: `[0xAA][0x01][u16 declared LE][0x00][0x01][crc16modbus LE]`
+  ///   gen5: `[0xAA][0x01][u16 declared LE][outboundDirectionMarker][crc16modbus LE]`
+  ///
+  /// Every builder in this package constructs an OUTBOUND (host→strap)
+  /// COMMAND frame, so this always stamps [outboundDirectionMarker] — never
+  /// use this to synthesize a frame representing something the strap sent us
+  /// (see the field doc for why that byte pair differs by direction).
   Uint8List buildHeader(int declared) {
     if (!isGen5) {
       final h = Uint8List(4);
@@ -133,8 +177,9 @@ class BandProfile {
     h[1] = 0x01;
     h[2] = declared & 0xFF;
     h[3] = (declared >> 8) & 0xFF;
-    h[4] = 0x00;
-    h[5] = 0x01;
+    final dir = outboundDirectionMarker ?? const [0x00, 0x01];
+    h[4] = dir[0];
+    h[5] = dir[1];
     final c = crc16Modbus(h.sublist(0, 6));
     h[6] = c & 0xFF;
     h[7] = (c >> 8) & 0xFF;
