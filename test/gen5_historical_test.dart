@@ -117,7 +117,10 @@ void main() {
     );
 
     test(
-        'decodes record_index as u32 (NOT u16 — §1.7), unix, and the full 24-sample waveform',
+        'decodes record_index as u16 (NOT u32 — cross-validated against '
+        'whoop-rs real_frames.json, where consecutive v26 frames give clean '
+        'consecutive u16 record_ids like 48077,48078,48079 — the u32 reading '
+        'jumps erratically because inner[5:7] is a distinct, unrelated field)',
         () {
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
       expect(parsed.valid, isTrue);
@@ -125,7 +128,7 @@ void main() {
       expect(r, isA<Gen5PpgWaveform>());
       final wf = r as Gen5PpgWaveform;
       expect(wf.histVersion, 26);
-      expect(wf.recordIndex, 25444781); // u16 read would give 16813 — wrong
+      expect(wf.recordIndex, 16813); // u32 read would give 25444781 — wrong
       expect(wf.unix, 1780917232);
       expect(wf.rawByte19, 174);
       expect(wf.burstIndex, 1);
@@ -155,6 +158,37 @@ void main() {
         -235,
         -164,
       ]);
+    });
+
+    test(
+        'record_index is a clean consecutive counter across real consecutive '
+        'frames (whoop-rs real_frames.json ppg_frames — the strongest ground '
+        'truth: three real captured frames one second apart give record_id '
+        '48077,48078,48079; a u32 read of the same bytes would NOT be '
+        'consecutive since inner[5:7] is a distinct field)', () {
+      final hexes = [
+        'aa015000010035412f1a80cdbb7601e700556a33',
+        'aa015000010035412f1a80cebb7601e800556a33',
+        'aa015000010035412f1a80cfbb7601e900556a33',
+      ];
+      final expectedIds = [48077, 48078, 48079];
+      final expectedUnix = [1783955687, 1783955688, 1783955689];
+      for (var i = 0; i < hexes.length; i++) {
+        // These fixtures are truncated (real-world capture excerpt, only the
+        // header + record_index/unix bytes) — long enough to exercise the
+        // shared header parse without needing the full 61-byte v26 payload.
+        final inner = hex(hexes[i]).sublist(8); // strip the 8-byte gen5 header
+        final hdr = Gen5HistoricalHeader.tryParse(inner);
+        expect(hdr, isNotNull);
+        expect(hdr!.version, 26);
+        // The shared header still reads the WRONG u32 value (inner[3:7]) —
+        // that's fine, only Gen5V26Decoder.decode() applies the v26-specific
+        // u16 correction. Confirm that distinction explicitly here.
+        expect(hdr.recordIndex, isNot(expectedIds[i]));
+        final u16RecordIndex = inner[3] | (inner[4] << 8);
+        expect(u16RecordIndex, expectedIds[i]);
+        expect(hdr.unix, expectedUnix[i]);
+      }
     });
   });
 

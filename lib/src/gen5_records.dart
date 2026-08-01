@@ -7,10 +7,14 @@
 // = {9, 12, 24}`, which targeted the WRONG version set (those are WHOOP4's
 // thin/rich HR-only and full-optical layouts, not anything gen5 ships). Real
 // WHOOP 5.0/MG historical data (packet type 0x2F) ships hist_version bytes
-// 18, 20, 21, 26 — confirmed independently by whoop-rs (Rust, hardware-tested)
-// and noop (Swift, multiple straps/firmware builds), and independently
-// re-verified byte-by-byte here against 3 real fixtures (CRC16 + CRC32 both
-// checked) — see gen5_historical_test.dart for the golden parity tests.
+// 18, 20, 21, 26 — the VERSION SET is confirmed independently by whoop-rs
+// (Rust, hardware-tested) and noop (Swift, multiple straps/firmware builds),
+// and v18/v21/v26's FIELD LAYOUTS are independently re-verified byte-by-byte
+// here against real fixtures (CRC16 + CRC32 both checked) — see
+// gen5_historical_test.dart for the golden parity tests.
+//
+// v20 IS THE EXCEPTION to that "confirmed independently" claim — see the loud
+// warning on Gen5V20Decoder/Gen5OpticalBuffer below before trusting it.
 //
 // KEY FACT this whole file leans on: gen5's INNER-relative field offsets are
 // IDENTICAL to gen4's / to the frame-absolute offsets many sources quote,
@@ -151,8 +155,19 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// Raw @ inner[51] (frame-abs 59).
   final int stepCadence;
 
-  /// 0 = still, 1 = walk, 2 = run, 0xFF = invalid. @ inner[55] (frame-abs 63).
+  /// RAW byte @ inner[55] (frame-abs 63). Only 0 (still) / 1 (walk) / 2 (run)
+  /// are valid activity-class codes — everything else (0xFF, 7, ...) is the
+  /// strap signaling "not classified", not a fourth activity. Kept as the raw
+  /// byte for diagnostics; use [activityClassKnown] for the honest, gated
+  /// value (never fabricate a class out of an invalid code).
   final int activityClass;
+
+  /// [activityClass] gated to the 3 known-valid codes, null otherwise — the
+  /// honest getter callers should actually use.
+  int? get activityClassKnown =>
+      (activityClass == 0 || activityClass == 1 || activityClass == 2)
+          ? activityClass
+          : null;
 
   /// °C = raw/10. @ inner[61:63] i16 LE (frame-abs 69).
   final double tempAux1C;
@@ -394,6 +409,21 @@ class Gen5OpticalBlock {
   });
 }
 
+/// ⚠️ EXPERIMENTAL / UNVERIFIED LAYOUT — unlike v18/v21/v26, this record's
+/// field layout is a genuine, UNRESOLVED disagreement between the two
+/// reference implementations, and NEITHER has a real (non-synthetic)
+/// hardware capture of a v20 record to break the tie:
+///   - whoop-rs's model: 6 independent fixed-offset channels of 25 samples
+///     each, at distinct inner offsets, gated on a green-LED-echo anchor.
+///   - This decoder's model (below): 5 blocks of 422 bytes, each holding 2
+///     channels of up to 50 samples, gated on a per-block sample-count byte.
+/// Cross-validating this decoder against whoop-rs's own synthetic test
+/// fixture produces a syntactically-valid-looking but semantically wrong
+/// result — silently, with no error. DO NOT treat [Gen5OpticalBuffer]'s
+/// fields as trustworthy until a real captured v20 frame resolves which
+/// model (if either) is correct. Callers should treat this as low-confidence
+/// / diagnostic-only data, never feed it into a metric pipeline as ground
+/// truth.
 class Gen5OpticalBuffer extends Gen5HistoricalRecord {
   final int layoutMarker;
 
@@ -658,7 +688,13 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
 
     return Gen5PpgWaveform(
       histVersion: hdr.version,
-      recordIndex: hdr.recordIndex,
+      // v26 is the ONE exception to the shared header's u32 record_index:
+      // whoop-rs's ground truth (real captured frames) reads only a u16 here
+      // — inner[5:7] is a separate, distinct field, not the top half of a
+      // u32 counter. Reusing hdr.recordIndex (u32 @ inner[3:7]) inflates the
+      // counter ~500x on real captures. Confirmed by independent
+      // cross-validation against whoop-rs's real_frames.json fixtures.
+      recordIndex: v.getUint16(3, Endian.little),
       unix: hdr.unix,
       layoutMarker: hdr.layoutMarker,
       rawByte19: inner[11],

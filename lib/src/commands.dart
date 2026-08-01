@@ -404,10 +404,10 @@ Uint8List cmdGetClockGen5(int seq) =>
 /// and its wake alarm. [overallLoop] defaults to 1 (a single short buzz);
 /// pass a higher value for a longer/repeated pattern.
 Uint8List cmdBuzzGen5Maverick(int seq, {int overallLoop = 1}) {
-  if (overallLoop < 0 || overallLoop > 0xff) {
-    throw ArgumentError.value(
-        overallLoop, 'overallLoop', 'must fit in a u8 (0-255)');
-  }
+  // Clamp rather than throw — a caller-supplied loop count (e.g. from a UI
+  // slider) out of u8 range is a caller mistake, not a reason to crash the
+  // buzz command entirely. Matches the reference implementation's behavior.
+  final clampedLoop = overallLoop < 0 ? 0 : (overallLoop > 0xff ? 0xff : overallLoop);
   final payload = <int>[
     0x01,
     47,
@@ -420,7 +420,7 @@ Uint8List cmdBuzzGen5Maverick(int seq, {int overallLoop = 1}) {
     0,
     0,
     0,
-    overallLoop & 0xff,
+    clampedLoop,
   ];
   return buildCommand(
       seq, Cmd.runHapticPatternMaverick, payload, BandProfile.gen5);

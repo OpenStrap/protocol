@@ -625,13 +625,26 @@ int? _firstPlausibleUnix(Uint8List payload) {
   return null;
 }
 
+// GET_DATA_RANGE-specific bounds/scan, tighter than the generic
+// _firstPlausibleUnix used for GET_CLOCK. Cross-validated against a real
+// GET_DATA_RANGE capture against whoop-rs's ground truth: the generic
+// [_maxPlausibleUnix] (year 2100) let a spurious far-future word through as
+// "newest", and scanning every unaligned byte offset of the payload (rather
+// than the u32 grid) picked up an off-grid straddle word neither field
+// actually occupies. Both fixed here without touching GET_CLOCK's own
+// (deliberately more permissive) scan.
+const int _maxPlausibleUnixForRange = 1900000000; // ~2030 — tighter than 2100
+
 /// [oldest, newest] from the two plausible-unix u32s in a GET_DATA_RANGE response
-/// (min and max of all plausible epochs found). Null if fewer than one is present.
+/// (min and max of all plausible epochs found), scanned on the 4-byte grid
+/// anchored at payload offset 0 (== frame-absolute offset 7, i.e. right after
+/// the 7-byte inner header [type,seq,cmd,result]) — never at an arbitrary
+/// unaligned byte offset. Null if fewer than one is present.
 List<int>? _plausibleUnixRange(Uint8List payload) {
   final found = <int>[];
-  for (int o = 0; o + 4 <= payload.length; o++) {
+  for (int o = 0; o + 4 <= payload.length; o += 4) {
     final v = u32(payload, o);
-    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnix) found.add(v);
+    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnixForRange) found.add(v);
   }
   if (found.isEmpty) return null;
   found.sort();
