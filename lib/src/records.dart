@@ -543,6 +543,8 @@ R24? parseGen5Record(Uint8List inner) {
     spo2IrRaw: 0,
     skinTempRaw: 0, // gen5 temp arrives via TEMPERATURE_LEVEL event, not here
     ambientRaw: 0,
-    rawTail: _hexFrom(inner, 13),
+    // COPY, not sublistView — see the gen4 v24 call site for why.
+    rawTailBytes:
+        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
   );
 }
