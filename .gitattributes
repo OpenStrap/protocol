@@ -1,0 +1,11 @@
+# The TypeScript under ts/ is the frozen reference oracle: it generated
+# decode_parity_cases.json (2934 cases) and dart_header.json (550 cases), which
+# the Dart suite asserts against on every run. It is kept for provenance and
+# regeneration, not shipped or imported by anything.
+#
+# Marking it vendored keeps GitHub's language bar reporting what this package
+# actually is — pure Dart — without deleting the oracle.
+ts/**            linguist-vendored
+*.json           linguist-generated
+decode_parity_cases.json  linguist-generated
+dart_header.json          linguist-generated

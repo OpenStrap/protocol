@@ -148,5 +148,34 @@ void main() {
       expect(rest.length, 1);
       expect(rest.first.valid, isTrue);
     });
+
+    test('a corrupted length byte does not swallow the frame behind it', () {
+      final a = buildCommand(3, Cmd.getDataRange, List<int>.filled(64, 0x11));
+      final b = buildCommand(4, Cmd.getHelloHarvard, const [0x00]);
+      final stream = <int>[...a, ...b];
+      // Flip one bit in the low length byte. crc8 no longer matches, so the
+      // declared length must not be trusted.
+      stream[1] ^= 0x01;
+
+      final re = FrameReassembler();
+      final frames = re.feed(stream);
+
+      expect(re.resyncs, greaterThan(0), reason: 'bad length must force a resync');
+      expect(frames.length, 1, reason: 'the intact second frame must survive');
+      expect(frames.single.valid, isTrue);
+      expect(frames.single.seq, 4);
+    });
+
+    test('a dropped byte costs one frame, not the rest of the stream', () {
+      final a = buildCommand(5, Cmd.getDataRange, List<int>.filled(32, 0x22));
+      final b = buildCommand(6, Cmd.getHelloHarvard, const [0x00]);
+      final stream = <int>[...a, ...b]..removeAt(2); // drop a length byte
+
+      final re = FrameReassembler();
+      final frames = re.feed(stream);
+
+      expect(frames.map((f) => f.seq), contains(6));
+      expect(frames.every((f) => f.valid), isTrue);
+    });
   });
 }

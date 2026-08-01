@@ -165,8 +165,21 @@ Uint8List cmdToggleImu(int seq, bool on) =>
     buildCommand(seq, Cmd.toggleImuMode, [on ? 0x01 : 0x00]);
 Uint8List cmdEnableOptical(int seq, bool on) =>
     buildCommand(seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00]);
-Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) =>
-    buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0]);
+/// Play a haptic waveform effect (RUN_HAPTICS_PATTERN = 0x4F).
+///
+/// [pattern] is a single u8 waveform-effect id. It is RANGE-CHECKED rather than
+/// masked: `buildFrame` would happily wrap `cmdBuzz(0, 300)` to effect 44 and
+/// hand the strap a perfectly CRC-valid packet playing the wrong effect, with
+/// nothing to tell the caller. A value that does not fit a u8 is a caller bug,
+/// so throw. (Contrast [cmdSetAlarm], which masks because its payload is a
+/// pattern LIST already validated for length.)
+Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) {
+  if (pattern < 0 || pattern > 0xff) {
+    throw ArgumentError.value(
+        pattern, 'pattern', 'haptic waveform effect must fit in a u8 (0-255)');
+  }
+  return buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0]);
+}
 
 // ── On-device haptic alarm (SET_ALARM_TIME = 0x42) ─────────────────────────
 //

@@ -91,6 +91,13 @@ Frame? parseFrame(Uint8List raw, {BandProfile profile = BandProfile.gen4}) {
 class FrameReassembler {
   final List<int> _buf = [];
   final BandProfile profile;
+  int _resyncs = 0;
+
+  /// Number of times the reassembler skipped a byte because the envelope did
+  /// not hold up (bad SOF, implausible length, or a length field whose crc8
+  /// did not match). Callers use this to detect a degraded link — a bad
+  /// length is discarded here, so it never reaches [Frame.valid].
+  int get resyncs => _resyncs;
 
   FrameReassembler({this.profile = BandProfile.gen4});
 
@@ -99,6 +106,7 @@ class FrameReassembler {
     _buf.addAll(chunk);
 
     bool resync() {
+      _resyncs++;
       // Find next SOF after index 0.
       int nxt = -1;
       for (int i = 1; i < _buf.length; i++) {
@@ -128,6 +136,17 @@ class FrameReassembler {
         if (!resync()) break;
         continue;
       }
+      // The header integrity check (crc8 on gen4, crc16-modbus on gen5)
+      // protects the length field and nothing else, so check it before
+      // acting on `declared`. Skipping this consumes up to 4092 bytes of
+      // good stream on a single corrupted length byte — records the band is
+      // about to trim from flash and will not send again. Must go through
+      // `profile.headerCrcValid` (not a bare gen4 crc8), or every gen5 frame
+      // fails this guard and the reassembler never gets past resync.
+      if (_buf.length < headerLen || !profile.headerCrcValid(_buf)) {
+        if (!resync()) break;
+        continue;
+      }
       if (_buf.length < total) break; // wait for the rest of this frame
       final frame =
           parseFrame(Uint8List.fromList(_buf.sublist(0, total)), profile: profile);
@@ -144,5 +163,8 @@ class FrameReassembler {
     return out;
   }
 
-  void reset() => _buf.clear();
+  void reset() {
+    _buf.clear();
+    _resyncs = 0;
+  }
 }

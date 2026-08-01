@@ -13,6 +13,12 @@ class R24 {
   final int hr; // heart rate bpm @ inner[17] (frame[21], v24/v12)
 
   /// Beat-to-beat (R-R) intervals in ms for this 1 s record, 0–4 of them.
+  ///
+  /// [rrCount] is the number of intervals we ACCEPTED, i.e. always
+  /// `rrIntervalsMs.length` — not the raw declared count byte. A record whose
+  /// declared count is implausible (see [kMaxRrPerRecord]) or whose interval
+  /// values fall outside [kMinRrMs]..[kMaxRrMs] contributes nothing here rather
+  /// than handing HRV a fabricated beat.
   final int rrCount;
   final List<int> rrIntervalsMs;
 
@@ -47,7 +53,13 @@ class R24 {
   final int ambientRaw;
 
   /// Untouched payload [13:] as hex — kept for re-decode as the map improves.
-  final String rawTail;
+  ///
+  /// Encoded on first read, not at parse time. Nothing in the stack reads it
+  /// today, and eagerly hex-encoding 83 bytes per record dominated parseR24's
+  /// cost on the offload path.
+  String get rawTail => _rawTailHex ??= _hexFrom(_rawTailBytes, 0);
+  final Uint8List _rawTailBytes;
+  String? _rawTailHex;
 
   R24({
     required this.histVersion,
@@ -65,8 +77,8 @@ class R24 {
     required this.spo2IrRaw,
     required this.skinTempRaw,
     required this.ambientRaw,
-    required this.rawTail,
-  });
+    required Uint8List rawTailBytes,
+  }) : _rawTailBytes = rawTailBytes;
 
   /// Map matching the TS `out` shape (snake_case keys) for parity comparison.
   Map<String, dynamic> toMap() => {
@@ -91,13 +103,54 @@ class R24 {
 // Replicate JavaScript Math.round semantics: round half toward +Infinity
 // (Math.round(2.5)=3, Math.round(-2.5)=-2). Dart's roundToDouble rounds half
 // away from zero, so we implement the JS rule explicitly.
-double _jsRound(double v) => (v + 0.5).floorToDouble();
+//
+// NaN / ±Infinity are passed through UNCHANGED rather than being folded to 0.0
+// (which is what control.dart's `_round` does). Rounding cannot manufacture a
+// real number out of a non-finite one: a NaN accel component means the four
+// bytes we read are not a float32 field, and silently emitting 0.0 would turn
+// "these bytes are not accel" into "the wrist was perfectly still" — a
+// fabricated measurement that then propagates through every downstream
+// mean/std. control.dart can afford 0.0 because its callers only use it for
+// display scalars; here the honest answer is to keep the non-finite value
+// visible so [_parseV24Layout] can REJECT the whole record (see the
+// `isFinite` gate there), which is an absence the API can already express
+// (parseR24 returns null).
+double _jsRound(double v) {
+  if (!v.isFinite) return v;
+  return (v + 0.5).floorToDouble();
+}
 
 /// Round `v` to `decimals` places using JS `Math.round(v*p)/p` semantics.
+/// Non-finite input is returned unchanged — see [_jsRound].
 double _round(double v, int decimals) {
+  if (!v.isFinite) return v;
   final p = _pow10(decimals);
   return _jsRound(v * p) / p;
 }
+
+/// Largest R-R interval count a single 1 s historical record can plausibly
+/// declare. The sibling realtime decoder (live.dart `realtimeRr`) applies the
+/// same ceiling for the same reason: the wire form carries 0–4 beats, so a
+/// larger count byte means we are reading the wrong offset — not a second
+/// containing dozens of heartbeats. A record declaring more than this yields
+/// NO intervals at all (absence), never a truncated read of whatever bytes
+/// happen to follow (ppg, accel float32s, skin contact, spo2, temp, ambient).
+const int kMaxRrPerRecord = 8;
+
+/// Physiologically possible beat-to-beat interval bounds, ms — 2500 ms = 24 bpm,
+/// 200 ms = 300 bpm. Identical to the bound control.dart's `parseRealtimeHr`
+/// applies to the realtime RR slots, so both decoders agree on what a beat is.
+const int kMinRrMs = 200;
+const int kMaxRrMs = 2500;
+
+/// The historical-record layout versions this package has a field map for.
+/// v25 has its own dedicated layout ([_parseV25]); the rest share the v24 field
+/// map with a per-version HR offset ([_hrOffsetByVersion]). Used by live.dart's
+/// `decodeRecord` so every version [parseR24] can decode is actually routed to
+/// it (v12 in particular is real firmware and used to fall through to null,
+/// which cost callers the record's own timestamp).
+final Set<int> kKnownRecordVersions =
+    Set.unmodifiable({..._hrOffsetByVersion.keys, 25});
 
 double _pow10(int n) {
   double p = 1;
@@ -157,7 +210,11 @@ R24? _parseV25(Uint8List inner) {
     spo2IrRaw: 0,
     skinTempRaw: 0,
     ambientRaw: 0,
-    rawTail: _hexFrom(inner, 13),
+    // COPY, not sublistView: a view aliases the caller's buffer, and rawTail
+    // is now encoded lazily, so a later mutation of `inner` would change bytes
+    // that were supposed to be a snapshot of parse time.
+    rawTailBytes:
+        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
   );
 }
 
@@ -264,12 +321,25 @@ R24? _parseV24Layout(
   );
 
   // R-R intervals: rr_count @ [18], then rr_count signed int16 LE from [19].
-  final rrCount = inner[18];
+  //
+  // The declared count is UNTRUSTED. Taken raw it addresses up to 255 int16s
+  // starting at [19], which walks straight through ppg@29/31, the accel
+  // float32s@36/40/44, skin contact@51, spo2@64/66, skin temp@68 and
+  // ambient@70 — reinterpreting all of them as "beats" that then feed
+  // RMSSD/HRV. So: reject an implausible count outright, and accept only
+  // values inside the physiological interval range. Both guards run on EVERY
+  // path, including the "trusted" v24/v12 one that skips
+  // [_physiologicallyPlausible].
+  final declaredRrCount = inner[18];
   final rrIntervalsMs = <int>[];
-  for (int i = 0; i < rrCount && 19 + 2 * i + 2 <= inner.length; i++) {
-    final v = view.getInt16(19 + 2 * i, Endian.little);
-    if (v > 0) rrIntervalsMs.add(v);
+  if (declaredRrCount <= kMaxRrPerRecord) {
+    for (int i = 0; i < declaredRrCount && 19 + 2 * i + 2 <= inner.length; i++) {
+      final v = view.getInt16(19 + 2 * i, Endian.little);
+      if (v >= kMinRrMs && v <= kMaxRrMs) rrIntervalsMs.add(v);
+    }
   }
+  // rrCount reports what we accepted, never what the byte claimed.
+  final rrCount = rrIntervalsMs.length;
 
   final hr = inner[hrOffset];
   final accelG = [
@@ -277,6 +347,16 @@ R24? _parseV24Layout(
     _round(view.getFloat32(40, Endian.little), 4),
     _round(view.getFloat32(44, Endian.little), 4),
   ];
+
+  // A NaN / ±Infinity accel component means bytes [36:48] are not the float32
+  // vector this field map claims. Emitting 0.0 (or the raw NaN) would poison
+  // every downstream mean/std with a value that reads as a real measurement,
+  // so we reject the record instead — the caller already handles a null decode
+  // by archiving the raw bytes. This runs BEFORE the validate gate so it also
+  // covers the trusted v24/v12 path, which skips [_physiologicallyPlausible].
+  for (final c in accelG) {
+    if (!c.isFinite) return null;
+  }
 
   if (validate && !_physiologicallyPlausible(accelG, hr)) {
     return null;
@@ -298,7 +378,11 @@ R24? _parseV24Layout(
     spo2IrRaw: view.getUint16(66, Endian.little),
     skinTempRaw: view.getUint16(68, Endian.little),
     ambientRaw: view.getUint16(70, Endian.little),
-    rawTail: _hexFrom(inner, 13),
+    // COPY, not sublistView: a view aliases the caller's buffer, and rawTail
+    // is now encoded lazily, so a later mutation of `inner` would change bytes
+    // that were supposed to be a snapshot of parse time.
+    rawTailBytes:
+        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
   );
 }
 
