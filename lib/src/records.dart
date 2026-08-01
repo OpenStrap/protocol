@@ -485,66 +485,24 @@ class FirmwareAwareR24Decoder {
   }
 }
 
-/// gen5 (WHOOP 5) normal-history record versions carrying a 1 Hz HR marker at
-/// inner[17]. Empirically, real WHOOP 5.0 ("Goose") firmware serves K24 for its
-/// per-second history; K9/K12 share the same thin layout / HR offset.
-const Set<int> _gen5NormalHistoryVersions = {9, 12, 24};
-
-/// Decode a WHOOP 5 (gen5) historical 1 Hz record. `inner` starts at the
-/// packet-type byte (0x2F), exactly like [parseR24] — the frame layer has
-/// already stripped the (8-byte) gen5 header, so the INNER offsets here are the
-/// same coordinates gen4 uses.
-///
-/// gen5's per-second record (K24 family) is DELIBERATELY THIN versus gen4's
-/// rich R24: on validated owned captures, ONLY HR rides the 1 Hz cadence.
-/// Everything else gen4 packed into R24 is either absent or lives elsewhere:
-///
-///   • HR       — inner[17], direct bpm, gated 25..230 (0 kept: warming device)
-///   • accelG   — EMPTY. No 1 Hz accel on gen5 — motion arrives on separate
-///                K10/K21 streams whose accel/gyro offsets are IDENTICAL to
-///                gen4's live R10 (decode via [decodeR10Imu]).
-///   • RR       — EMPTY. Real captures carry no RR here; gen5 sources beat
-///                timing from the R17 optical stream, not the 1 Hz record.
-///                A speculative RR decode here would poison HRV, so we don't.
-///   • skinTemp — EMPTY. Temperature is NOT in the 1 Hz record: it arrives via
-///                the TEMPERATURE_LEVEL event (id 17). (An earlier guess of a
-///                u16 at inner[16] was proven to be HR<<8 aliasing, not a real
-///                reading — decoding it would emit a fake temp that tracks HR.)
-///   • SpO2     — EMPTY. Not exposed at any offset we have validated.
-///
-/// Running gen5 bytes through gen4's v24 optical/accel map reads all-zero
-/// garbage on real captures, so we decode ONLY the confirmed HR and leave the
-/// rest empty (honest-null, never fabricated).
-///
-/// Returns null for non-normal-history versions (e.g. K10/K21 motion) or records
-/// too short to carry the HR byte — the caller archives those to `raw_archive`.
-R24? parseGen5Record(Uint8List inner) {
-  if (inner.length < 18) return null;
-  final version = inner[1];
-  if (!_gen5NormalHistoryVersions.contains(version)) return null;
-
-  final view = _view(inner);
-  final hr = inner[17];
-  if (hr != 0 && (hr < 25 || hr > 230)) return null; // implausible → archive
-
-  return R24(
-    histVersion: version,
-    tsEpoch: view.getUint32(7, Endian.little),
-    tsSubsec: view.getUint16(11, Endian.little),
-    counter: view.getUint32(3, Endian.little),
-    hr: hr,
-    rrCount: 0,
-    rrIntervalsMs: const [],
-    ppgGreen: 0,
-    ppgRedIr: 0,
-    accelG: const [], // no 1 Hz accel on gen5
-    skinContact: 0,
-    spo2RedRaw: 0, // not exposed at a validated offset yet
-    spo2IrRaw: 0,
-    skinTempRaw: 0, // gen5 temp arrives via TEMPERATURE_LEVEL event, not here
-    ambientRaw: 0,
-    // COPY, not sublistView — see the gen4 v24 call site for why.
-    rawTailBytes:
-        inner.length > 13 ? Uint8List.fromList(inner.sublist(13)) : Uint8List(0),
-  );
-}
+// ── gen5 (WHOOP 5) historical records ───────────────────────────────────────
+//
+// SUPERSEDED (2026-08, multiband port): this file used to also own a
+// `parseGen5Record` targeting `_gen5NormalHistoryVersions = {9, 12, 24}`.
+// That version set is WRONG — 9/12/24 are WHOOP4's thin/rich HR-only and
+// full-optical layouts, not anything a real WHOOP 5.0/MG strap ships. Both
+// independent reference implementations (whoop-rs, hardware-tested; noop,
+// tens of thousands of captured records across multiple straps/firmware
+// builds) agree that real gen5 historical data (packet type 0x2F) ships
+// hist_version bytes 18, 20, 21, 26 — never 9/12/24. Running gen5 bytes
+// through this file's v24 field map (which is what the old `parseGen5Record`
+// effectively did, gated down to just the HR byte) reads all-zero garbage on
+// real captures — exactly the symptom this file's old doc comment described,
+// which was itself the tell that the version set was wrong, not that gen5's
+// 1 Hz record is "deliberately thin".
+//
+// The real decoders now live in gen5_records.dart: [parseGen5Historical]
+// dispatches to the v18 (per-second biometric summary — the actual gen5
+// analogue of this file's R24/v24), v20 (optical deep buffer), v21 (IMU deep
+// buffer), and v26 (PPG waveform) decoders. See that file for the full field
+// maps and the byte-level verification behind them.
