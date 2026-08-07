@@ -163,6 +163,11 @@ R10Lite? parseR10Lite(Uint8List inner) {
 }
 
 // ── Compact realtime HR (small 0x28 packet body) ─────────────────────────────
+
+/// RR slots the compact 0x28 form can hold: [10] [12] [14] [16], stopping
+/// before the `wearing` byte at [18].
+const int _maxRealtimeRr = 4;
+
 class RealtimeHr {
   final int hrBpm;
   final double hrPrecise;
@@ -188,17 +193,23 @@ RealtimeHr? parseRealtimeHr(Uint8List inner) {
   // be one byte out of bounds. no rr_count byte just means no RR intervals,
   // not "reject this decode" (copilot review caught this, real bug).
   final n = inner.length > 9 ? inner[9] : 0;
-  if (n > 0 && inner.length >= 12) {
-    final v = u16(inner, 10);
-    // 200-2500ms = 24-300bpm; was relaxed to `v>0` without comment, which lets
-    // corrupted/out-of-range timing noise straight into live RR — reverted.
-    if (v >= 200 && v <= 2500) rr.add(v);
-  }
-  if (n > 1 && inner.length >= 14) {
-    final v = u16(inner, 12);
-    // 200-2500ms = 24-300bpm; was relaxed to `v>0` without comment, which lets
-    // corrupted/out-of-range timing noise straight into live RR — reverted.
-    if (v >= 200 && v <= 2500) rr.add(v);
+  // Read ALL declared intervals, not just the first two — this used to stop
+  // after slots 1 and 2, silently discarding beats 3 and 4 that live.dart's
+  // realtimeRr returns from the same bytes (fewer beats = a different RMSSD).
+  //
+  // The wire form has room for exactly four slots, at [10] [12] [14] [16],
+  // bounded by the `wearing` byte at [18]. A declared count above that cannot
+  // fit the layout, so — like live.dart, which rejects a large count as
+  // "wrong offset" — we emit NO intervals rather than reading `wearing` (or
+  // whatever follows) as a heartbeat. Values are gated to the same
+  // physiological range records.dart uses.
+  if (n > 0 && n <= _maxRealtimeRr) {
+    for (int i = 0; i < n; i++) {
+      final off = 10 + 2 * i;
+      if (off + 2 > inner.length) break;
+      final v = u16(inner, off);
+      if (v >= kMinRrMs && v <= kMaxRrMs) rr.add(v);
+    }
   }
   final wearing = inner.length > 18 ? inner[18] == 1 : true;
   return RealtimeHr(hr, hr.toDouble(), rr, wearing, ts);
@@ -236,6 +247,12 @@ class HelloInfo {
   });
 }
 
+/// A battery percentage is 0..100. Anything else is a mis-read field, not a
+/// battery level — callers must omit it, never clamp it (a clamp would report
+/// a confident 100% for garbage bytes).
+bool _validBatteryPct(double pct) =>
+    pct.isFinite && pct >= 0.0 && pct <= 100.0;
+
 List<String> _asciiRuns(Uint8List data, int start, int minlen) {
   final runs = <String>[];
   final cur = StringBuffer();
@@ -258,12 +275,20 @@ HelloInfo parseHello(Uint8List payload) {
   final info = HelloInfo(rawHex: _hex(payload));
   if (payload.length < 10) return info;
 
+  // Battery is a u16 in tenths of a percent whose offset drifts across
+  // firmware, so we scan for the first field that could BE one. The upper
+  // bound used to be 1009 (= 100.9%), which let an impossible reading through;
+  // a percentage is 0..100 by definition, so 1000 is the ceiling. Out of
+  // range = not the battery field, keep scanning / leave batteryPct null.
   for (int off = 1; off < 10; off++) {
     if (off + 2 <= payload.length) {
       final v = u16(payload, off);
-      if (v >= 10 && v <= 1009) {
-        info.batteryPct = _round(v / 10.0, 1);
-        break;
+      if (v >= 10 && v <= 1000) {
+        final pct = _round(v / 10.0, 1);
+        if (_validBatteryPct(pct)) {
+          info.batteryPct = pct;
+          break;
+        }
       }
     }
   }
@@ -401,12 +426,30 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
   final payload = Uint8List.sublistView(inner, 3);
   final dec = <String, dynamic>{};
   if (op == Cmd.getBatteryLevel && inner.length >= 7) {
-    dec['battery_pct'] = _round(u16(inner, 5) / 10.0, 1); // u16 LE @[5:7] / 10
+    // u16 LE @[5:7] in tenths of a percent. A battery percentage outside
+    // 0..100 is not a battery percentage — `ff ff` here used to surface as
+    // 6553.5%. Emit nothing rather than a number the UI would render.
+    final pct = _round(u16(inner, 5) / 10.0, 1);
+    if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
   } else if (op == Cmd.getHelloHarvard) {
     final h = parseHello(payload);
     dec['hello'] = h;
-  } else if (op == Cmd.getAlarmTime && payload.length >= 5) {
-    dec['alarm_epoch'] = u32(payload, 1);
+  } else if (op == Cmd.getAlarmTime && payload.isNotEmpty) {
+    // GET_ALARM_TIME echoes whichever alarm form the strap holds, and the
+    // epoch offset DIFFERS between them (this package writes both — see
+    // cmdSetAlarmSimple / cmdSetAlarm):
+    //   0x01  simple, 7 B:  [0x01][u32 epoch][u16 subsec]        → epoch @1
+    //   0x04  rich,  20 B:  [0x04][u8 index][u32 epoch][u16 subsec][12 B haptics]
+    //                                                             → epoch @2
+    // Reading @1 unconditionally decoded the rich form's [index][epoch:3] as
+    // the epoch. An unrecognised leading byte is an unknown form: emit no
+    // alarm_epoch rather than guessing an offset.
+    final form = payload[0];
+    if (form == 0x01 && payload.length >= 5) {
+      dec['alarm_epoch'] = u32(payload, 1);
+    } else if (form == 0x04 && payload.length >= 6) {
+      dec['alarm_epoch'] = u32(payload, 2);
+    }
   } else if (op == Cmd.getAdvertisingNameHarvard) {
     dec['strap_name'] = _decodeAdvName(payload);
   } else if (op == Cmd.getClock) {

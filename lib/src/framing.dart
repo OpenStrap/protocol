@@ -78,12 +78,20 @@ Frame? parseFrame(Uint8List raw) {
 /// out of the running buffer. length-based reassembler.
 class FrameReassembler {
   final List<int> _buf = [];
+  int _resyncs = 0;
+
+  /// Number of times the reassembler skipped a byte because the envelope did
+  /// not hold up (bad SOF, implausible length, or a length field whose crc8
+  /// did not match). Callers use this to detect a degraded link — a bad
+  /// length is discarded here, so it never reaches [Frame.valid].
+  int get resyncs => _resyncs;
 
   List<Frame> feed(List<int> chunk) {
     final out = <Frame>[];
     _buf.addAll(chunk);
 
     bool resync() {
+      _resyncs++;
       // Find next SOF after index 0.
       int nxt = -1;
       for (int i = 1; i < _buf.length; i++) {
@@ -112,6 +120,14 @@ class FrameReassembler {
         if (!resync()) break;
         continue;
       }
+      // The crc8 protects the length field and nothing else, so check it
+      // before acting on `declared`. Skipping this consumes up to 4092 bytes
+      // of good stream on a single corrupted length byte — records the band
+      // is about to trim from flash and will not send again.
+      if (_buf[3] != crc8(Uint8List.fromList([_buf[1], _buf[2]]))) {
+        if (!resync()) break;
+        continue;
+      }
       if (_buf.length < total) break; // wait for the rest of this frame
       final frame = parseFrame(Uint8List.fromList(_buf.sublist(0, total)));
       if (frame != null) out.add(frame);
@@ -127,5 +143,8 @@ class FrameReassembler {
     return out;
   }
 
-  void reset() => _buf.clear();
+  void reset() {
+    _buf.clear();
+    _resyncs = 0;
+  }
 }
