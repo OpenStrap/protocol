@@ -5,8 +5,10 @@
 // Dart parseR24 (records.dart, Source 1). PURE Dart.
 
 import 'dart:typed_data';
+import 'band.dart';
 import 'constants.dart';
 import 'framing.dart';
+import 'gen5_records.dart';
 import 'records.dart';
 
 // ── little-endian helpers over a byte list ──────────────────────────────────
@@ -250,8 +252,7 @@ class HelloInfo {
 /// A battery percentage is 0..100. Anything else is a mis-read field, not a
 /// battery level — callers must omit it, never clamp it (a clamp would report
 /// a confident 100% for garbage bytes).
-bool _validBatteryPct(double pct) =>
-    pct.isFinite && pct >= 0.0 && pct <= 100.0;
+bool _validBatteryPct(double pct) => pct.isFinite && pct >= 0.0 && pct <= 100.0;
 
 List<String> _asciiRuns(Uint8List data, int start, int minlen) {
   final runs = <String>[];
@@ -380,9 +381,8 @@ EventInfo? parseEvent(Uint8List inner) {
   // begins at [12]. All guarded by length so short frames degrade cleanly.
   final ts = inner.length >= 8 ? u32(inner, 4) : 0;
   final subsec = inner.length >= 10 ? u16(inner, 8) : 0;
-  final body = inner.length > 12
-      ? Uint8List.sublistView(inner, 12)
-      : Uint8List(0);
+  final body =
+      inner.length > 12 ? Uint8List.sublistView(inner, 12) : Uint8List(0);
   final dec = <String, dynamic>{};
   switch (eid) {
     case EventId.chargingOn:
@@ -398,7 +398,23 @@ EventInfo? parseEvent(Uint8List inner) {
       dec['pack_connected'] = eid == EventId.batteryPackConnected;
       break;
     case EventId.doubleTap:
-      dec['double_tap'] = true;
+      dec['double_tap'] = true; // no payload beyond event+timestamp, confirmed
+      break;
+    case EventId.batteryLevel:
+      // Byte-verified on a real BATTERY_LEVEL fixture: soc @ body[1] (u16,
+      // DECI-percent — divide by 10; this is a DIFFERENT convention from
+      // COMMAND_RESPONSE's GET_BATTERY_LEVEL, which is direct-percent on
+      // gen5. Don't conflate the two.), battery_mV @ body[5] (u16),
+      // charging @ bit0 of body[10]. Shared across gen4/gen5 — these are
+      // inner-relative offsets, identical across generations.
+      if (body.length >= 12) {
+        final soc = _round(u16(body, 1) / 10.0, 1);
+        if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
+          dec['battery_pct'] = soc;
+        }
+        dec['battery_mv'] = u16(body, 5);
+        dec['charging'] = (body[10] & 0x01) != 0;
+      }
       break;
     case EventId.highFreqSyncPrompt:
       dec['high_freq_sync'] = 'prompt';
@@ -408,6 +424,12 @@ EventInfo? parseEvent(Uint8List inner) {
       break;
     case EventId.highFreqSyncDisabled:
       dec['high_freq_sync'] = 'disabled';
+      break;
+    case EventId.bleRealtimeHrOn:
+    case EventId.bleRealtimeHrOff:
+      // gen5-only confirmation that the realtime HR stream toggle actually
+      // took (gen4 has no equivalent confirmation event for this).
+      dec['realtime_hr_stream'] = eid == EventId.bleRealtimeHrOn;
       break;
   }
   return EventInfo(eid, name, ts, dec, tsSubsec: subsec, body: body);
@@ -420,20 +442,49 @@ class CmdResponse {
   CmdResponse(this.opcode, this.decoded);
 }
 
-CmdResponse? parseCommandResponse(Uint8List inner) {
+/// Parse a COMMAND_RESPONSE (0x24) frame. [profile] selects generation-
+/// specific response-BODY-SHAPE differences for opcodes that are otherwise
+/// opcode-identical across gen4/gen5 (per the multiband spec §1.4: shared
+/// opcodes, generational differences live in the response shape, not the
+/// opcode number). Defaults to gen4 so every existing caller is unchanged.
+CmdResponse? parseCommandResponse(Uint8List inner,
+    {BandProfile profile = BandProfile.gen4}) {
   if (inner.length < 3 || inner[0] != PacketType.commandResponse) return null;
   final op = inner[2];
   final payload = Uint8List.sublistView(inner, 3);
   final dec = <String, dynamic>{};
-  if (op == Cmd.getBatteryLevel && inner.length >= 7) {
-    // u16 LE @[5:7] in tenths of a percent. A battery percentage outside
-    // 0..100 is not a battery percentage — `ff ff` here used to surface as
-    // 6553.5%. Emit nothing rather than a number the UI would render.
-    final pct = _round(u16(inner, 5) / 10.0, 1);
-    if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
+  if (op == Cmd.getBatteryLevel && inner.length >= (profile.isGen5 ? 6 : 7)) {
+    // Byte-verified: gen5 returns a DIRECT percent @ inner[5] (u8, e.g.
+    // 0x2F=47%) — NOT deci-percent like gen4's u16 LE @[5:7]. Conflating the
+    // two would either divide a real gen5 percent by 10 or read half of a
+    // gen4 deci-percent as a whole percent.
+    if (profile.isGen5) {
+      final pct = inner[5].toDouble();
+      if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
+    } else {
+      final pct = _round(u16(inner, 5) / 10.0, 1);
+      // A battery percentage outside 0..100 is not a battery percentage —
+      // `ff ff` here used to surface as 6553.5%. Emit nothing rather than a
+      // number the UI would render.
+      if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
+    }
   } else if (op == Cmd.getHelloHarvard) {
     final h = parseHello(payload);
     dec['hello'] = h;
+  } else if (op == Cmd.getHello) {
+    // gen5's GET_HELLO (0x91) response — a DIFFERENT opcode from gen4's
+    // GET_HELLO_HARVARD (0x23), with its own byte-verified fields:
+    // device_name @ pay[16], fw_version (4 raw bytes) @ pay[93] gated on
+    // pay[93] == 50 (the fw major-version byte real captures show as 50 —
+    // e.g. "50.38.1.0" — NOT the ASCII character '5' (that would be 53);
+    // absent the gate, don't report a fw_version at all).
+    if (payload.length > 16) {
+      final name = _cstrAt(payload, 16);
+      if (name.isNotEmpty) dec['device_name'] = name;
+    }
+    if (payload.length >= 97 && payload[93] == 50) {
+      dec['fw_version'] = Uint8List.fromList(payload.sublist(93, 97));
+    }
   } else if (op == Cmd.getAlarmTime && payload.isNotEmpty) {
     // GET_ALARM_TIME echoes whichever alarm form the strap holds, and the
     // epoch offset DIFFERS between them (this package writes both — see
@@ -460,6 +511,22 @@ CmdResponse? parseCommandResponse(Uint8List inner) {
     if (range != null) {
       dec['range_oldest'] = range[0];
       dec['range_newest'] = range[1];
+    }
+    // Ring-buffer backlog telemetry (noop only — not in whoop-rs at all).
+    // Field-to-offset mapping for oldest/newest above is itself flagged as
+    // genuinely unresolved/inconsistent across the two reference sources
+    // (§1.6 TODO — needs a real-capture confirmation before hardening
+    // further); this backlog read is additive and independently gated on
+    // the known-constant capacity, so it degrades safely if wrong.
+    if (payload.length >= 28) {
+      final capacity = u32(payload, 24);
+      if (capacity == 131072) {
+        dec['pages_behind'] = {
+          'written': u32(payload, 12),
+          'used': u32(payload, 16),
+          'capacity': capacity,
+        };
+      }
     }
   } else if (op == Cmd.getBodyLocationAndStatus && payload.length >= 4) {
     dec['body_location_status'] = BodyLocationStatusResponse(
@@ -558,13 +625,26 @@ int? _firstPlausibleUnix(Uint8List payload) {
   return null;
 }
 
+// GET_DATA_RANGE-specific bounds/scan, tighter than the generic
+// _firstPlausibleUnix used for GET_CLOCK. Cross-validated against a real
+// GET_DATA_RANGE capture against whoop-rs's ground truth: the generic
+// [_maxPlausibleUnix] (year 2100) let a spurious far-future word through as
+// "newest", and scanning every unaligned byte offset of the payload (rather
+// than the u32 grid) picked up an off-grid straddle word neither field
+// actually occupies. Both fixed here without touching GET_CLOCK's own
+// (deliberately more permissive) scan.
+const int _maxPlausibleUnixForRange = 1900000000; // ~2030 — tighter than 2100
+
 /// [oldest, newest] from the two plausible-unix u32s in a GET_DATA_RANGE response
-/// (min and max of all plausible epochs found). Null if fewer than one is present.
+/// (min and max of all plausible epochs found), scanned on the 4-byte grid
+/// anchored at payload offset 0 (== frame-absolute offset 7, i.e. right after
+/// the 7-byte inner header [type,seq,cmd,result]) — never at an arbitrary
+/// unaligned byte offset. Null if fewer than one is present.
 List<int>? _plausibleUnixRange(Uint8List payload) {
   final found = <int>[];
-  for (int o = 0; o + 4 <= payload.length; o++) {
+  for (int o = 0; o + 4 <= payload.length; o += 4) {
     final v = u32(payload, o);
-    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnix) found.add(v);
+    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnixForRange) found.add(v);
   }
   if (found.isEmpty) return null;
   found.sort();
@@ -587,6 +667,19 @@ class MetaMarker {
   );
 }
 
+/// gen5 offset audit (2026-08 multiband port): parseMetadata's inner-relative
+/// offsets below (sub@2, u32@9, 8-byte token@13:21) were ALREADY correct for
+/// gen5 without any change — verified against a real gen5 HISTORY_END
+/// fixture (meta_type@inner[2]==2, and the spec's independently-quoted
+/// "trim_cursor" value 113405 falls out exactly as `u32(inner, 13)`, i.e. the
+/// FIRST four bytes of this function's existing `token`). This is the
+/// general "gen5's inner-relative offsets are identical to gen4's" fact
+/// (§1.5) holding for METADATA too — no gen5-specific branch needed here.
+/// (The multiband spec's own worked METADATA/ACK example pair does NOT
+/// actually round-trip byte-for-byte against each other despite being
+/// presented as a matched pair — an inconsistency in that source material,
+/// not in this decoder; don't chase making that specific pair's `token`
+/// values equal.)
 MetaMarker? parseMetadata(Uint8List inner) {
   if (inner.length < 3 || inner[0] != PacketType.metadata) return null;
   final sub = inner[2];
@@ -618,6 +711,109 @@ MetaMarker? parseMetadata(Uint8List inner) {
   return MetaMarker(sub, name, expectedPacketCount, token, batchId);
 }
 
+// ── CONSOLE_LOGS (0x32) ──────────────────────────────────────────────────────
+//
+// New decoder — not previously implemented for either generation. Layout per
+// the multiband spec §1.8 (frame-absolute offsets, converted -8 to inner):
+//   record_index u16 @ inner[1:3]   (frame-abs 9)
+//   unix         u32 @ inner[4:8]   (frame-abs 12)
+//   subsec       u16 @ inner[8:10]  (frame-abs 16)
+//   chunk_len    u16 @ inner[10:12] (frame-abs 18)
+//   channel      u8  @ inner[12]    (frame-abs 20)
+//   text             @ inner[13:]   (frame-abs 21), trailing-NUL-trimmed only
+//     (embedded NULs preserved), capped at 2048 chars, CRC-independent.
+// A real gen5 log line looks like "146552119: BLE_CMD: Command Send
+// Historical Data\n" (boot-tick-ms : tag : message).
+class ConsoleLogChunk {
+  final int recordIndex;
+  final int unix;
+  final int subsec;
+  final int chunkLen;
+  final int channel;
+  final String text;
+
+  const ConsoleLogChunk({
+    required this.recordIndex,
+    required this.unix,
+    required this.subsec,
+    required this.chunkLen,
+    required this.channel,
+    required this.text,
+  });
+}
+
+const int _kConsoleLogTextCap = 2048;
+
+/// Trim a TRAILING run of NUL bytes only — embedded NULs (mid-string) are
+/// preserved verbatim, since a log line can legitimately contain them before
+/// reassembly trims the real terminator. Decodes as Latin-1 (byte-for-byte)
+/// rather than UTF-8: firmware log text is not guaranteed valid UTF-8, and a
+/// UTF-8 decode failure would drop the whole chunk instead of surfacing
+/// whatever bytes are actually there.
+String _consoleLogText(Uint8List raw) {
+  var end = raw.length;
+  while (end > 0 && raw[end - 1] == 0) {
+    end--;
+  }
+  final capped = end > _kConsoleLogTextCap ? _kConsoleLogTextCap : end;
+  return String.fromCharCodes(raw.sublist(0, capped));
+}
+
+ConsoleLogChunk? parseConsoleLog(Uint8List inner) {
+  if (inner.length < 13 || inner[0] != PacketType.consoleLogs) return null;
+  final text = inner.length > 13
+      ? _consoleLogText(Uint8List.sublistView(inner, 13))
+      : '';
+  return ConsoleLogChunk(
+    recordIndex: u16(inner, 1),
+    unix: u32(inner, 4),
+    subsec: u16(inner, 8),
+    chunkLen: u16(inner, 10),
+    channel: inner[12],
+    text: text,
+  );
+}
+
+/// Reassembles console-log text that straddles multiple consecutive frames.
+///
+/// Per §1.8: "one log line can straddle multiple consecutive record_index
+/// frames — reassemble by contiguous index, not by arrival order." Feed
+/// chunks as they decode; [flush] returns (and clears) whatever contiguous
+/// run has accumulated so far. A gap in `record_index` (a dropped/reordered
+/// frame) flushes what's buffered rather than silently splicing unrelated
+/// text together.
+class ConsoleLogReassembler {
+  final StringBuffer _buf = StringBuffer();
+  int? _lastIndex;
+
+  /// Feed one decoded chunk. Returns true if it extended the current
+  /// contiguous run; false if it started a new one (the old run, if any, was
+  /// flushed into the return value of the PREVIOUS [flush] call — callers
+  /// should call [flush] after a `false` return to retrieve what came before).
+  bool add(ConsoleLogChunk chunk) {
+    final contiguous = _lastIndex != null &&
+        // record_index is a u16 — allow wraparound at 0xFFFF, matching the
+        // wire's own modulo-65536 counter.
+        (chunk.recordIndex == (_lastIndex! + 1) & 0xFFFF);
+    if (_lastIndex != null && !contiguous) {
+      // Caller must flush() before this chunk's text is appended, or the
+      // discontinuity is silently lost. We still start the new run here.
+      _buf.clear();
+    }
+    _buf.write(chunk.text);
+    _lastIndex = chunk.recordIndex;
+    return contiguous;
+  }
+
+  /// Return everything accumulated so far and reset for the next run.
+  String flush() {
+    final s = _buf.toString();
+    _buf.clear();
+    _lastIndex = null;
+    return s;
+  }
+}
+
 // ── decode_frame dispatch (for live UI / logging) ────────────────────────────
 class Decoded {
   final String kind;
@@ -626,13 +822,16 @@ class Decoded {
 }
 
 /// Route a parsed frame to the right decoder. Returns a structured Decoded.
-Decoded decodeFrame(Frame frame) {
+/// [profile] selects generation-specific response-shape handling (battery
+/// scale, GET_HELLO opcode, historical-record version family); defaults to
+/// gen4 so every existing caller is unchanged.
+Decoded decodeFrame(Frame frame, {BandProfile profile = BandProfile.gen4}) {
   final inner = frame.inner;
   final pt = frame.packetType;
   try {
     switch (pt) {
       case PacketType.commandResponse:
-        final r = parseCommandResponse(inner);
+        final r = parseCommandResponse(inner, profile: profile);
         if (r != null) {
           return Decoded('cmd_response', {'opcode': r.opcode, ...r.decoded});
         }
@@ -654,10 +853,21 @@ Decoded decodeFrame(Frame frame) {
           return Decoded('metadata', {'sub': m.name, 'batch_id': m.batchId});
         }
         break;
+      case PacketType.consoleLogs:
+        final c = parseConsoleLog(inner);
+        if (c != null) {
+          return Decoded('console_log', {
+            'record_index': c.recordIndex,
+            'ts_epoch': c.unix,
+            'channel': c.channel,
+            'text': c.text,
+          });
+        }
+        break;
       case PacketType.historicalData:
       case PacketType.realtimeData:
       case PacketType.realtimeRawData:
-        return _decodeDataRecord(inner);
+        return _decodeDataRecord(inner, profile: profile);
     }
   } catch (e) {
     return Decoded('decode_error', {'error': e.toString()});
@@ -665,7 +875,21 @@ Decoded decodeFrame(Frame frame) {
   return Decoded('other', {'packet_type': pt});
 }
 
-Decoded _decodeDataRecord(Uint8List inner) {
+Decoded _decodeDataRecord(Uint8List inner,
+    {BandProfile profile = BandProfile.gen4}) {
+  if (profile.isGen5 &&
+      inner.isNotEmpty &&
+      inner[0] == PacketType.historicalData) {
+    final g = parseGen5Historical(inner);
+    if (g != null) {
+      return Decoded('gen5_historical', {
+        'hist_version': g.histVersion,
+        'record_index': g.recordIndex,
+        'ts_epoch': g.unix,
+        'kind': g.runtimeType.toString(),
+      });
+    }
+  }
   final recType = inner.length > 1 ? inner[1] : -1;
   // Compact realtime stream (small packet).
   if (inner.length < 64) {

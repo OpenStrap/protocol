@@ -86,6 +86,73 @@ class Cmd {
   static const int getHello = 0x91;
   static const int getBatteryPackInfo = 0x97;
   static const int togglePersistentR21 = 0x9A; // DANGER
+
+  // ── gen5-exclusive opcode VALUES (replace the gen4 opcode of the same
+  // purpose; see BandProfile — everything else in this class is shared
+  // verbatim across generations) ──────────────────────────────────────────
+  // Replaces SET_CLOCK (0x0A) on gen5.
+  static const int setClockMaverick = 146;
+  // Replaces GET_CLOCK (0x0B) on gen5.
+  static const int getClockGen5 = 147;
+  // gen5's Maverick haptic-buzz command. NOT the same opcode as gen4's
+  // RUN_HAPTICS_PATTERN (0x4F/79) — "79/19 haptics-name-differs-not-value"
+  // per the multiband spec: these are two genuinely distinct opcodes, not an
+  // alias of the same numeric value.
+  static const int runHapticPatternMaverick = 0x13; // 19
+  // SET_DEVICE_CONFIG_VALUE — smaller/older sibling of SET_FF_VALUE (120).
+  static const int setDeviceConfigValue = 119;
+  // SET_FF_VALUE / SET_CONFIG — 40-byte name+value body. Shared opcode
+  // number across generations; this is how the gen5 R22 deep-buffer enable
+  // sequence is sent (see commands.dart's buildR22EnableSequence). NOTE: this
+  // opcode is ALSO in [OpcodeSafety.forbidden] — see that class's doc for why
+  // that is not a contradiction.
+  static const int setFfValue = 120;
+}
+
+/// Band-agnostic opcode safety classification, sourced from whoop-rs's
+/// hardware-tested command surface (kept SEPARATE from [dangerousCmds] above,
+/// which is OpenStrap's own, independently-curated gen4 list — the two do not
+/// fully overlap, e.g. this list omits the firmware-load opcodes (0x24-0x26)
+/// that [dangerousCmds] already blocks, and adds a few whoop-rs flags ours
+/// didn't have, notably 120/SET_FF_VALUE — see the note on [forbidden] below).
+///
+/// This class only PUBLISHES the classification; it does not enforce
+/// anything itself — enforcement is a call-site concern (edge, at the point
+/// it issues a command write), per the multiband port plan's recommendation
+/// that the guard be "profile-data, not scattered logic".
+class OpcodeSafety {
+  /// Opcodes whoop-rs treats as never-safe-to-auto-fire. NOTE: 120
+  /// (SET_FF_VALUE / SET_CONFIG) is in this list, yet [commands.dart]'s R22
+  /// enable-sequence deliberately sends opcode 120 sixteen times — that is
+  /// an intentional, explicit, user-opted-in action (the R22 deep-buffer
+  /// opt-in), not the kind of accidental/automatic send this gate exists to
+  /// stop. A call site enforcing this list needs an explicit allowlist for
+  /// deliberate sequences like R22, not a blanket "opcode 120 → refuse".
+  static const Set<int> forbidden = {
+    10,
+    146,
+    25,
+    29,
+    32,
+    45,
+    77,
+    119,
+    120,
+    99,
+    123,
+    142,
+    143,
+    144,
+  };
+
+  /// The subset of [forbidden] that is actively destructive (data loss /
+  /// bricking), not merely "don't auto-fire". Opcodes 142-144 have no named
+  /// meaning in either reference codebase — treat as permanently blocked,
+  /// unknown-but-dangerous.
+  static const Set<int> destructive = {25, 45, 142, 143, 144};
+
+  static bool isForbidden(int opcode) => forbidden.contains(opcode);
+  static bool isDestructive(int opcode) => destructive.contains(opcode);
 }
 
 /// Commands that can brick the link / burn battery / brick flash. NEVER auto-fire.
@@ -132,6 +199,10 @@ class EventId {
   static const int batteryPackConnected = 21;
   static const int batteryPackRemoved = 22;
   static const int bleBonded = 23;
+  // gen5-only: toggling the realtime HR stream on/off is confirmed via these
+  // events (gen4 has no equivalent confirmation event for this action).
+  static const int bleRealtimeHrOn = 33;
+  static const int bleRealtimeHrOff = 34;
   // Full-flash trim (data erase) started / finished on the strap.
   static const int trimAllData = 26;
   static const int trimAllDataEnded = 27;
@@ -184,6 +255,10 @@ class EventId {
         return 'BATTERY_PACK_REMOVED';
       case bleBonded:
         return 'BLE_BONDED';
+      case bleRealtimeHrOn:
+        return 'BLE_REALTIME_HR_ON';
+      case bleRealtimeHrOff:
+        return 'BLE_REALTIME_HR_OFF';
       case trimAllData:
         return 'TRIM_ALL_DATA';
       case trimAllDataEnded:

@@ -484,3 +484,25 @@ class FirmwareAwareR24Decoder {
     return null; // every strategy failed — caller archives as undecodable, as before.
   }
 }
+
+// ── gen5 (WHOOP 5) historical records ───────────────────────────────────────
+//
+// SUPERSEDED (2026-08, multiband port): this file used to also own a
+// `parseGen5Record` targeting `_gen5NormalHistoryVersions = {9, 12, 24}`.
+// That version set is WRONG — 9/12/24 are WHOOP4's thin/rich HR-only and
+// full-optical layouts, not anything a real WHOOP 5.0/MG strap ships. Both
+// independent reference implementations (whoop-rs, hardware-tested; noop,
+// tens of thousands of captured records across multiple straps/firmware
+// builds) agree that real gen5 historical data (packet type 0x2F) ships
+// hist_version bytes 18, 20, 21, 26 — never 9/12/24. Running gen5 bytes
+// through this file's v24 field map (which is what the old `parseGen5Record`
+// effectively did, gated down to just the HR byte) reads all-zero garbage on
+// real captures — exactly the symptom this file's old doc comment described,
+// which was itself the tell that the version set was wrong, not that gen5's
+// 1 Hz record is "deliberately thin".
+//
+// The real decoders now live in gen5_records.dart: [parseGen5Historical]
+// dispatches to the v18 (per-second biometric summary — the actual gen5
+// analogue of this file's R24/v24), v20 (optical deep buffer), v21 (IMU deep
+// buffer), and v26 (PPG waveform) decoders. See that file for the full field
+// maps and the byte-level verification behind them.
