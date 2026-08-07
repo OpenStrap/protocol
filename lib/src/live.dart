@@ -248,11 +248,12 @@ _Motion? _r10Motion(ByteData view, int len) {
   const activityFloor = 0.05;
   if (std < activityFloor || n < 24) return _Motion(activity, 0);
 
-  // NOTE: was bumped to 25 without comment/test coverage; reverted — no test
-  // (parity or otherwise) exercises steps_inc/activity from R10, and ±25
-  // approaches the 7-40 sample autocorrelation lag range this detrend feeds,
-  // which risks attenuating genuine step periodicity at slower cadences.
-  // Re-widen only with a real-capture regression test backing it.
+  // Deliberately 9, and this branch no longer CHANGES it — main already reads
+  // 9, so there is nothing here to revert. Kept as a note on why not to widen
+  // it: no test (parity or otherwise) exercises steps_inc/activity from R10,
+  // and a ±25 window approaches the 7-40 sample autocorrelation lag range this
+  // detrend feeds, which risks attenuating genuine step periodicity at slower
+  // cadences. Re-widen only with a real-capture regression test behind it.
   const w = 9;
   final x = List<double>.filled(n, 0);
   for (int i = 0; i < n; i++) {
