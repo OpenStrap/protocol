@@ -192,6 +192,82 @@ void main() {
     });
   });
 
+  group('parseGen5Historical — v26 per-record metadata', () {
+    // The same real v26 fixture as above.
+    final frame = hex(
+      'aa015000010035412f1a80ad418401f0a3266aae470100c3c5050068faccfa8dfb46f'
+      'c8bfd4cfebafedafe6dff56ffd5fffbff37ff6afce5f9d7f8dffa5efc98fddbfe5afe8'
+      '4fe15ff5cff405fb33c50080101006cb67c17',
+    );
+
+    Gen5PpgWaveform decode(Uint8List f) {
+      final parsed = parseFrame(f, profile: BandProfile.gen5)!;
+      expect(parsed.valid, isTrue);
+      return parseGen5Historical(parsed.inner) as Gen5PpgWaveform;
+    }
+
+    test('frame-abs 19 is a u16, and the old byte read loses the high half',
+        () {
+      final wf = decode(frame);
+      expect(wf.segmentId, 18350);
+      // The deprecated byte read returns 18350 & 0xFF — the high byte (71)
+      // is discarded. On real records that byte is nonzero 99% of the time.
+      // ignore: deprecated_member_use_from_same_package
+      expect(wf.rawByte19, 174);
+      // ignore: deprecated_member_use_from_same_package
+      expect(wf.rawByte19, wf.segmentId & 0xFF);
+      expect(wf.segmentId >> 8, isNonZero);
+    });
+
+    test('segmentId is an integer 0..99 packed as a Q15 fraction', () {
+      final wf = decode(frame);
+      expect(wf.segmentIndex, 56);
+      expect((56 * 32768) ~/ 100, wf.segmentId);
+    });
+
+    test('sub-channel, gain and the trailing metadata block decode', () {
+      final wf = decode(frame);
+      expect(wf.subChannel, 5);
+      expect(wf.subChannelKnown, 5); // inside 0..7
+      expect(wf.burstIndex, 1); // distinct from subChannel
+      expect(wf.frontEndMetaRaw, 50627);
+      expect(wf.signalMetric, closeTo(0.0219, 1e-4));
+      expect(wf.gainSetting, 80);
+      expect(wf.gainIndex, 8);
+      expect(wf.flagA, 1);
+      expect(wf.flagB, 1);
+    });
+
+    test('sub-channel outside 0..7 is not fabricated into a channel', () {
+      final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
+      for (final bad in [0xFD, 0xFE, 0xFF]) {
+        final inner = Uint8List.fromList(parsed.inner);
+        inner[17] = bad;
+        final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
+        expect(wf.subChannel, bad); // raw byte preserved
+        expect(wf.subChannelKnown, isNull); // but not offered as a channel
+      }
+    });
+
+    test('a record too short for the trailing block still decodes its waveform',
+        () {
+      final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
+      final short = Uint8List.fromList(
+        parsed.inner.sublist(0, kGen5V26MinInnerLen),
+      );
+      final wf = parseGen5Historical(short) as Gen5PpgWaveform;
+      expect(wf.ppgWaveform.length, 24);
+      expect(wf.subChannel, 5); // sits before the samples, still readable
+      expect(wf.segmentId, 18350);
+      // The block after the waveform is absent — null, never a stand-in.
+      expect(wf.signalMetric, isNull);
+      expect(wf.gainSetting, isNull);
+      expect(wf.gainIndex, isNull);
+      expect(wf.flagA, isNull);
+      expect(wf.flagB, isNull);
+    });
+  });
+
   group(
       'parseGen5Historical — v21 IMU deep buffer (structural, offsets from §1.5)',
       () {

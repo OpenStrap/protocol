@@ -33,6 +33,7 @@ export 'src/gen5_records.dart'
         kGen5V20InnerLen,
         kGen5V21InnerLen,
         kGen5V26MinInnerLen,
+        kGen5V26MinInnerLenWithMeta,
         parseGen5Historical;
 export 'src/live.dart'
     show
