@@ -61,8 +61,22 @@ void main() {
     test('quality flags + alt HR', () {
       expect(sample.hrQualityFlags, 0x8D);
       expect(sample.hrRrValidThisSecond, isTrue); // bit7 set
+      expect(sample.hrQualityCounter, 0x0D); // low 4 bits, separate field
       expect(sample.heartRateAlt, 101);
       expect(sample.trustedHeartRateAlt, 101);
+    });
+
+    test('frame-abs 36/37 is NOT one fixed-point HR', () {
+      // Read as one u16 this fixture gives 0x658D/256 = 101.55 bpm against
+      // heartRate 102 — and the ".55" is just bit7 of byte 36.
+      //
+      // bit4 is never set on any observed record, which a fractional byte
+      // could not manage.
+      expect(sample.hrQualityFlags & 0x10, 0);
+
+      // And even with bit7 set, the second HR byte disagrees with heartRate
+      // by a full bpm — it is a corroboration signal, not a duplicate.
+      expect(sample.heartRateAlt, isNot(sample.heartRate));
     });
 
     test('motion: gravity is unit magnitude, dynamic accel small', () {
@@ -95,13 +109,67 @@ void main() {
     });
 
     test('experimental fields exposed raw, not fabricated', () {
-      // cardiac_status / signal_quality (disputed offset semantics, §1.7):
-      // raw byte only, no anomaly gate wired off it.
+      // frame-abs 40: still unnamed, and the whoop-rs `>=192` gate passes
+      // 96.7% of records, so no anomaly gate is wired off it. 255 is the
+      // modal value.
       expect(sample.cardiacStatusRaw, 255);
-      // spo2_candidate gated 70..100 — this fixture's raw byte is 0, so the
-      // gated getter must be null, never a fabricated "0%".
+      // frame-abs 82 is not SpO2 — zero in 99% of records and nonzero only
+      // during band-declared sleep. This fixture is awake, so it reads 0.
       expect(sample.spo2CandidateRaw, 0);
+      // ignore: deprecated_member_use_from_same_package
       expect(sample.spo2Candidate, isNull);
+    });
+
+    test('band sleep state: this fixture is awake', () {
+      expect(sample.sleepStateByte, 0);
+      expect(sample.sleepStateRawNibble, 0);
+      expect(sample.sleepState, Gen5SleepState.wake);
+    });
+  });
+
+  group('parseGen5Historical — v18 sleep_state nibble ordering', () {
+    // Same real v18 fixture, with frame-abs 81 (inner[73]) overridden to each
+    // of the four nibble values. Ordering (0 wake / 1 still / 2 sleep / 3 up)
+    // was resolved on 400,000 records from two bands: mean dynamic
+    // acceleration runs 0.0773 / 0.0255 / 0.0104 / 0.0504 g and median heart
+    // rate 88 / 76 / 60 / 77 bpm across nibbles 0..3, so nibble 0 is the
+    // highest-motion, highest-HR state (it cannot be "still") and nibble 2 is
+    // the lowest of both. whoop-rs's "0 still / 1 wake" is reversed.
+    final frame = hex(
+      'aa01740001003fb12f1280733d8401b69f266a66460066025a0265020000000'
+      '000007b0a8d656463ff0012163cf6a439bf2924fd3ed763fe3e3200aa000000'
+      '000000000000f7000901f10b0007010c020c000000000000000000000000000'
+      '00000000000000000000100656f1e1e0000009d61a7c00000003e862817',
+    );
+
+    Gen5HistorySample decodeWithNibble(int nibble) {
+      final inner = Uint8List.fromList(
+        parseFrame(frame, profile: BandProfile.gen5)!.inner,
+      );
+      // Preserve the low bits (on-wrist, wake_quality) — only bits 4-5 move.
+      inner[73] = (inner[73] & 0x0F) | (nibble << 4);
+      return parseGen5Historical(inner) as Gen5HistorySample;
+    }
+
+    test('each nibble maps to its named state', () {
+      expect(decodeWithNibble(0).sleepState, Gen5SleepState.wake);
+      expect(decodeWithNibble(1).sleepState, Gen5SleepState.still);
+      expect(decodeWithNibble(2).sleepState, Gen5SleepState.sleep);
+      expect(decodeWithNibble(3).sleepState, Gen5SleepState.up);
+    });
+
+    test('the nibble is masked to 2 bits and never overruns the enum', () {
+      for (int b = 0; b <= 255; b++) {
+        final inner = Uint8List.fromList(
+          parseFrame(frame, profile: BandProfile.gen5)!.inner,
+        );
+        inner[73] = b;
+        final s = parseGen5Historical(inner) as Gen5HistorySample;
+        expect(s.sleepStateRawNibble, (b >> 4) & 0x03);
+        expect(s.sleepState, Gen5SleepState.values[(b >> 4) & 0x03]);
+        expect(s.onWristRaw, b & 0x03);
+        expect(s.wakeQualityRaw, (b >> 2) & 0x03);
+      }
     });
   });
 

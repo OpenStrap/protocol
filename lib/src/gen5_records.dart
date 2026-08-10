@@ -100,6 +100,30 @@ abstract class Gen5HistoricalRecord {
 // ── v18 — per-second biometric summary (the gen5 analogue of gen4's v24;
 // this is the record that actually ships as gen5's "1 Hz" history). ────────
 
+/// The band's own coarse wake/sleep state, from bits 4-5 of
+/// [Gen5HistorySample.sleepStateByte] (frame-abs 81).
+///
+/// Two things to know before consuming it:
+///
+/// - **It is an envelope, not a stage.** Deep, light and REM all read as
+///   [sleep], so it carries no in-sleep stage information.
+/// - **[sleep] lags true onset** by roughly ten minutes — the band wants a
+///   sustained stretch of stillness before it commits.
+enum Gen5SleepState {
+  /// Nibble 0. Awake/active — the highest-motion, highest-HR state.
+  wake,
+
+  /// Nibble 1. Settling: still, but not yet declared asleep. The only path
+  /// from [wake] to [sleep].
+  still,
+
+  /// Nibble 2. The band has declared sleep. Lowest motion, lowest HR.
+  sleep,
+
+  /// Nibble 3. Out of bed / arousal. Reachable only from [sleep].
+  up,
+}
+
 /// Decoded gen5 v18 historical record. Field confidence/status is annotated
 /// per-field below — several fields have OPEN semantic disagreements between
 /// the two reference implementations (whoop-rs vs noop) that could not be
@@ -120,23 +144,37 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   final int cardiacFlags;
 
   /// @ inner[28] (frame-abs 36). bit7 = HR/RR-valid this second (gates
-  /// whether [heartRateAlt] should be trusted); bit4 never observed set.
+  /// whether [heartRateAlt] should be trusted); the low 4 bits are a separate
+  /// small field — see [hrQualityCounter].
+  ///
+  /// NOT the low half of a fixed-point heart rate. **bit4 is never set** — 0
+  /// of 2,663,358 records across two bands — and a fractional byte cannot
+  /// have a structurally dead bit. The low 4 bits are a separate field,
+  /// uniform over 0..15; bits 5-7 are flags.
   final int hrQualityFlags;
 
-  /// Duplicate HR @ inner[29] (frame-abs 37), ~99.6% match to [heartRate] on
-  /// the reference corpus. Trust only when `hrQualityFlags & 0x80 != 0`.
+  /// Low 4 bits of [hrQualityFlags] — a small field, uniform over 0..15,
+  /// independent of bit7. Purpose unknown; exposed for diagnostics only.
+  int get hrQualityCounter => hrQualityFlags & 0x0F;
+
+  /// Second heart-rate byte @ inner[29] (frame-abs 37).
+  ///
+  /// Not the near-duplicate of [heartRate] this was previously documented as:
+  /// it agrees 58-64% of the time, rising to 67-75% when
+  /// [hrRrValidThisSecond]. The gate is real, but even gated this is a
+  /// corroboration signal — do not substitute it for [heartRate].
   final int heartRateAlt;
 
   /// @ inner[30:32] (frame-abs 38). Meaning UNPINNED — exposed raw, do not
   /// consume as a decoded value yet.
   final int rrPacked;
 
-  /// @ inner[32] (frame-abs 40). DISPUTED: whoop-rs calls this
-  /// "signal_quality" and gates an HR-anomaly confidence check on `>=192`;
-  /// noop calls the SAME offset "cardiac_status" and treats it as
-  /// raw/uninterpreted. Neither claim is cross-validated against ground
-  /// truth — exposed raw ONLY. Do NOT wire an HR-anomaly gate off this byte
-  /// until validated against a labelled dataset.
+  /// @ inner[32] (frame-abs 40). Meaning still unpinned. whoop-rs calls it
+  /// "signal_quality" and gates an HR-anomaly check on `>=192` — that gate
+  /// passes 96.7% of records and its rejections don't track [sleepState]
+  /// consistently between bands, so it is not doing what it looks like.
+  ///
+  /// Exposed raw ONLY. Do NOT wire an HR-anomaly gate off this byte.
   final int cardiacStatusRaw;
 
   /// Gravity-removed motion magnitude (g) @ inner[33:37] f32 LE (frame-abs
@@ -189,22 +227,19 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// Raw @ inner[73] (frame-abs 81). Packed:
   ///   bits 0-1: on-wrist
   ///   bits 2-3: wake_quality
-  ///   bits 4-5: sleep_state — ORDERING UNRESOLVED (whoop-rs's doc comment
-  ///     says "0 still/1 wake"; noop glosses the same shift "0 wake/1 still"
-  ///     in one place. A real fixture's value here was 0, which is
-  ///     ambiguous between both orderings and could not disambiguate this
-  ///     from bytes alone.) Exposed as the raw byte ONLY — do not decode the
-  ///     sleep_state nibble into an enum until a labelled-sleep capture
-  ///     resolves the ordering; wiring the wrong ordering into a sleep
-  ///     stager would silently corrupt every downstream sleep metric.
+  ///   bits 4-5: sleep_state — 0 wake / 1 still / 2 sleep / 3 up. Prefer
+  ///     [sleepState] over reading the nibble yourself. whoop-rs's
+  ///     "0 still / 1 wake" is the wrong way round.
   final int sleepStateByte;
 
-  /// @ inner[74] (frame-abs 82). EXPERIMENTAL candidate SpO2% — noop treats
-  /// this as instrumentation-only with cross-device evidence split, never a
-  /// shipped metric (whoop-rs's `physio-algo` treats it as legitimate; noop's
-  /// caution is trusted here per §1.7 — larger, multi-strap corpus). Use
-  /// [spo2Candidate] for the gated (70-100) getter; never present this
-  /// alongside gen4's real red/IR SpO2 as an equivalent metric.
+  /// @ inner[74] (frame-abs 82). **NOT SpO2** — the name is kept only because
+  /// removing it breaks the API. Treat it as an opaque sleep-gated byte.
+  ///
+  /// It reads 0 in 99% of records and is *identically* zero unless
+  /// [sleepState] is [Gen5SleepState.sleep], where it fires on 2.4% of
+  /// records. A blood-oxygen channel does not switch itself off while the
+  /// band is worn. The values that do appear cluster at 95-99, which is what
+  /// makes the byte look like SpO2 in the first place.
   final int spo2CandidateRaw;
 
   /// @ inner[98] (frame-abs 106). Proven NOT the high half of a u16 with
@@ -262,10 +297,20 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   bool get hrRrValidThisSecond => (hrQualityFlags & 0x80) != 0;
 
   /// [heartRateAlt] gated on [hrRrValidThisSecond]; null when unconfirmed.
+  ///
+  /// Note that "confirmed" still only means 67-75% agreement with
+  /// [heartRate] — see [heartRateAlt]. This is a corroboration signal, not a
+  /// substitute HR.
   int? get trustedHeartRateAlt => hrRrValidThisSecond ? heartRateAlt : null;
 
-  /// EXPERIMENTAL candidate SpO2%, gated 70-100 per §1.7; null otherwise. This
-  /// is NOT gen4's real dual-wavelength SpO2 — never surface it as equivalent.
+  /// **Do not use — frame-abs 82 is not SpO2.** The byte is zero in 99% of
+  /// records and nonzero *only* while [sleepState] is [Gen5SleepState.sleep],
+  /// so this getter surfaces a plausible-looking 95-99 on 0.6% of records and
+  /// null on the rest. See [spo2CandidateRaw] for the measurements.
+  @Deprecated(
+    'frame-abs 82 is not SpO2: zero in 99% of records and nonzero only '
+    'during band-declared sleep. Read spo2CandidateRaw if you need the byte.',
+  )
   int? get spo2Candidate => (spo2CandidateRaw >= 70 && spo2CandidateRaw <= 100)
       ? spo2CandidateRaw
       : null;
@@ -275,16 +320,20 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// amplitude reading of 128 on each channel.
   bool get isOpticalAmpSentinel => opticalAmpA == 128 && opticalAmpB == 128;
 
-  /// bits 0-1 of [sleepStateByte] — the one sub-field of that byte NOT under
-  /// active ordering dispute.
+  /// bits 0-1 of [sleepStateByte].
   int get onWristRaw => sleepStateByte & 0x03;
 
   /// bits 2-3 of [sleepStateByte].
   int get wakeQualityRaw => (sleepStateByte >> 2) & 0x03;
 
-  /// bits 4-5 of [sleepStateByte] — RAW ONLY. See [sleepStateByte]'s doc for
-  /// why this is deliberately not decoded into a named sleep-state enum.
+  /// bits 4-5 of [sleepStateByte], raw. Prefer [sleepState].
   int get sleepStateRawNibble => (sleepStateByte >> 4) & 0x03;
+
+  /// The band's own coarse wake/sleep state. Total over the 2-bit nibble, so
+  /// never null. **A wake/sleep envelope, not a sleep stage** — see
+  /// [Gen5SleepState] for the evidence and the limits.
+  Gen5SleepState get sleepState =>
+      Gen5SleepState.values[sleepStateRawNibble];
 }
 
 /// Minimum inner length to read every v18 field this decoder touches (the

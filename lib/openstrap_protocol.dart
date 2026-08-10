@@ -24,6 +24,7 @@ export 'src/gen5_records.dart'
         Gen5ImuBuffer,
         Gen5PpgWaveform,
         Gen5RecordDecoder,
+        Gen5SleepState,
         Gen5V18Decoder,
         Gen5V20Decoder,
         Gen5V21Decoder,
