@@ -23,12 +23,30 @@ class Frame {
   final bool crc8Ok;
   final bool crc32Ok;
 
-  Frame(this.inner, this.crc8Ok, this.crc32Ok);
+  /// Whether the frame header advertises the frame revision this decoder was
+  /// written for (rev-1). The `inner[0]/[1]/[2]` = packetType/seq/opcode field
+  /// offsets below assume rev-1 layout; a rev-2 frame can still pass both CRCs
+  /// yet shift those fields, so [opcode] would silently return a body byte.
+  ///
+  /// gen5 carries an explicit revision byte at header[1] (0x01 on every real
+  /// strap frame — see [BandProfile.buildHeader]); a rev-2 frame stamps 0x02
+  /// there. gen4's 4-byte header has no revision byte, so it is always treated
+  /// as rev-1. Defaults true so directly-constructed frames and the entire
+  /// rev-1 path are unchanged; [parseFrame] sets it false for a gen5 frame
+  /// whose revision byte is not rev-1 — surfacing it instead of mis-decoding.
+  final bool frameRevOk;
+
+  Frame(this.inner, this.crc8Ok, this.crc32Ok, {this.frameRevOk = true});
 
   /// Band-neutral alias for the header-integrity result.
   bool get headerCrcOk => crc8Ok;
 
   bool get valid => crc8Ok && crc32Ok;
+
+  /// Safe to read [packetType]/[seq]/[opcode] with the rev-1 field offsets:
+  /// CRCs pass AND the frame revision is one this decoder understands. Check
+  /// this (not just [valid]) before trusting [opcode] on an inbound frame.
+  bool get decodable => valid && frameRevOk;
   int get packetType => inner.isNotEmpty ? inner[0] : -1;
   int get seq => inner.length > 1 ? inner[1] : -1;
   int get opcode => inner.length > 2 ? inner[2] : -1;
@@ -81,7 +99,13 @@ Frame? parseFrame(Uint8List raw, {BandProfile profile = BandProfile.gen4}) {
   final storedBd =
       raw.buffer.asByteData(raw.offsetInBytes + innerStart + declared - 4, 4);
   final stored = storedBd.getUint32(0, Endian.little);
-  return Frame(Uint8List.fromList(inner), headerCrcOk, stored == crc32(inner));
+  // gen5 header[1] is the frame-revision byte (rev-1 = 0x01). A rev-2 frame can
+  // pass both CRCs but shifts the inner field offsets, so flag it rather than
+  // let the rev-1 getters return a body byte as the opcode. gen4 has no such
+  // byte and is always rev-1.
+  final frameRevOk = !profile.isGen5 || raw[1] == revision1;
+  return Frame(Uint8List.fromList(inner), headerCrcOk, stored == crc32(inner),
+      frameRevOk: frameRevOk);
 }
 
 /// Length-based reassembler. feed() returns every complete Frame it can carve

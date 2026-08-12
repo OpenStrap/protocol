@@ -102,14 +102,14 @@ void main() {
           Cmd.rebootStrap,
           Cmd.powerCycleStrap,
           Cmd.togglePersistentR21,
-          Cmd.startFirmwareLoad,
-          Cmd.loadFirmwareData,
-          Cmd.processFirmwareImage,
+          Cmd.startUpdateLoad,
+          Cmd.loadUpdateData,
+          Cmd.processUpdateImage,
         ]),
       );
       // 0x24 here is a Cmd opcode; PacketType.commandResponse (0x24) is a
       // separate namespace (inner[0], not inner[2]).
-      expect(Cmd.startFirmwareLoad, 0x24);
+      expect(Cmd.startUpdateLoad, 0x24);
       expect(Cmd.powerCycleStrap, 0x20);
       // 0x62 is GET_EXTENDED_BATTERY_INFO; there is no 0x63 command (the old
       // "reset fuel gauge" opcode was a decode artifact and has been removed).
