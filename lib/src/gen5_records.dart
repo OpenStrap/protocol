@@ -684,14 +684,82 @@ class Gen5V21Decoder implements Gen5RecordDecoder {
 class Gen5PpgWaveform extends Gen5HistoricalRecord {
   final int layoutMarker;
 
-  /// Uninterpreted staging byte @ inner[11] (frame-abs 19).
+  /// Low byte of [segmentId] @ inner[11] (frame-abs 19).
+  ///
+  /// This offset is a u16, not a byte: inner[12] is nonzero on 99% of real
+  /// records, so reading one byte here discards most of the value. Prefer
+  /// [segmentId].
+  @Deprecated('frame-abs 19 is a u16 — use segmentId')
   final int rawByte19;
+
+  /// u16 LE @ inner[11:13] (frame-abs 19), constant across the records of one
+  /// burst.
+  ///
+  /// The value is an integer `k` in 0..99 packed as a Q15 fraction:
+  /// `segmentId == (k * 32768) ~/ 100` holds for every record observed. Use
+  /// [segmentIndex] for `k`. What `k` counts is not established, so it is
+  /// exposed without a claim.
+  final int segmentId;
 
   /// Per-burst counter (NOT a channel/LED id — ranges past 26 in the
   /// reference corpus). @ inner[13] (frame-abs 21).
   final int burstIndex;
 
+  /// u16 LE @ inner[15:17] (frame-abs 23). No meaning established — it does
+  /// not track heart rate, motion, the waveform, gain or [signalMetric].
+  /// Exposed raw, don't consume.
+  final int frontEndMetaRaw;
+
+  /// Acquisition-channel index @ inner[17] (frame-abs 25), 0..7.
+  ///
+  /// **The band multiplexes several optical channels through one v26 stream**,
+  /// and this byte is what separates them. Consecutive records in a single
+  /// burst carry different values, each with its own gain configuration
+  /// ([gainIndex]/[gainSetting]) and its own amplitude, and each carries an
+  /// independent pulse. Without splitting on it, a burst is several channels
+  /// interleaved, which is not a signal.
+  ///
+  /// Values outside 0..7 occur on about 0.2% of records (0xFD..0xFF). They are
+  /// not obviously invalid — the waveform still looks like a pulse — but they
+  /// are not a channel index either, so use [subChannelKnown].
+  final int subChannel;
+
+  /// [subChannel] gated to the 0..7 range, null otherwise — the honest getter,
+  /// mirroring [Gen5HistorySample.activityClassKnown].
+  int? get subChannelKnown =>
+      (subChannel >= 0 && subChannel <= 7) ? subChannel : null;
+
+  /// `k` in 0..99 recovered from [segmentId]'s Q15 packing, or null if this
+  /// record's value doesn't fit the packing.
+  int? get segmentIndex {
+    final k = ((segmentId * 100) / 32768).round();
+    return (k >= 0 && k <= 99 && (k * 32768) ~/ 100 == segmentId) ? k : null;
+  }
+
+  /// f32 LE @ inner[67:71] (frame-abs 75). Tracks with [flagA]/[flagB] as a
+  /// per-record signal-quality indicator where LOW means a clean record, but
+  /// the scale is unpinned. Exposed raw.
+  ///
+  /// Null when the record is too short to carry the trailing metadata block
+  /// (see [kGen5V26MinInnerLenWithMeta]) — never a stand-in value.
+  final double? signalMetric;
+
+  /// Front-end gain configuration @ inner[71] / inner[72] (frame-abs 79/80).
+  /// Each [subChannel] runs a characteristic gain, adjusted within a range.
+  /// Null on a record too short to carry it.
+  final int? gainSetting;
+  final int? gainIndex;
+
+  /// Raw flag bytes @ inner[73] / inner[74] (frame-abs 81/82). Roughly
+  /// complementary, and [signalMetric] is about an order of magnitude lower
+  /// when [flagB] is set. Meaning otherwise unestablished — exposed raw.
+  /// Null on a record too short to carry them.
+  final int? flagA;
+  final int? flagB;
+
   /// Raw AC-coupled ADC samples, no physical unit. Always 24 in practice.
+  /// Every channel is DC-removed on the band: the per-record sample mean is
+  /// ~0 for all values of [subChannel].
   final List<int> ppgWaveform;
 
   const Gen5PpgWaveform({
@@ -699,8 +767,16 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
     required super.recordIndex,
     required super.unix,
     required this.layoutMarker,
-    required this.rawByte19,
+    @Deprecated('frame-abs 19 is a u16 — use segmentId') required this.rawByte19,
+    required this.segmentId,
     required this.burstIndex,
+    required this.frontEndMetaRaw,
+    required this.subChannel,
+    required this.signalMetric,
+    required this.gainSetting,
+    required this.gainIndex,
+    required this.flagA,
+    required this.flagB,
     required this.ppgWaveform,
   });
 }
@@ -712,6 +788,15 @@ const int _kV26SamplesStart = 19; // frame-abs 27
 /// length varies with the sample count in principle, but is always 24 in
 /// practice — this is a floor, not the exact match v20/v21 use.
 const int kGen5V26MinInnerLen = _kV26SamplesStart + 2 * _kV26SampleCount; // 67
+
+/// Minimum inner length to also read the metadata block that follows the
+/// waveform (signal metric, gain, flags — the last is inner[74]).
+///
+/// Kept separate from [kGen5V26MinInnerLen] on purpose: a record shorter than
+/// this still decodes its waveform, and the trailing fields come back null
+/// rather than the record being rejected. Every real record observed carries
+/// an inner length of 76.
+const int kGen5V26MinInnerLenWithMeta = 75;
 
 class Gen5V26Decoder implements Gen5RecordDecoder {
   const Gen5V26Decoder();
@@ -734,6 +819,7 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
     for (int i = 0; i < _kV26SampleCount; i++) {
       samples.add(v.getInt16(_kV26SamplesStart + 2 * i, Endian.little));
     }
+    final hasMeta = inner.length >= kGen5V26MinInnerLenWithMeta;
 
     return Gen5PpgWaveform(
       histVersion: hdr.version,
@@ -746,8 +832,20 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
       recordIndex: v.getUint16(3, Endian.little),
       unix: hdr.unix,
       layoutMarker: hdr.layoutMarker,
+      // ignore: deprecated_member_use_from_same_package
       rawByte19: inner[11],
+      segmentId: v.getUint16(11, Endian.little),
       burstIndex: inner[13],
+      frontEndMetaRaw: v.getUint16(15, Endian.little),
+      subChannel: inner[17],
+      // The metadata block sits AFTER the waveform, so a short record can
+      // legitimately lack it. Null out rather than reject the record or
+      // invent a value.
+      signalMetric: hasMeta ? v.getFloat32(67, Endian.little) : null,
+      gainSetting: hasMeta ? inner[71] : null,
+      gainIndex: hasMeta ? inner[72] : null,
+      flagA: hasMeta ? inner[73] : null,
+      flagB: hasMeta ? inner[74] : null,
       ppgWaveform: samples,
     );
   }
