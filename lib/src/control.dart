@@ -453,14 +453,25 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   final op = inner[2];
   final payload = Uint8List.sublistView(inner, 3);
   final dec = <String, dynamic>{};
+  // A response carries [type][seq][opcode][echoed request seq][status] before
+  // its body, so inner[4] is the status: 0 failed, 1 ok, 2 deferred (a real
+  // reply follows this one), 3 opcode not implemented. Surfaced so callers can
+  // tell "the strap said no" from "the strap said nothing".
+  final status = inner.length >= 5 ? inner[4] : -1;
+  if (status >= 0) dec['cmd_status'] = status;
   if (op == Cmd.getBatteryLevel && inner.length >= (profile.isGen5 ? 6 : 7)) {
     // Byte-verified: gen5 returns a DIRECT percent @ inner[5] (u8, e.g.
     // 0x2F=47%) — NOT deci-percent like gen4's u16 LE @[5:7]. Conflating the
     // two would either divide a real gen5 percent by 10 or read half of a
     // gen4 deci-percent as a whole percent.
     if (profile.isGen5) {
-      final pct = inner[5].toDouble();
-      if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
+      // A failure reply does not populate the body, so the bytes here are
+      // stale. Without the status check a leftover value in 0..100 is reported
+      // as a confident battery percentage.
+      if (status == 1) {
+        final pct = inner[5].toDouble();
+        if (_validBatteryPct(pct)) dec['battery_pct'] = pct;
+      }
     } else {
       final pct = _round(u16(inner, 5) / 10.0, 1);
       // A battery percentage outside 0..100 is not a battery percentage —
@@ -474,12 +485,15 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   } else if (op == Cmd.getHello) {
     // gen5's GET_HELLO (0x91) response — a DIFFERENT opcode from gen4's
     // GET_HELLO_HARVARD (0x23), with its own byte-verified fields:
-    // device_name @ pay[16], fw_version (4 raw bytes) @ pay[93] gated on
+    // device_name @ pay[51], fw_version (4 raw bytes) @ pay[93] gated on
     // pay[93] == 50 (the fw major-version byte real captures show as 50 —
     // e.g. "50.38.1.0" — NOT the ASCII character '5' (that would be 53);
     // absent the gate, don't report a fw_version at all).
-    if (payload.length > 16) {
-      final name = _cstrAt(payload, 16);
+    //
+    // The name is a 30-byte field. pay[16] — where this used to read — is a
+    // binary field on gen5, not the name; that offset is gen4's serial slot.
+    if (payload.length >= 81) {
+      final name = _cstrAt(payload, 51);
       if (name.isNotEmpty) dec['device_name'] = name;
     }
     if (payload.length >= 97 && payload[93] == 50) {
@@ -495,11 +509,13 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // Reading @1 unconditionally decoded the rich form's [index][epoch:3] as
     // the epoch. An unrecognised leading byte is an unknown form: emit no
     // alarm_epoch rather than guessing an offset.
-    final form = payload[0];
-    if (form == 0x01 && payload.length >= 5) {
-      dec['alarm_epoch'] = u32(payload, 1);
-    } else if (form == 0x04 && payload.length >= 6) {
-      dec['alarm_epoch'] = u32(payload, 2);
+    // The form byte is the first byte of the reply BODY, which starts at
+    // payload[2] — payload[0] is the echoed request seq.
+    final form = payload.length >= 3 ? payload[2] : -1;
+    if (form == 0x01 && payload.length >= 7) {
+      dec['alarm_epoch'] = u32(payload, 3);
+    } else if (form == 0x04 && payload.length >= 8) {
+      dec['alarm_epoch'] = u32(payload, 4);
     }
   } else if (op == Cmd.getAdvertisingNameHarvard) {
     dec['strap_name'] = _decodeAdvName(payload);
@@ -528,28 +544,35 @@ CmdResponse? parseCommandResponse(Uint8List inner,
         };
       }
     }
-  } else if (op == Cmd.getBodyLocationAndStatus && payload.length >= 4) {
+  } else if (op == Cmd.getBodyLocationAndStatus && payload.length >= 6) {
+    // Reply body is [rev][0][0xFF][location]; only the last byte varies. It
+    // starts after the response header, i.e. at payload[2] — reading from
+    // payload[0] landed on the echoed-seq/status pair, so `locationRaw` was
+    // the status byte and resolved to "wrist" on every successful reply.
     dec['body_location_status'] = BodyLocationStatusResponse(
-      revision: payload[0],
-      locationRaw: payload[1],
-      confidence: payload[2],
-      status: payload[3],
+      revision: payload[2],
+      locationRaw: payload[5],
+      confidence: payload[4], // constant 0xFF on every observed reply
+      status: payload[3], // constant 0
     );
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
-  } else if (op == Cmd.selectWrist && payload.isNotEmpty) {
+  } else if (op == Cmd.selectWrist && payload.length >= 3) {
     dec['select_wrist'] = SelectWristResponse(
-      revision: payload[0],
-      payload: Uint8List.fromList(payload),
+      revision: payload[2],
+      payload: Uint8List.fromList(payload.sublist(2)),
     );
-  } else if (op == Cmd.getBatteryPackInfo && payload.length >= 28) {
+  } else if (op == Cmd.getBatteryPackInfo && payload.length >= 30) {
+    // 28-byte body [rev][attached][id ×6][name ×16][u16][type][status], again
+    // starting at payload[2]. Every field was previously read two bytes early,
+    // so type/status were reading the two halves of the unnamed u16.
     dec['battery_pack_info'] = BatteryPackInfoResponse(
-      revision: payload[0],
-      attached: payload[1] == 1,
+      revision: payload[2],
+      attached: payload[3] == 1,
       identifier: _batteryPackId(payload),
       name: _batteryPackName(payload),
-      batteryPackTypeRaw: payload[26],
-      statusRaw: payload[27],
+      batteryPackTypeRaw: payload[28],
+      statusRaw: payload[29],
     );
   } else if (op == Cmd.reportVersionInfo) {
     dec['version_info'] = <String, dynamic>{
@@ -561,12 +584,12 @@ CmdResponse? parseCommandResponse(Uint8List inner,
 }
 
 String _batteryPackId(Uint8List payload) {
-  final bytes = payload.sublist(2, 8);
+  final bytes = payload.sublist(4, 10);
   return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
 }
 
 String _batteryPackName(Uint8List payload) {
-  return _printableRun(payload, 8, 24);
+  return _printableRun(payload, 10, 26);
 }
 
 /// Decode the GET_ADVERTISING_NAME response body. Verified layout (real capture):

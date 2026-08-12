@@ -182,7 +182,10 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   final double dynamicAccelerationG;
 
   /// [x, y, z] (g) @ inner[37/41/45] f32 LE each (frame-abs 45/49/53). Gated
-  /// finite with magnitude ∈ [0.5, 1.5] g at decode time.
+  /// finite with magnitude ∈ [0.5, 1.8] g at decode time — the same window
+  /// gen4 uses. These are per-axis means of raw accel, not a normalised
+  /// vector, so a worn strap in motion legitimately reads above 1 g; do not
+  /// re-reject on a tighter bound than the decoder already applies.
   final List<double> gravityG;
 
   /// Cumulative on-chip step counter @ inner[49:51] u16 LE (frame-abs 57).
@@ -190,7 +193,8 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// only the low byte. No midnight reset.
   final int stepMotionCounter;
 
-  /// Raw @ inner[51] (frame-abs 59).
+  /// Raw @ inner[51] u8 (frame-abs 59). inner[52] is a hard zero, so a u16 read
+  /// here happens to give the same number — but the field is one byte.
   final int stepCadence;
 
   /// RAW byte @ inner[55] (frame-abs 63). Only 0 (still) / 1 (walk) / 2 (run)
@@ -214,7 +218,8 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   final double tempAux2C;
 
   /// °C = raw/100 — a GEN5-SPECIFIC scale; do NOT reuse gen4's per-device
-  /// affine scale here. @ inner[65:67] u16 LE (frame-abs 73). Confirmed
+  /// affine scale here. @ inner[65:67] **i16** LE (frame-abs 73). Signed: an
+  /// unsigned read turns anything below 0 °C into ≈ +655 °C. Confirmed
   /// worn≈30.6°C / off-wrist≈22.5°C on real captures.
   final double skinTempC;
 
@@ -232,14 +237,16 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   ///     "0 still / 1 wake" is the wrong way round.
   final int sleepStateByte;
 
-  /// @ inner[74] (frame-abs 82). **NOT SpO2** — the name is kept only because
-  /// removing it breaks the API. Treat it as an opaque sleep-gated byte.
+  /// @ inner[74] (frame-abs 82). Opaque, sleep-gated. Do NOT surface it as a
+  /// metric — there is no validity signal to gate it on.
   ///
   /// It reads 0 in 99% of records and is *identically* zero unless
   /// [sleepState] is [Gen5SleepState.sleep], where it fires on 2.4% of
-  /// records. A blood-oxygen channel does not switch itself off while the
-  /// band is worn. The values that do appear cluster at 95-99, which is what
-  /// makes the byte look like SpO2 in the first place.
+  /// records, clustering at 95-99. That distribution does not disqualify a
+  /// blood-oxygen reading on this band — the measurement is itself sleep-gated
+  /// — so treat "is it SpO2" as open rather than settled either way. Values
+  /// above 128 decompose as `128 + <a value from the low set>`, so bit 7 looks
+  /// like a flag rather than part of the number.
   final int spo2CandidateRaw;
 
   /// @ inner[98] (frame-abs 106). Proven NOT the high half of a u16 with
@@ -303,13 +310,14 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// substitute HR.
   int? get trustedHeartRateAlt => hrRrValidThisSecond ? heartRateAlt : null;
 
-  /// **Do not use — frame-abs 82 is not SpO2.** The byte is zero in 99% of
-  /// records and nonzero *only* while [sleepState] is [Gen5SleepState.sleep],
-  /// so this getter surfaces a plausible-looking 95-99 on 0.6% of records and
-  /// null on the rest. See [spo2CandidateRaw] for the measurements.
+  /// **Do not use.** The byte is zero in 99% of records and nonzero *only*
+  /// while [sleepState] is [Gen5SleepState.sleep], so this getter surfaces a
+  /// plausible-looking 95-99 on 0.6% of records and null on the rest — with no
+  /// validity signal to say which are real. See [spo2CandidateRaw].
   @Deprecated(
-    'frame-abs 82 is not SpO2: zero in 99% of records and nonzero only '
-    'during band-declared sleep. Read spo2CandidateRaw if you need the byte.',
+    'unsafe to surface: zero in 99% of records, nonzero only during '
+    'band-declared sleep, and with no validity flag. Read spo2CandidateRaw '
+    'if you need the byte.',
   )
   int? get spo2Candidate => (spo2CandidateRaw >= 70 && spo2CandidateRaw <= 100)
       ? spo2CandidateRaw
@@ -332,8 +340,7 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// The band's own coarse wake/sleep state. Total over the 2-bit nibble, so
   /// never null. **A wake/sleep envelope, not a sleep stage** — see
   /// [Gen5SleepState] for the evidence and the limits.
-  Gen5SleepState get sleepState =>
-      Gen5SleepState.values[sleepStateRawNibble];
+  Gen5SleepState get sleepState => Gen5SleepState.values[sleepStateRawNibble];
 }
 
 /// Minimum inner length to read every v18 field this decoder touches (the
@@ -381,8 +388,13 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
     final gy = _round(v.getFloat32(41, Endian.little), 4);
     final gz = _round(v.getFloat32(45, Endian.little), 4);
     if (!gx.isFinite || !gy.isFinite || !gz.isFinite) return null;
+    // These are per-axis means of raw accel, NOT a normalised gravity vector,
+    // so a worn strap in motion legitimately exceeds 1.5 g. The old 2.25 ceiling
+    // threw away whole records — HR and RR included — for seconds that were only
+    // moving. Use the same window gen4 uses (records.dart), and reject only
+    // physically impossible vectors.
     final magSq = gx * gx + gy * gy + gz * gz;
-    if (magSq < 0.25 || magSq > 2.25) return null; // 0.5g..1.5g
+    if (magSq < 0.25 || magSq > 3.24) return null; // 0.5g..1.8g
 
     final unknownF32 = _round(v.getFloat32(105, Endian.little), 4);
 
@@ -405,7 +417,7 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       activityClass: inner[55],
       tempAux1C: _round(v.getInt16(61, Endian.little) / 10.0, 2),
       tempAux2C: _round(v.getInt16(63, Endian.little) / 10.0, 2),
-      skinTempC: _round(v.getUint16(65, Endian.little) / 100.0, 2),
+      skinTempC: _round(v.getInt16(65, Endian.little) / 100.0, 2),
       statusWord: v.getUint16(67, Endian.little),
       statusWord1: v.getUint16(69, Endian.little),
       statusWord2: v.getUint16(71, Endian.little),
@@ -581,18 +593,21 @@ class Gen5V20Decoder implements Gen5RecordDecoder {
 class Gen5ImuBuffer extends Gen5HistoricalRecord {
   final int layoutMarker;
 
-  /// Must be 100 for a genuine v21 buffer — part of [Gen5V21Decoder.matches]'s
-  /// gate, since (per §1.5) this record kind "has no confirmed place in the
-  /// version-byte scheme" and is identified by shape, not `hist_version`.
+  /// Samples actually present in each block: [countA] for the accel axes,
+  /// [countB] for the gyro axes. 1..100 — a block declares how much of its
+  /// fixed 100-sample capacity it filled, and a partly-filled buffer is still
+  /// a genuine buffer. Part of [isGen5ImuBuffer]'s gate, since this record
+  /// kind is identified by shape rather than `hist_version`.
   final int countA;
   final int countB;
 
-  /// g, scale 1/4096 g/LSB. 100 samples each.
+  /// g, scale [kGen5AccelScaleG]. [countA] samples each, NOT always 100.
   final List<double> accelXg;
   final List<double> accelYg;
   final List<double> accelZg;
 
-  /// deg/s, scale 2000/32768 dps/LSB (±2000 dps full-scale). 100 samples each.
+  /// deg/s, scale [kGen5GyroScaleDps] (±2000 dps full-scale). [countB] samples
+  /// each, NOT always 100.
   final List<double> gyroXdps;
   final List<double> gyroYdps;
   final List<double> gyroZdps;
@@ -616,9 +631,14 @@ class Gen5ImuBuffer extends Gen5HistoricalRecord {
 // Gyro full-scale ±2000dps over signed int16 → 2000/32768 deg/s per LSB.
 // Identical constant to live.dart's `_gyroScale` (R10 IMU) — the scale is
 // shared across every WHOOP gyro stream this package decodes.
-const double _kGyroScaleDps = 2000.0 / 32768.0;
-const double _kAccelScaleG = 1.0 / 4096.0;
+const double kGen5GyroScaleDps = 2000.0 / 32768.0;
+const double kGen5AccelScaleG = 1.0 / 4096.0;
 
+// Each of the two sample blocks is prefixed by
+//   [u16 capacity][u16 count][u8 sensor id][u8 flags]
+// so the *count* is the second word, not the first. Sensor id 3 = accel
+// (first block), 5 = gyro (second). Capacity is a fixed 100 and carries no
+// information — gating on it can never fail.
 const int _kV21CountAOffset = 16; // frame-abs 24
 const int _kV21AxStart = 20; // frame-abs 28
 const int _kV21CountBOffset = 622; // frame-abs 630
@@ -627,10 +647,68 @@ const int _kV21SamplesPerAxis = 100;
 
 /// Exact inner length: total on-wire frame is 1244 bytes, so padded-inner =
 /// 1244 - 8 - 4 = 1232. PRIMARY identity check, along with [Gen5V21Decoder]'s
-/// count==100 gate — neither the length nor the counts depend on trusting
+/// bounded-count gate — neither the length nor the counts depend on trusting
 /// `hist_version` at all, matching how both reference repos actually
 /// identify this buffer.
 const int kGen5V21InnerLen = _kV21GxStart + 3 * 2 * _kV21SamplesPerAxis; // 1232
+
+/// True when [inner] carries a record-21 IMU buffer, whichever packet type it
+/// arrived under. The shape check is independent of `hist_version`.
+bool isGen5ImuBuffer(Uint8List inner) {
+  if (inner.length != kGen5V21InnerLen) return false;
+  final v = _view(inner);
+  final countA = v.getUint16(_kV21CountAOffset, Endian.little);
+  final countB = v.getUint16(_kV21CountBOffset, Endian.little);
+  // A partly-filled buffer is still a valid buffer — it just carries fewer than
+  // the block's capacity. Requiring exactly the capacity rejected every short
+  // buffer outright.
+  return countA >= 1 &&
+      countA <= _kV21SamplesPerAxis &&
+      countB >= 1 &&
+      countB <= _kV21SamplesPerAxis;
+}
+
+/// Decode a record-21 IMU buffer.
+///
+/// The same buffer reaches us two ways: as a historical record (packet type
+/// 0x2F) and as a live realtime frame (0x2B). Identical header, offsets and
+/// scales in both cases, so both go through here rather than through two
+/// decoders that can drift apart.
+Gen5ImuBuffer? parseGen5ImuBuffer(Uint8List inner) {
+  if (!isGen5ImuBuffer(inner)) return null;
+  final hdr = Gen5HistoricalHeader.tryParse(inner);
+  if (hdr == null) return null;
+  final v = _view(inner);
+
+  final countA = v.getUint16(_kV21CountAOffset, Endian.little);
+  final countB = v.getUint16(_kV21CountBOffset, Endian.little);
+
+  // Read only the samples the block declares. Decoding the full capacity from
+  // a partly-filled buffer emits whatever stale bytes follow the valid ones as
+  // if they were real motion.
+  List<double> axis(int start, double scale, int count) {
+    final out = <double>[];
+    for (int i = 0; i < count; i++) {
+      out.add(v.getInt16(start + 2 * i, Endian.little) * scale);
+    }
+    return out;
+  }
+
+  return Gen5ImuBuffer(
+    histVersion: hdr.version,
+    recordIndex: hdr.recordIndex,
+    unix: hdr.unix,
+    layoutMarker: hdr.layoutMarker,
+    countA: countA,
+    countB: countB,
+    accelXg: axis(_kV21AxStart, kGen5AccelScaleG, countA),
+    accelYg: axis(_kV21AxStart + 200, kGen5AccelScaleG, countA),
+    accelZg: axis(_kV21AxStart + 400, kGen5AccelScaleG, countA),
+    gyroXdps: axis(_kV21GxStart, kGen5GyroScaleDps, countB),
+    gyroYdps: axis(_kV21GxStart + 200, kGen5GyroScaleDps, countB),
+    gyroZdps: axis(_kV21GxStart + 400, kGen5GyroScaleDps, countB),
+  );
+}
 
 class Gen5V21Decoder implements Gen5RecordDecoder {
   const Gen5V21Decoder();
@@ -639,44 +717,10 @@ class Gen5V21Decoder implements Gen5RecordDecoder {
   String get name => 'gen5_v21';
 
   @override
-  bool matches(Uint8List inner) {
-    if (inner.length != kGen5V21InnerLen) return false;
-    final v = _view(inner);
-    final countA = v.getUint16(_kV21CountAOffset, Endian.little);
-    final countB = v.getUint16(_kV21CountBOffset, Endian.little);
-    return countA == 100 && countB == 100;
-  }
+  bool matches(Uint8List inner) => isGen5ImuBuffer(inner);
 
   @override
-  Gen5ImuBuffer? decode(Uint8List inner) {
-    if (!matches(inner)) return null;
-    final hdr = Gen5HistoricalHeader.tryParse(inner);
-    if (hdr == null) return null;
-    final v = _view(inner);
-
-    List<double> axis(int start, double scale) {
-      final out = <double>[];
-      for (int i = 0; i < _kV21SamplesPerAxis; i++) {
-        out.add(v.getInt16(start + 2 * i, Endian.little) * scale);
-      }
-      return out;
-    }
-
-    return Gen5ImuBuffer(
-      histVersion: hdr.version,
-      recordIndex: hdr.recordIndex,
-      unix: hdr.unix,
-      layoutMarker: hdr.layoutMarker,
-      countA: v.getUint16(_kV21CountAOffset, Endian.little),
-      countB: v.getUint16(_kV21CountBOffset, Endian.little),
-      accelXg: axis(_kV21AxStart, _kAccelScaleG),
-      accelYg: axis(_kV21AxStart + 200, _kAccelScaleG),
-      accelZg: axis(_kV21AxStart + 400, _kAccelScaleG),
-      gyroXdps: axis(_kV21GxStart, _kGyroScaleDps),
-      gyroYdps: axis(_kV21GxStart + 200, _kGyroScaleDps),
-      gyroZdps: axis(_kV21GxStart + 400, _kGyroScaleDps),
-    );
-  }
+  Gen5ImuBuffer? decode(Uint8List inner) => parseGen5ImuBuffer(inner);
 }
 
 // ── v26 — 24Hz single-wavelength PPG waveform. ─────────────────────────────
@@ -767,7 +811,8 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
     required super.recordIndex,
     required super.unix,
     required this.layoutMarker,
-    @Deprecated('frame-abs 19 is a u16 — use segmentId') required this.rawByte19,
+    @Deprecated('frame-abs 19 is a u16 — use segmentId')
+    required this.rawByte19,
     required this.segmentId,
     required this.burstIndex,
     required this.frontEndMetaRaw,
@@ -823,13 +868,13 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
 
     return Gen5PpgWaveform(
       histVersion: hdr.version,
-      // v26 is the ONE exception to the shared header's u32 record_index:
-      // whoop-rs's ground truth (real captured frames) reads only a u16 here
-      // — inner[5:7] is a separate, distinct field, not the top half of a
-      // u32 counter. Reusing hdr.recordIndex (u32 @ inner[3:7]) inflates the
-      // counter ~500x on real captures. Confirmed by independent
-      // cross-validation against whoop-rs's real_frames.json fixtures.
-      recordIndex: v.getUint16(3, Endian.little),
+      // v26 uses the SAME u32 record_index as every other version. The u16 read
+      // that used to live here truncated it: the counter is continuous with
+      // v18's (a v18/v26 pair one second apart differs by exactly 1 in both the
+      // counter and unix), and inner[5:7] is its high half — constant within a
+      // capture, not a separate field. Truncating wrapped it every ~18h and made
+      // it non-monotonic.
+      recordIndex: hdr.recordIndex,
       unix: hdr.unix,
       layoutMarker: hdr.layoutMarker,
       // ignore: deprecated_member_use_from_same_package

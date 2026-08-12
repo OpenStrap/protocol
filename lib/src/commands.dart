@@ -127,11 +127,18 @@ Uint8List cmdGetBodyLocationAndStatus(int seq) =>
     buildCommand(seq, Cmd.getBodyLocationAndStatus, const []);
 Uint8List cmdGetBatteryPackInfo(int seq) =>
     buildCommand(seq, Cmd.getBatteryPackInfo, const []);
-Uint8List cmdExitHighFreqSync(int seq) =>
-    buildCommand(seq, Cmd.exitHighFreqSync, const []);
+Uint8List cmdExitHighFreqSync(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.exitHighFreqSync, const [], profile);
 
+// These two took no [profile], so a gen5 caller silently got a gen4-framed
+// frame: wrong header length and a crc8 where the strap checks crc16, i.e. a
+// frame a gen5 strap cannot parse at all. High-frequency sync simply never
+// engaged, while the caller believed it had.
 Uint8List cmdEnterHighFreqSync(int seq,
-    {required int intervalSeconds, required int durationSeconds}) {
+    {required int intervalSeconds,
+    required int durationSeconds,
+    BandProfile profile = BandProfile.gen4}) {
   if (intervalSeconds < 0 || intervalSeconds > 0xFFFF) {
     throw ArgumentError.value(
         intervalSeconds, 'intervalSeconds', 'must fit in u16');
@@ -144,7 +151,8 @@ Uint8List cmdEnterHighFreqSync(int seq,
     ..setUint8(0, 0x02)
     ..setUint16(1, intervalSeconds, Endian.little)
     ..setUint16(3, durationSeconds, Endian.little);
-  return buildCommand(seq, Cmd.enterHighFreqSync, payload.buffer.asUint8List());
+  return buildCommand(
+      seq, Cmd.enterHighFreqSync, payload.buffer.asUint8List(), profile);
 }
 
 Uint8List cmdSelectWrist(int seq, WristSelection selection) =>
@@ -162,8 +170,22 @@ Uint8List cmdToggleHr(int seq, bool on) =>
 /// reconnects. STOP_RAW_DATA (0x52) does nothing.
 Uint8List cmdSendR10R11(int seq, bool on) =>
     buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00]);
-Uint8List cmdToggleImu(int seq, bool on) =>
-    buildCommand(seq, Cmd.toggleImuMode, [on ? 0x01 : 0x00]);
+/// Toggle the IMU data stream (IMU_SET_DATA_STREAM = 0x6A).
+///
+/// The body differs by generation: gen4 takes a bare on/off byte, gen5 wants a
+/// leading revision byte first. Sending the bare byte to a gen5 strap leaves it
+/// reading the state from past the end of the body, so the stream never starts
+/// and step calibration stays at zero.
+Uint8List cmdToggleImu(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(
+      seq,
+      Cmd.toggleImuMode,
+      profile.isGen5
+          ? <int>[revision1, on ? 0x01 : 0x00]
+          : <int>[on ? 0x01 : 0x00],
+      profile,
+    );
 Uint8List cmdEnableOptical(int seq, bool on) =>
     buildCommand(seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00]);
 
@@ -368,16 +390,21 @@ Uint8List cmdSendHistoricalGen5(int seq) =>
 // specifically is still needed before relying on this to actually latch the
 // RTC on a real Maverick/5.0 strap.
 
-/// gen5 SET_CLOCK_MAVERICK (146). ASSUMPTION: reuses gen4's hardware-verified
-/// 8-byte `[u32 epoch][u16 subsec][pad u16]` payload shape — the opcode VALUE
-/// is confirmed gen5-specific, but this payload shape has NOT been confirmed
-/// against real gen5 hardware. Verify by reading the clock back
-/// ([cmdGetClockGen5]) before trusting it in production.
+/// gen5 SET_CLOCK_MAVERICK (146).
+///
+/// Body is `[0x01][u32 epoch][u16 subsec]` — the leading byte is the command
+/// revision, exactly like GET_HELLO's. Without it the strap reads the epoch's
+/// low byte as the revision, rejects the command, and the RTC silently never
+/// latches; records then carry a 1970s timestamp.
+///
+/// Legacy [cmdSetClock] (0x0A) also still works on gen5 and takes no revision
+/// byte, so either is valid — but they are NOT interchangeable body shapes.
 Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
   final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
   final sec = ms ~/ 1000;
   final subsec = ((ms % 1000) * 32768) ~/ 1000;
   final payload = <int>[
+    revision1,
     sec & 0xff,
     (sec >> 8) & 0xff,
     (sec >> 16) & 0xff,
@@ -390,9 +417,10 @@ Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
   return buildCommand(seq, Cmd.setClockMaverick, payload, BandProfile.gen5);
 }
 
-/// gen5 GET_CLOCK_GEN5 (147).
+/// gen5 GET_CLOCK_GEN5 (147). Takes the same `[0x01]` revision body — an empty
+/// body is rejected as revision 0.
 Uint8List cmdGetClockGen5(int seq) =>
-    buildCommand(seq, Cmd.getClockGen5, const [], BandProfile.gen5);
+    buildCommand(seq, Cmd.getClockGen5, const [revision1], BandProfile.gen5);
 
 // ── gen5 Maverick haptics (RUN_HAPTIC_PATTERN_MAVERICK = 0x13/19) ──────────
 
@@ -407,7 +435,8 @@ Uint8List cmdBuzzGen5Maverick(int seq, {int overallLoop = 1}) {
   // Clamp rather than throw — a caller-supplied loop count (e.g. from a UI
   // slider) out of u8 range is a caller mistake, not a reason to crash the
   // buzz command entirely. Matches the reference implementation's behavior.
-  final clampedLoop = overallLoop < 0 ? 0 : (overallLoop > 0xff ? 0xff : overallLoop);
+  final clampedLoop =
+      overallLoop < 0 ? 0 : (overallLoop > 0xff ? 0xff : overallLoop);
   final payload = <int>[
     0x01,
     47,

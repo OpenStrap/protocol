@@ -12,7 +12,20 @@ void main() {
       expect(frame.valid, isTrue);
       expect(
         frame.inner,
-        [0x23, 0x21, 0x17, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+        [
+          0x23,
+          0x21,
+          0x17,
+          0x01,
+          0x11,
+          0x22,
+          0x33,
+          0x44,
+          0x55,
+          0x66,
+          0x77,
+          0x88
+        ],
       );
     });
 
@@ -69,8 +82,7 @@ void main() {
     test('cmdSetClock builds the WHOOP-exact 8-byte sec+subsec payload', () {
       // Fixed instant: sec = 0x12345678, millis = 500.
       // subsec = 500 * 32768 ~/ 1000 = 16384 = 0x4000 (u16 LE, then 2 zero pad).
-      final now =
-          DateTime.fromMillisecondsSinceEpoch(0x12345678 * 1000 + 500);
+      final now = DateTime.fromMillisecondsSinceEpoch(0x12345678 * 1000 + 500);
       final frame = parseFrame(cmdSetClock(0x09, now: now))!;
       expect(frame.valid, isTrue);
       expect(frame.inner, [
@@ -120,7 +132,8 @@ void main() {
 
   group('WHOOP command response decode', () {
     test('0x54 body location/status decodes exact fields', () {
-      final inner = hexToBytes('2401540107a005');
+      // [24][seq][54] [echoed seq][status] then the body [rev][0][0xFF][loc].
+      final inner = hexToBytes('2401540701' '0100ff07');
       final resp = parseCommandResponse(inner)!;
       final body =
           resp.decoded['body_location_status'] as BodyLocationStatusResponse;
@@ -128,13 +141,14 @@ void main() {
       expect(body.revision, 1);
       expect(body.locationRaw, 7);
       expect(body.location, GarmentDeviceLocation.ankle);
-      expect(body.confidence, 160);
-      expect(body.status, 5);
+      expect(body.confidence, 255);
+      expect(body.status, 0);
     });
 
     test('0x97 battery pack info decodes identifier, name and type', () {
       final inner = hexToBytes(
         '240297'
+        '0701' // echoed request seq, status
         '0101'
         '112233445566'
         '50756666696e20426174746572790000'
@@ -164,7 +178,7 @@ void main() {
     });
 
     test('0x7b select wrist response is modeled as an ack payload', () {
-      final inner = hexToBytes('24037b0102');
+      final inner = hexToBytes('24037b' '0701' '0102');
       final resp = parseCommandResponse(inner)!;
       final ack = resp.decoded['select_wrist'] as SelectWristResponse;
       expect(resp.opcode, Cmd.selectWrist);
@@ -228,8 +242,7 @@ void main() {
         0x00, //                         /4 frame padding (23-byte inner → 24)
       ]);
       // The default pattern exported for callers matches what we serialise.
-      expect(kDefaultAlarmHaptics,
-          [47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 7, 30]);
+      expect(kDefaultAlarmHaptics, [47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 7, 30]);
     });
 
     test('rich form honours a custom index and haptic pattern', () {
@@ -253,7 +266,8 @@ void main() {
       expect(rev2.inner.sublist(0, 5), [0x23, 0x02, Cmd.runAlarm, 0x02, 0x05]);
     });
 
-    test('disable alarm rev1 is [0x01], rev2 is [0x02][0xFF] (opcode 0x45)', () {
+    test('disable alarm rev1 is [0x01], rev2 is [0x02][0xFF] (opcode 0x45)',
+        () {
       final rev1 = parseFrame(cmdDisableAlarm(0x03))!;
       expect(rev1.inner, [0x23, 0x03, Cmd.disableAlarm, 0x01]);
       final rev2 = parseFrame(cmdDisableAlarm(0x04, revision: 2))!;
@@ -276,10 +290,12 @@ void main() {
       expect(EventId.name(EventId.ch2Saturation), 'CH2_SATURATION_DETECTED');
       expect(EventId.name(EventId.accelSaturation),
           'ACCELEROMETER_SATURATION_DETECTED');
-      expect(EventId.name(EventId.rawDataCollectionOn), 'RAW_DATA_COLLECTION_ON');
       expect(
-          EventId.name(EventId.rawDataCollectionOff), 'RAW_DATA_COLLECTION_OFF');
-      expect(EventId.name(EventId.strapDrivenAlarmSet), 'STRAP_DRIVEN_ALARM_SET');
+          EventId.name(EventId.rawDataCollectionOn), 'RAW_DATA_COLLECTION_ON');
+      expect(EventId.name(EventId.rawDataCollectionOff),
+          'RAW_DATA_COLLECTION_OFF');
+      expect(
+          EventId.name(EventId.strapDrivenAlarmSet), 'STRAP_DRIVEN_ALARM_SET');
       expect(EventId.name(EventId.strapDrivenAlarmExecuted),
           'STRAP_DRIVEN_ALARM_EXECUTED');
       expect(EventId.name(EventId.appDrivenAlarmExecuted),
@@ -311,8 +327,8 @@ void main() {
   group('WHOOP historical record versions', () {
     // Build a 96-byte record inner with a plausible ~1 g gravity vector and a
     // given HR at [hrOffset].
-    Uint8List record(int version, {required int hr, required int hrOffset,
-        double gz = 1.0}) {
+    Uint8List record(int version,
+        {required int hr, required int hrOffset, double gz = 1.0}) {
       final b = Uint8List(96);
       b[0] = 0x2f; // packet type (historical)
       b[1] = version;
@@ -399,8 +415,7 @@ void main() {
       expect(r.histVersion, 12);
     });
 
-    test(
-        'FirmwareAwareR24Decoder still returns null below the 72-byte floor',
+    test('FirmwareAwareR24Decoder still returns null below the 72-byte floor',
         () {
       final full = record(12, hr: 65, hrOffset: 17);
       final tooShort = Uint8List.sublistView(full, 0, 71);
@@ -424,7 +439,8 @@ void main() {
         'later calls, but re-probes if it stops matching', () {
       final decoder = FirmwareAwareR24Decoder();
       final full89 = record(12, hr: 70, hrOffset: 17);
-      final short88 = Uint8List.sublistView(record(12, hr: 71, hrOffset: 17), 0, 88);
+      final short88 =
+          Uint8List.sublistView(record(12, hr: 71, hrOffset: 17), 0, 88);
 
       // First record is full-length → legacy strategy wins and is remembered.
       expect(decoder.decode(full89)!.hr, 70);
@@ -485,7 +501,9 @@ void main() {
     // over from a 3-byte header skip) and hr as a fake u16/256 value instead
     // of the plain byte it actually is - found this against a real capture
     // where it decoded to some year-2089 garbage timestamp.
-    test('reads ts/hr/rr from the real layout, not shifted by the old header skip', () {
+    test(
+        'reads ts/hr/rr from the real layout, not shifted by the old header skip',
+        () {
       final b = Uint8List(20);
       final bd = b.buffer.asByteData();
       b[0] = 0x28;
@@ -509,7 +527,9 @@ void main() {
     // rr_count byte at all) would read inner[9] out of bounds and throw
     // instead of decoding. fixed to treat a missing rr_count byte as "no RR
     // intervals" rather than crashing.
-    test('a 9-byte packet (ts+hr only, no rr_count byte) decodes instead of throwing', () {
+    test(
+        'a 9-byte packet (ts+hr only, no rr_count byte) decodes instead of throwing',
+        () {
       final b = Uint8List(9);
       final bd = b.buffer.asByteData();
       b[0] = 0x28;

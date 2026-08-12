@@ -184,19 +184,17 @@ void main() {
       '4fe15ff5cff405fb33c50080101006cb67c17',
     );
 
-    test(
-        'decodes record_index as u16 (NOT u32 — cross-validated against '
-        'whoop-rs real_frames.json, where consecutive v26 frames give clean '
-        'consecutive u16 record_ids like 48077,48078,48079 — the u32 reading '
-        'jumps erratically because inner[5:7] is a distinct, unrelated field)',
-        () {
+    test('decodes record_index as the shared u32, not a truncated u16', () {
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
       expect(parsed.valid, isTrue);
       final r = parseGen5Historical(parsed.inner);
       expect(r, isA<Gen5PpgWaveform>());
       final wf = r as Gen5PpgWaveform;
       expect(wf.histVersion, 26);
-      expect(wf.recordIndex, 16813); // u32 read would give 25444781 — wrong
+      // Same u32 counter every other version uses. A u16 read truncates to
+      // 16813 and wraps every ~18h; inner[5:7] is this value's high half, not
+      // a separate field.
+      expect(wf.recordIndex, 25444781);
       expect(wf.unix, 1780917232);
       expect(wf.rawByte19, 174);
       expect(wf.burstIndex, 1);
@@ -228,35 +226,33 @@ void main() {
       ]);
     });
 
-    test(
-        'record_index is a clean consecutive counter across real consecutive '
-        'frames (whoop-rs real_frames.json ppg_frames — the strongest ground '
-        'truth: three real captured frames one second apart give record_id '
-        '48077,48078,48079; a u32 read of the same bytes would NOT be '
-        'consecutive since inner[5:7] is a distinct field)', () {
+    test('record_index is one consecutive u32 across real consecutive frames',
+        () {
       final hexes = [
         'aa015000010035412f1a80cdbb7601e700556a33',
         'aa015000010035412f1a80cebb7601e800556a33',
         'aa015000010035412f1a80cfbb7601e900556a33',
       ];
-      final expectedIds = [48077, 48078, 48079];
+      // The full u32 is consecutive; inner[5:7] is its high half, constant
+      // across the capture, not a separate field. A u16 read yields only the
+      // low half (48077..48079), which wraps every ~18h.
+      final expectedIds = [24558541, 24558542, 24558543];
       final expectedUnix = [1783955687, 1783955688, 1783955689];
       for (var i = 0; i < hexes.length; i++) {
-        // These fixtures are truncated (real-world capture excerpt, only the
-        // header + record_index/unix bytes) — long enough to exercise the
-        // shared header parse without needing the full 61-byte v26 payload.
+        // Truncated capture excerpts — header + record_index/unix only, enough
+        // to exercise the shared header parse without the full v26 payload.
         final inner = hex(hexes[i]).sublist(8); // strip the 8-byte gen5 header
         final hdr = Gen5HistoricalHeader.tryParse(inner);
         expect(hdr, isNotNull);
         expect(hdr!.version, 26);
-        // The shared header still reads the WRONG u32 value (inner[3:7]) —
-        // that's fine, only Gen5V26Decoder.decode() applies the v26-specific
-        // u16 correction. Confirm that distinction explicitly here.
-        expect(hdr.recordIndex, isNot(expectedIds[i]));
-        final u16RecordIndex = inner[3] | (inner[4] << 8);
-        expect(u16RecordIndex, expectedIds[i]);
+        expect(hdr.recordIndex, expectedIds[i]);
+        expect(hdr.recordIndex >> 16, 374); // shared high half
         expect(hdr.unix, expectedUnix[i]);
       }
+      // Counter and clock advance together — the two fixtures below are a
+      // v18/v26 pair from one session, so the counter cannot be per-version.
+      expect(
+          expectedIds[2] - expectedIds[0], expectedUnix[2] - expectedUnix[0]);
     });
   });
 
@@ -381,11 +377,26 @@ void main() {
       expect(imu.gyroXdps.first, closeTo(16384 * (2000.0 / 32768.0), 1e-9));
     });
 
-    test('rejects a buffer whose counts are not both 100', () {
+    test('a partly-filled block decodes only the samples it declares', () {
       final inner = buildV21(recordIndex: 1, unix: 1780000000);
-      ByteData.sublistView(inner)
-          .setUint16(622, 99, Endian.little); // countB wrong
-      expect(parseGen5Historical(inner), isNull);
+      ByteData.sublistView(inner).setUint16(622, 40, Endian.little);
+      final r = parseGen5Historical(inner) as Gen5ImuBuffer;
+      // Accel block is still full; the gyro block declared 40, so decoding the
+      // block's full capacity here would emit 60 samples of stale trailing
+      // bytes as if they were real motion.
+      expect(r.countB, 40);
+      expect(r.accelXg, hasLength(100));
+      expect(r.gyroXdps, hasLength(40));
+      expect(r.gyroYdps, hasLength(40));
+      expect(r.gyroZdps, hasLength(40));
+    });
+
+    test('rejects counts outside the block capacity', () {
+      for (final bad in [0, 101]) {
+        final inner = buildV21(recordIndex: 1, unix: 1780000000);
+        ByteData.sublistView(inner).setUint16(622, bad, Endian.little);
+        expect(parseGen5Historical(inner), isNull, reason: 'countB=$bad');
+      }
     });
 
     test(
@@ -510,16 +521,32 @@ void main() {
 
   group('gen5 COMMAND_RESPONSE — battery scale + GET_HELLO', () {
     test('gen5 GET_BATTERY_LEVEL is direct-percent, not deci-percent', () {
-      // inner = [0x24][seq][0x1A][47%] — gen5's direct-percent form.
+      // inner = [0x24][seq][0x1A][echoed seq][status=1][47%] — gen5's
+      // direct-percent form, body starting after the 5-byte response header.
       final inner = Uint8List(6);
       inner[0] = PacketType.commandResponse;
       inner[1] = 0;
       inner[2] = Cmd.getBatteryLevel;
-      inner[3] = 0;
-      inner[4] = 0;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       inner[5] = 47;
       final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
       expect(r.decoded['battery_pct'], 47.0);
+    });
+
+    test('gen5 GET_BATTERY_LEVEL reports nothing when the strap says it failed',
+        () {
+      // On a fuel-gauge error the body is left untouched, so these bytes are
+      // stale — a plausible-looking percentage that was never measured.
+      final inner = Uint8List(6);
+      inner[0] = PacketType.commandResponse;
+      inner[2] = Cmd.getBatteryLevel;
+      inner[3] = 7;
+      inner[4] = 0; // status: failed
+      inner[5] = 47;
+      final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      expect(r.decoded.containsKey('battery_pct'), isFalse);
+      expect(r.decoded['cmd_status'], 0);
     });
 
     test('the same bytes read as gen4 would misinterpret as deci-percent', () {
@@ -537,11 +564,13 @@ void main() {
       inner[0] = PacketType.commandResponse;
       inner[1] = 0;
       inner[2] = Cmd.getHello;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       final payload = Uint8List.sublistView(inner, 3);
-      // device_name @ pay[16]
+      // device_name @ pay[51] — a 30-byte field in the reply body
       final name = 'MyStrap';
       for (int i = 0; i < name.length; i++) {
-        payload[16 + i] = name.codeUnitAt(i);
+        payload[51 + i] = name.codeUnitAt(i);
       }
       // fw_version @ pay[93:97], gated on pay[93]==50
       payload[93] = 50;
@@ -558,6 +587,8 @@ void main() {
       final inner = Uint8List(120);
       inner[0] = PacketType.commandResponse;
       inner[2] = Cmd.getHello;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       inner[3 + 93] = 99; // not 50
       final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
       expect(r.decoded.containsKey('fw_version'), isFalse);

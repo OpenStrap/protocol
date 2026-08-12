@@ -50,9 +50,12 @@ Uint8List _realtimeHrFrame({
   return b;
 }
 
-/// Wrap a COMMAND_RESPONSE body: `[0x24][seq][opcode] + payload`.
-Uint8List _cmdResponse(int opcode, List<int> payload) =>
-    Uint8List.fromList([0x24, 0x11, opcode, ...payload]);
+/// Wrap a COMMAND_RESPONSE body the way a strap actually frames one:
+/// `[0x24][strap seq][opcode][echoed request seq][status] + body`.
+/// [body] is the command's own reply payload, i.e. what the strap writes after
+/// that 5-byte header — so tests state real offsets rather than the parser's.
+Uint8List _cmdResponse(int opcode, List<int> body, {int status = 1}) =>
+    Uint8List.fromList([0x24, 0x11, opcode, 0x07, status, ...body]);
 
 List<int> _u32le(int v) =>
     [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
@@ -80,8 +83,8 @@ void main() {
       // v24 and v12 skip the physiological-plausibility gate entirely, so the
       // R-R guard has to be independent of it.
       for (final version in [24, 12]) {
-        final r = parseR24(
-            hexToBytes(_patched(_goodV24, {1: version, 18: 0xff})))!;
+        final r =
+            parseR24(hexToBytes(_patched(_goodV24, {1: version, 18: 0xff})))!;
         expect(r.rrCount, 0, reason: 'v$version must still bound the count');
         expect(r.rrIntervalsMs, isEmpty, reason: 'v$version');
       }
@@ -147,8 +150,8 @@ void main() {
 
     test('the guard covers the trusted v12 path, not just the validated ones',
         () {
-      final r = parseR24(
-          hexToBytes(_patched(_goodV24, {1: 12, ...at(36, nan)})));
+      final r =
+          parseR24(hexToBytes(_patched(_goodV24, {1: 12, ...at(36, nan)})));
       expect(r, isNull);
     });
 
@@ -308,7 +311,11 @@ void main() {
     test('the RICH (0x04) form reads the epoch at offset 2', () {
       // [0x04][u8 index][u32 epoch][u16 subsec][12-byte haptic pattern]
       final payload = <int>[
-        0x04, 0x00, ..._u32le(epoch), 0x00, 0x40,
+        0x04,
+        0x00,
+        ..._u32le(epoch),
+        0x00,
+        0x40,
         ...kDefaultAlarmHaptics,
       ];
       expect(payload.length, 20);
@@ -404,8 +411,8 @@ void main() {
         () {
       // u16 @1 = 0x03ed = 1005 → 100.5%, which is not a battery percentage.
       // Every later offset is 0xffff, so nothing else qualifies → null.
-      final payload = Uint8List.fromList(
-          [0x00, 0xed, 0x03, ...List<int>.filled(9, 0xff)]);
+      final payload =
+          Uint8List.fromList([0x00, 0xed, 0x03, ...List<int>.filled(9, 0xff)]);
       expect(parseHello(payload).batteryPct, isNull);
     });
 
@@ -452,8 +459,8 @@ void main() {
       // rawTail is encoded lazily, so the record must own its bytes: mutating
       // the caller's buffer afterwards must not change what it reports.
       inner[13] = before ^ 0xFF;
-      expect(rec.rawTail.substring(0, 2),
-          before.toRadixString(16).padLeft(2, '0'),
+      expect(
+          rec.rawTail.substring(0, 2), before.toRadixString(16).padLeft(2, '0'),
           reason: 'rawTail must reflect parse time, not later mutation');
     });
 

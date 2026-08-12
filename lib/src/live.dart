@@ -6,6 +6,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'constants.dart';
+import 'gen5_records.dart';
 import 'records.dart';
 
 /// A decoded HR/activity sample.
@@ -147,6 +149,51 @@ ImuFrame? frameAccel(String hex) {
   }
   return null;
 }
+
+/// frameAccelGen5Live — the gen5 live IMU stream (packet type 0x2B carrying a
+/// record-21 buffer), decoded into the same [ImuFrame] shape [frameAccel]
+/// returns. Null if [hex] is not that frame.
+///
+/// It is the same buffer the historical path decodes, so both share
+/// [parseGen5ImuBuffer] rather than repeating the offsets. Axis samples are
+/// raw int16 and `mags` is in g, matching [frameAccel]'s convention.
+///
+/// Unlike [frameAccel] this does NOT drop the frame when the timestamp is
+/// missing: the accelerometer samples are valid whether or not the strap's
+/// clock has been set, and callers that need a wall time supply their own.
+ImuFrame? frameAccelGen5Live(String hex) {
+  Uint8List b;
+  try {
+    b = hexToBytes(hex);
+  } catch (_) {
+    return null;
+  }
+  if (b.isEmpty || b[0] != PacketType.realtimeRawData) return null;
+  final buf = parseGen5ImuBuffer(b);
+  if (buf == null) return null;
+
+  final xs = <double>[];
+  final ys = <double>[];
+  final zs = <double>[];
+  final mags = <double>[];
+  for (int i = 0; i < buf.accelXg.length; i++) {
+    final xg = buf.accelXg[i];
+    final yg = buf.accelYg[i];
+    final zg = buf.accelZg[i];
+    // Axes back to raw LSB so they read the same as frameAccel's; the
+    // magnitude stays in g.
+    xs.add(xg / kGen5AccelScaleG);
+    ys.add(yg / kGen5AccelScaleG);
+    zs.add(zg / kGen5AccelScaleG);
+    mags.add(math.sqrt(xg * xg + yg * yg + zg * zg));
+  }
+  return ImuFrame(buf.unix, 0, mags, xs, ys, zs);
+}
+
+/// Try the gen5 live IMU layout first, then gen4's ([frameAccel]). Safe to call
+/// for either generation — the two gates cannot both match.
+ImuFrame? frameAccelForBand(String hex) =>
+    frameAccelGen5Live(hex) ?? frameAccel(hex);
 
 /// Beat-to-beat (R-R) intervals (ms) from the live records that carry them.
 ///   • 0x28 REALTIME_DATA (compact HR): rr_count u8 @ [9],  rr i16 LE @ [10 + 2i]

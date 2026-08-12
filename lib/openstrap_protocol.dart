@@ -35,6 +35,10 @@ export 'src/gen5_records.dart'
         kGen5V21InnerLen,
         kGen5V26MinInnerLen,
         kGen5V26MinInnerLenWithMeta,
+        kGen5AccelScaleG,
+        kGen5GyroScaleDps,
+        isGen5ImuBuffer,
+        parseGen5ImuBuffer,
         parseGen5Historical;
 export 'src/live.dart'
     show
@@ -44,6 +48,8 @@ export 'src/live.dart'
         R10Imu,
         hexToBytes,
         frameAccel,
+        frameAccelGen5Live,
+        frameAccelForBand,
         realtimeRr,
         decodeR10Imu,
         decodeRecord,
