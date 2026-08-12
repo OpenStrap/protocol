@@ -159,7 +159,7 @@ Uint8List cmdToggleHr(int seq, bool on) =>
 ///
 /// NOTE: sending this with payload `[0x00]` (i.e. `cmdSendR10R11(seq, false)`)
 /// is the REAL persistent raw-flood OFF-switch — the off state persists across
-/// reconnects. STOP_RAW_DATA (0x52) does nothing. (PROTOCOL_FINDINGS.md:168-169)
+/// reconnects. STOP_RAW_DATA (0x52) does nothing.
 Uint8List cmdSendR10R11(int seq, bool on) =>
     buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00]);
 Uint8List cmdToggleImu(int seq, bool on) =>

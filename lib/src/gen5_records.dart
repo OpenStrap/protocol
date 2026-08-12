@@ -104,7 +104,7 @@ abstract class Gen5HistoricalRecord {
 /// per-field below — several fields have OPEN semantic disagreements between
 /// the two reference implementations (whoop-rs vs noop) that could not be
 /// resolved from bytes alone; those are called out explicitly rather than
-/// silently picking a side. See PROTOCOL_FINDINGS / the multiband spec §1.7.
+/// silently picking a side.
 class Gen5HistorySample extends Gen5HistoricalRecord {
   /// bpm. 0 is a legitimate reading (device warming up), not absence.
   final int heartRate;

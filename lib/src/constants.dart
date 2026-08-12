@@ -35,7 +35,7 @@ class PacketType {
 class Cmd {
   static const int linkValid = 0x01;
   // Report the highest wire-protocol revision the strap understands. Response
-  // carries the max protocol version — used for firmware/feature gating.
+  // carries the max protocol version — used for feature gating.
   static const int getMaxProtocolVersion = 0x02;
   static const int toggleRealtimeHr = 0x03;
   static const int reportVersionInfo = 0x07;
@@ -45,8 +45,10 @@ class Cmd {
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
   static const int historicalDataResult = 0x17; // the batch ACK
-  // DANGER — never send. Body is NOT empty: two LE i32 range args
-  // (full erase = both 0xFEFEFEFE). See PROTOCOL_FINDINGS.md.
+  // DANGER — never send. Body is NOT empty and is NOT a range/erase: it is an
+  // 8-byte `[u32 trim_page LE][u32 wrap_count LE]` — the
+  // same 8 bytes as the HISTORY_END trim token. It advances the strap's flash
+  // trim pointer, so a wrong value discards unsynced records.
   static const int forceTrim = 0x19;
   static const int getBatteryLevel = 0x1A;
   static const int rebootStrap = 0x1D; // DANGER
@@ -56,12 +58,18 @@ class Cmd {
   static const int setReadPointer = 0x21;
   static const int getDataRange = 0x22;
   static const int getHelloHarvard = 0x23;
-  // Firmware-load opcodes (Cmd opcode space — distinct from PacketType 0x24
-  // COMMAND_RESPONSE, which is inner[0], not a command opcode).
-  // DANGER — never send (per PROTOCOL_FINDINGS.md destructive list).
-  static const int startFirmwareLoad = 0x24; // DANGER
-  static const int loadFirmwareData = 0x25; // DANGER
-  static const int processFirmwareImage = 0x26; // DANGER
+  // Device-update trio (Cmd opcode space — distinct from PacketType
+  // 0x24 COMMAND_RESPONSE, which is inner[0], not a command opcode).
+  // DANGER — never send.
+  //
+  // ⚠ These 0x24-0x26 values are the GEN4-EMPIRICAL numbering and could not
+  // be confirmed on gen5. A gen5 strap does not act on them; the real gen5
+  // device-update trio is 0x8E/0x8F/0x90 (= 142/143/144), which
+  // [dangerousCmds] now also blocks. Keeping the gen4 entries because their
+  // numbering cannot be disproven, not because it is confirmed.
+  static const int startUpdateLoad = 0x24; // DANGER (gen4-empirical)
+  static const int loadUpdateData = 0x25; // DANGER (gen4-empirical)
+  static const int processUpdateImage = 0x26; // DANGER (gen4-empirical)
   static const int sendR10R11Realtime = 0x3F;
   // On-device haptic alarm. SET carries a wall-clock epoch + a haptic waveform
   // pattern (see cmdSetAlarm in commands.dart for the exact, hardware-verified
@@ -112,7 +120,7 @@ class Cmd {
 /// Band-agnostic opcode safety classification, sourced from whoop-rs's
 /// hardware-tested command surface (kept SEPARATE from [dangerousCmds] above,
 /// which is OpenStrap's own, independently-curated gen4 list — the two do not
-/// fully overlap, e.g. this list omits the firmware-load opcodes (0x24-0x26)
+/// fully overlap, e.g. this list omits the device-update opcodes (0x24-0x26)
 /// that [dangerousCmds] already blocks, and adds a few whoop-rs flags ours
 /// didn't have, notably 120/SET_FF_VALUE — see the note on [forbidden] below).
 ///
@@ -146,24 +154,39 @@ class OpcodeSafety {
   };
 
   /// The subset of [forbidden] that is actively destructive (data loss /
-  /// bricking), not merely "don't auto-fire". Opcodes 142-144 have no named
-  /// meaning in either reference codebase — treat as permanently blocked,
-  /// unknown-but-dangerous.
+  /// bricking), not merely "don't auto-fire". Opcodes 142-144 (0x8E-0x90) are
+  /// the confirmed gen5 device-update trio — [dangerousCmds]
+  /// also lists them so they are actually REFUSED, because this set is
+  /// classification-only and self-enforces NOTHING (see the class doc). Treat
+  /// membership here as documentation; gate on [dangerousCmds] to block a send.
   static const Set<int> destructive = {25, 45, 142, 143, 144};
 
   static bool isForbidden(int opcode) => forbidden.contains(opcode);
   static bool isDestructive(int opcode) => destructive.contains(opcode);
 }
 
-/// Commands that can brick the link / burn battery / brick flash. NEVER auto-fire.
+/// Commands that can brick the link / burn battery / brick flash. NEVER
+/// auto-fire. CALLER-ENFORCED: this package builds frames but has no transport
+/// write path, so it does not itself block a send — a call site (edge, at the
+/// point it writes a command) is expected to check membership here and refuse.
+/// This is the set such a guard should gate on (contrast [OpcodeSafety], which
+/// only sub-classifies and is likewise not self-enforcing).
 const Set<int> dangerousCmds = {
   Cmd.forceTrim,
   Cmd.togglePersistentR21,
   Cmd.rebootStrap,
   Cmd.powerCycleStrap,
-  Cmd.startFirmwareLoad,
-  Cmd.loadFirmwareData,
-  Cmd.processFirmwareImage,
+  // gen4-empirical device-update numbering (unverified; inert on gen5).
+  Cmd.startUpdateLoad,
+  Cmd.loadUpdateData,
+  Cmd.processUpdateImage,
+  // CONFIRMED gen5 device-update trio (0x8E/0x8F/0x90 =
+  // 142/143/144). These are the opcodes a real gen5 strap actually acts on, so
+  // they must be in the enforced set — not merely classified in
+  // [OpcodeSafety.destructive]. No Cmd.* constant: we never construct these.
+  0x8E,
+  0x8F,
+  0x90,
 };
 
 /// Historical-data record type (inner[1] of a 0x2F / data packet).

@@ -826,6 +826,13 @@ class Decoded {
 /// scale, GET_HELLO opcode, historical-record version family); defaults to
 /// gen4 so every existing caller is unchanged.
 Decoded decodeFrame(Frame frame, {BandProfile profile = BandProfile.gen4}) {
+  // A frame that passed CRC but advertises a frame revision this decoder does
+  // not understand (see [Frame.frameRevOk]) must NOT be decoded with the rev-1
+  // `inner[0]/[1]/[2]` field offsets — surface it instead of silently handing
+  // back a body byte as the packet type / opcode.
+  if (!frame.frameRevOk) {
+    return Decoded('unsupported_frame_rev', {'packet_type': frame.packetType});
+  }
   final inner = frame.inner;
   final pt = frame.packetType;
   try {
