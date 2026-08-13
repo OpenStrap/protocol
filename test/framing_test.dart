@@ -50,7 +50,7 @@ void main() {
       expect(f.inner[1], seq);
       // Rich form: [0x04][index][u32 epoch LE][u16 subsec LE][12-byte pattern].
       expect(f.inner[3], 0x04); // rich-form marker (the form that fires)
-      expect(f.inner[4], 0x00); // default slot index
+      expect(f.inner[4], 0x00); // gen4 default slot — the one a WHOOP 4 fires
       final bd =
           f.inner.buffer.asByteData(f.inner.offsetInBytes, f.inner.length);
       expect(bd.getUint32(5, Endian.little), epoch);

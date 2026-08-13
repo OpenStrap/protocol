@@ -1,7 +1,9 @@
 // gen5_records.dart — WHOOP 5 (gen5 / "fd4b" / "Maverick-Goose") historical
-// record decoders: v18 (per-second biometric summary), v20 (6-channel raw
-// optical deep buffer), v21 (100Hz 6-axis IMU deep buffer), v26 (24Hz PPG
-// waveform).
+// record decoders: v18 (per-second biometric summary), v20 (raw optical deep
+// buffer, 5 AFE channels × 2 photodiodes), v21 (100Hz 6-axis IMU deep buffer),
+// v26 (24-SAMPLE PPG waveform — 24 is a sample count, not a rate; the rate is
+// whatever PPG rate the record's own flags byte declares, see
+// [Gen5HistoricalRecord.ppgSampleRateHz]).
 //
 // REPLACES `records.dart`'s old `parseGen5Record` / `_gen5NormalHistoryVersions
 // = {9, 12, 24}`, which targeted the WRONG version set (those are WHOOP4's
@@ -13,8 +15,9 @@
 // here against real fixtures (CRC16 + CRC32 both checked) — see
 // gen5_historical_test.dart for the golden parity tests.
 //
-// v20 IS THE EXCEPTION to that "confirmed independently" claim — see the loud
-// warning on Gen5V20Decoder/Gen5OpticalBuffer below before trusting it.
+// v20's geometry (body start, block stride, slot offsets, sign-extended 20-bit
+// samples) and its per-block metadata are confirmed too — see
+// [Gen5OpticalBuffer].
 //
 // KEY FACT this whole file leans on: gen5's INNER-relative field offsets are
 // IDENTICAL to gen4's / to the frame-absolute offsets many sources quote,
@@ -49,36 +52,68 @@ double _round(double v, int decimals) {
 // ── Shared historical-record header (§1.5's "shared v18/v20/v21/v26 header
 // convention") — a cheap, version-byte-independent dispatch key. ───────────
 
-/// The 11-byte header every gen5 historical record kind (v18/v20/v21/v26)
-/// shares, at INNER offsets `[0:11)`:
+/// The 13-byte header every gen5 historical record kind (v18/v20/v21/v26)
+/// shares, at INNER offsets `[0:13)`:
 /// ```
 ///   inner[0]      packet type (0x2F)
 ///   inner[1]      hist_version   (frame-abs 9)
-///   inner[2]      layout_marker  (frame-abs 10) — raw; not deeply interpreted
+///   inner[2]      flags          (frame-abs 10) — see [flags]
 ///   inner[3:7]    record_index   u32 LE (frame-abs 11) — monotonic, not unix
 ///   inner[7:11]   unix           u32 LE (frame-abs 15)
+///   inner[11:13]  sub-second     u16 LE (frame-abs 19) — Q15, see [tsSubsec]
 /// ```
 class Gen5HistoricalHeader {
   final int version;
-  final int layoutMarker;
+
+  /// inner[2], a bit field — NOT an opaque layout tag.
+  ///
+  /// - bit 7: the optical front end is running at 25 Hz (clear = 50 Hz). See
+  ///   [ppgSampleRateHz]; nothing else on the wire carries the rate, so this
+  ///   bit is what makes an optical record self-describing.
+  /// - bit 1 (v18) and bit 0 (v20) are separate real flags. v20's bit 0 marks
+  ///   the IR-channel fallback described on [Gen5OpticalBuffer].
+  ///
+  /// Exposed raw so callers can read bits this decoder does not name.
+  final int flags;
   final int recordIndex;
   final int unix;
 
+  /// Raw sub-second at inner[11:13], a Q15 fraction of a second
+  /// (`tsSubsec / 32768`, see [subSecond]) — the same field gen4's R24 exposes
+  /// as `tsSubsec`. Null only when [inner] was too short to carry it.
+  final int? tsSubsec;
+
   const Gen5HistoricalHeader({
     required this.version,
-    required this.layoutMarker,
+    required this.flags,
     required this.recordIndex,
     required this.unix,
+    required this.tsSubsec,
   });
+
+  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
+  int get layoutMarker => flags;
+
+  /// Optical sample rate this record was captured at, in Hz — bit 7 of
+  /// [flags].
+  int get ppgSampleRateHz => (flags & 0x80) != 0 ? 25 : 50;
+
+  /// [tsSubsec] as seconds in [0, 1), or null on a header too short to carry
+  /// it.
+  double? get subSecond {
+    final raw = tsSubsec;
+    return raw == null ? null : raw / 32768.0;
+  }
 
   static Gen5HistoricalHeader? tryParse(Uint8List inner) {
     if (inner.length < 11) return null;
     final v = _view(inner);
     return Gen5HistoricalHeader(
       version: inner[1],
-      layoutMarker: inner[2],
+      flags: inner[2],
       recordIndex: v.getUint32(3, Endian.little),
       unix: v.getUint32(7, Endian.little),
+      tsSubsec: inner.length >= 13 ? v.getUint16(11, Endian.little) : null,
     );
   }
 }
@@ -87,14 +122,33 @@ class Gen5HistoricalHeader {
 /// don't care which kind they got can still read the shared header fields.
 abstract class Gen5HistoricalRecord {
   final int histVersion;
+
+  /// inner[2] — see [Gen5HistoricalHeader.flags].
+  final int flags;
   final int recordIndex;
   final int unix;
 
+  /// Sub-second of [unix], Q15 (`tsSubsec / 32768`) — see [subSecond]. Every
+  /// record kind carries it; gen4's R24 exposes the same field.
+  final int tsSubsec;
+
   const Gen5HistoricalRecord({
     required this.histVersion,
+    required this.flags,
     required this.recordIndex,
     required this.unix,
+    required this.tsSubsec,
   });
+
+  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
+  int get layoutMarker => flags;
+
+  /// Optical sample rate this record was captured at, in Hz — bit 7 of
+  /// [flags] (set = 25 Hz, clear = 50 Hz).
+  int get ppgSampleRateHz => (flags & 0x80) != 0 ? 25 : 50;
+
+  /// [tsSubsec] as seconds in [0, 1). Add to [unix] for the true sample time.
+  double get subSecond => tsSubsec / 32768.0;
 }
 
 // ── v18 — per-second biometric summary (the gen5 analogue of gen4's v24;
@@ -197,11 +251,18 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// here happens to give the same number — but the field is one byte.
   final int stepCadence;
 
-  /// RAW byte @ inner[55] (frame-abs 63). Only 0 (still) / 1 (walk) / 2 (run)
-  /// are valid activity-class codes — everything else (0xFF, 7, ...) is the
-  /// strap signaling "not classified", not a fourth activity. Kept as the raw
-  /// byte for diagnostics; use [activityClassKnown] for the honest, gated
-  /// value (never fabricate a class out of an invalid code).
+  /// RAW byte @ inner[55] (frame-abs 63). Only 0 / 1 (walk) / 2 (run) are
+  /// valid activity-class codes — everything else (0xFF, 7, ...) is the strap
+  /// signaling "not classified", not a fourth activity. Kept as the raw byte
+  /// for diagnostics; use [activityClassKnown] for the honest, gated value
+  /// (never fabricate a class out of an invalid code).
+  ///
+  /// **Code 0 means unknown/unclassified, NOT "still".** It is the code the
+  /// band emits before it has committed to a class, so a run of 0s is an
+  /// absence of classification, not a stretch of stillness — do not count it
+  /// as sedentary time. (0 is still a *valid* code, hence
+  /// [activityClassKnown] admitting it: "the band says it doesn't know" is
+  /// information; 0xFF is a malformed field.)
   final int activityClass;
 
   /// [activityClass] gated to the 3 known-valid codes, null otherwise — the
@@ -229,12 +290,13 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   final int statusWord1;
   final int statusWord2;
 
-  /// Raw @ inner[73] (frame-abs 81). Packed:
+  /// Raw @ inner[73] (frame-abs 81). FOUR packed 2-bit fields:
   ///   bits 0-1: on-wrist
   ///   bits 2-3: wake_quality
   ///   bits 4-5: sleep_state — 0 wake / 1 still / 2 sleep / 3 up. Prefer
   ///     [sleepState] over reading the nibble yourself. whoop-rs's
   ///     "0 still / 1 wake" is the wrong way round.
+  ///   bits 6-7: a fourth 2-bit field, real but unnamed — see [bits67Raw].
   final int sleepStateByte;
 
   /// @ inner[74] (frame-abs 82). Opaque, sleep-gated. Do NOT surface it as a
@@ -249,28 +311,48 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// like a flag rather than part of the number.
   final int spo2CandidateRaw;
 
-  /// @ inner[98] (frame-abs 106). Proven NOT the high half of a u16 with
-  /// [opticalBaselineB] (high byte steps without low-byte carry across
-  /// 18,599 corpus pairs) — kept as an independent byte, never fused.
-  final int opticalBaselineA;
+  /// @ inner[98:100] (frame-abs 106) — ONE **big-endian** u16, not two bytes.
+  /// A zero low byte means off-wrist.
+  final int opticalBaseline;
 
-  /// @ inner[99] (frame-abs 107). 0 = off-wrist.
-  final int opticalBaselineB;
+  /// @ inner[100:102] (frame-abs 108) — ONE **big-endian** u16. The value
+  /// 0x8080 is a signal-quality sentinel rather than a real amplitude — see
+  /// [isOpticalAmpSentinel]. (Read as two bytes it looks like "128 on both
+  /// halves at once", which is what it was previously mistaken for.)
+  final int opticalAmp;
 
-  /// @ inner[100] (frame-abs 108). 128 on BOTH [opticalAmpA] and
-  /// [opticalAmpB] simultaneously is a signal-quality sentinel (never one
-  /// alone in the 757/757 reference corpus) — see [isOpticalAmpSentinel].
-  final int opticalAmpA;
-  final int opticalAmpB;
+  /// High byte of [opticalBaseline].
+  @Deprecated('inner[98:100] is one big-endian u16 — use opticalBaseline')
+  int get opticalBaselineA => opticalBaseline >> 8;
 
-  /// @ inner[105:109] f32 LE (frame-abs 113). Range ~-5.3..0 on the reference
-  /// corpus; purpose unknown. Exposed raw, don't consume.
-  final double unknownF32;
+  /// Low byte of [opticalBaseline].
+  @Deprecated('inner[98:100] is one big-endian u16 — use opticalBaseline')
+  int get opticalBaselineB => opticalBaseline & 0xFF;
+
+  /// High byte of [opticalAmp].
+  @Deprecated('inner[100:102] is one big-endian u16 — use opticalAmp')
+  int get opticalAmpA => opticalAmp >> 8;
+
+  /// Low byte of [opticalAmp].
+  @Deprecated('inner[100:102] is one big-endian u16 — use opticalAmp')
+  int get opticalAmpB => opticalAmp & 0xFF;
+
+  /// @ inner[105:109] f32 LE (frame-abs 113). A per-second signal-quality
+  /// metric the band's own optical processing computes: the log-variance of
+  /// the signal it measured this second. Range ~-5.3..0 on the reference
+  /// corpus — lower is a quieter, cleaner signal.
+  ///
+  /// Usable as a quality weight (e.g. to down-weight a second's HR/RR), which
+  /// is what it is for. The absolute scale is the band's, not a physical unit,
+  /// so compare it against other seconds, not against a threshold you invent.
+  final double signalQualityLogVariance;
 
   const Gen5HistorySample({
     required super.histVersion,
+    required super.flags,
     required super.recordIndex,
     required super.unix,
+    required super.tsSubsec,
     required this.heartRate,
     required this.rrCount,
     required this.rrIntervalsMs,
@@ -292,11 +374,9 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
     required this.statusWord2,
     required this.sleepStateByte,
     required this.spo2CandidateRaw,
-    required this.opticalBaselineA,
-    required this.opticalBaselineB,
-    required this.opticalAmpA,
-    required this.opticalAmpB,
-    required this.unknownF32,
+    required this.opticalBaseline,
+    required this.opticalAmp,
+    required this.signalQualityLogVariance,
   });
 
   /// bit7 of [hrQualityFlags] — whether [heartRateAlt] is corroborated this
@@ -323,10 +403,9 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
       ? spo2CandidateRaw
       : null;
 
-  /// True when both optical-amp bytes read the 128 sentinel simultaneously —
-  /// per the reference corpus this means "signal quality flag", not a real
-  /// amplitude reading of 128 on each channel.
-  bool get isOpticalAmpSentinel => opticalAmpA == 128 && opticalAmpB == 128;
+  /// True when [opticalAmp] reads the 0x8080 sentinel — a signal-quality flag,
+  /// not a real amplitude.
+  bool get isOpticalAmpSentinel => opticalAmp == 0x8080;
 
   /// bits 0-1 of [sleepStateByte].
   int get onWristRaw => sleepStateByte & 0x03;
@@ -337,18 +416,28 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// bits 4-5 of [sleepStateByte], raw. Prefer [sleepState].
   int get sleepStateRawNibble => (sleepStateByte >> 4) & 0x03;
 
+  /// bits 6-7 of [sleepStateByte] — a real fourth 2-bit field in this byte,
+  /// alongside on-wrist / wake-quality / sleep-state. Exposed raw; no name is
+  /// claimed for it because none is established.
+  int get bits67Raw => (sleepStateByte >> 6) & 0x03;
+
   /// The band's own coarse wake/sleep state. Total over the 2-bit nibble, so
   /// never null. **A wake/sleep envelope, not a sleep stage** — see
   /// [Gen5SleepState] for the evidence and the limits.
   Gen5SleepState get sleepState => Gen5SleepState.values[sleepStateRawNibble];
 }
 
-/// Minimum inner length to read every v18 field this decoder touches (the
-/// last is [Gen5HistorySample.unknownF32], a f32 ending at inner byte 109).
-/// Real captures are padded to a 4-byte boundary (109 → 112), so this is a
-/// floor, not an exact match — unlike v20/v21 below, which DO have a fixed
-/// exact size.
-const int kGen5V18MinInnerLen = 109;
+/// The EXACT inner length of a v18 record: 112 bytes. Every field this decoder
+/// reads fits inside it (the last is
+/// [Gen5HistorySample.signalQualityLogVariance], a f32 ending at inner byte
+/// 109; the record is padded to a 4-byte boundary). Used as an exact gate, like
+/// v20/v21 — a v18 record of any other length is not a v18 record, and
+/// accepting one as a floor let short/garbage frames decode into fabricated
+/// fields.
+const int kGen5V18InnerLen = 112;
+
+@Deprecated('v18 inner is exactly 112 bytes, not a floor — use kGen5V18InnerLen')
+const int kGen5V18MinInnerLen = kGen5V18InnerLen;
 
 class Gen5V18Decoder implements Gen5RecordDecoder {
   const Gen5V18Decoder();
@@ -358,7 +447,7 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
 
   @override
   bool matches(Uint8List inner) =>
-      inner.length >= kGen5V18MinInnerLen && inner[1] == 18;
+      inner.length == kGen5V18InnerLen && inner[1] == 18;
 
   @override
   Gen5HistorySample? decode(Uint8List inner) {
@@ -396,12 +485,12 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
     final magSq = gx * gx + gy * gy + gz * gz;
     if (magSq < 0.25 || magSq > 3.24) return null; // 0.5g..1.8g
 
-    final unknownF32 = _round(v.getFloat32(105, Endian.little), 4);
-
     return Gen5HistorySample(
       histVersion: hdr.version,
+      flags: hdr.flags,
       recordIndex: hdr.recordIndex,
       unix: hdr.unix,
+      tsSubsec: v.getUint16(11, Endian.little),
       heartRate: hr,
       rrCount: rr.length,
       rrIntervalsMs: rr,
@@ -423,25 +512,27 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       statusWord2: v.getUint16(71, Endian.little),
       sleepStateByte: inner[73],
       spo2CandidateRaw: inner[74],
-      opticalBaselineA: inner[98],
-      opticalBaselineB: inner[99],
-      opticalAmpA: inner[100],
-      opticalAmpB: inner[101],
-      unknownF32: unknownF32,
+      opticalBaseline: v.getUint16(98, Endian.big),
+      opticalAmp: v.getUint16(100, Endian.big),
+      signalQualityLogVariance: _round(v.getFloat32(105, Endian.little), 4),
     );
   }
 }
 
 // ── v20 — 6-channel raw optical deep buffer (R22 opt-in only). ─────────────
 
-/// One of the 5 fixed 422-byte blocks in a v20 buffer. Per the reference
-/// corpus (29,203 records, both sources), only blocks 0/3/4 are ever
-/// active (`sampleCount ∈ {0, 25}`); blocks 1/2 are always empty. Channel
-/// role assignment ("red"/"ir"/"green") is EXPLICITLY UNPROVEN by both
-/// reference sources — exposed as raw `channel0`/`channel1` samples only,
-/// per noop's own naming discipline (they retired 'ppg_channel'-style names).
+/// One of the 5 fixed 422-byte blocks in a v20 buffer — one AFE channel, its
+/// LED drive configuration, and its two photodiode sample slots. See
+/// [Gen5OpticalBuffer] for which channel each block index is.
+///
+/// Per the reference corpus (29,203 records, both sources), only blocks 0/3/4
+/// carry samples (`activeSampleCount ∈ {0, 25}`); blocks 1/2 read empty.
+///
+/// [channel0]/[channel1] are the block's two PHOTODIODES — not two
+/// wavelengths. Both slots see the same LED drive; they differ in where on the
+/// wrist they sit. The neutral names are kept deliberately.
 class Gen5OpticalBlock {
-  /// @ block byte 0. Shared by both channel slots. 0 or 25 in the reference
+  /// @ block byte 0. Shared by both photodiode slots. 0 or 25 in the reference
   /// corpus; capped to the 50-slot capacity of a 200-byte/4-byte-sample slot.
   final int activeSampleCount;
 
@@ -450,14 +541,17 @@ class Gen5OpticalBlock {
   final List<int> channel0;
   final List<int> channel1;
 
-  /// bytes[1:7] of the block — shared block metadata incl. a speculative
-  /// LED-current field. Not decoded further; kept for re-derivation.
+  /// bytes[1:7] of the block — the LED drive configuration, decomposed by
+  /// [ledADriverConnection] / [ledACurrentRaw] / [ledBDriverConnection] /
+  /// [ledBCurrentRaw]. Kept raw as well, for re-derivation.
   final Uint8List sharedMetaRaw;
 
-  /// bytes[7:14] — channel-0's metadata incl. a speculative offset-DAC field.
+  /// bytes[7:14] — photodiode 0's front-end configuration:
+  /// {source byte, u32 ADC range, u16 ADC offset}. See [channel0Source],
+  /// [channel0AdcRange], [channel0AdcOffset].
   final Uint8List channel0MetaRaw;
 
-  /// bytes[14:21] — channel-1's metadata.
+  /// bytes[14:21] — photodiode 1's, same three fields.
   final Uint8List channel1MetaRaw;
 
   const Gen5OpticalBlock({
@@ -468,36 +562,85 @@ class Gen5OpticalBlock {
     required this.channel0MetaRaw,
     required this.channel1MetaRaw,
   });
+
+  /// Which driver output LED A is wired to for this block. @ sharedMeta[0].
+  int get ledADriverConnection => sharedMetaRaw[0];
+
+  /// LED A drive current in units of 10 µA. @ sharedMeta[1:3] u16.
+  /// [ledACurrentMicroamps] is the same number in µA.
+  int get ledACurrentRaw => _u16(sharedMetaRaw, 1);
+  int get ledACurrentMicroamps => ledACurrentRaw * 10;
+
+  /// Which driver output LED B is wired to. @ sharedMeta[3].
+  int get ledBDriverConnection => sharedMetaRaw[3];
+
+  /// LED B drive current in units of 10 µA. @ sharedMeta[4:6] u16.
+  int get ledBCurrentRaw => _u16(sharedMetaRaw, 4);
+  int get ledBCurrentMicroamps => ledBCurrentRaw * 10;
+
+  /// Photodiode 0's input source selector. @ channel0Meta[0].
+  int get channel0Source => channel0MetaRaw[0];
+
+  /// Photodiode 0's ADC full-scale range. @ channel0Meta[1:5] u32.
+  int get channel0AdcRange => _u32(channel0MetaRaw, 1);
+
+  /// Photodiode 0's ADC offset. @ channel0Meta[5:7] u16.
+  int get channel0AdcOffset => _u16(channel0MetaRaw, 5);
+
+  /// Photodiode 1's, same three fields at the same offsets.
+  int get channel1Source => channel1MetaRaw[0];
+  int get channel1AdcRange => _u32(channel1MetaRaw, 1);
+  int get channel1AdcOffset => _u16(channel1MetaRaw, 5);
 }
 
-/// ⚠️ EXPERIMENTAL / UNVERIFIED LAYOUT — unlike v18/v21/v26, this record's
-/// field layout is a genuine, UNRESOLVED disagreement between the two
-/// reference implementations, and NEITHER has a real (non-synthetic)
-/// hardware capture of a v20 record to break the tie:
-///   - whoop-rs's model: 6 independent fixed-offset channels of 25 samples
-///     each, at distinct inner offsets, gated on a green-LED-echo anchor.
-///   - This decoder's model (below): 5 blocks of 422 bytes, each holding 2
-///     channels of up to 50 samples, gated on a per-block sample-count byte.
-/// Cross-validating this decoder against whoop-rs's own synthetic test
-/// fixture produces a syntactically-valid-looking but semantically wrong
-/// result — silently, with no error. DO NOT treat [Gen5OpticalBuffer]'s
-/// fields as trustworthy until a real captured v20 frame resolves which
-/// model (if either) is correct. Callers should treat this as low-confidence
-/// / diagnostic-only data, never feed it into a metric pipeline as ground
-/// truth.
-class Gen5OpticalBuffer extends Gen5HistoricalRecord {
-  final int layoutMarker;
+int _u16(Uint8List b, int i) => b[i] | (b[i + 1] << 8);
+int _u32(Uint8List b, int i) =>
+    b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
 
-  /// Always 5 entries (blocks 0-4), even the always-empty 1/2 slots — index
-  /// == block number, matching the reference corpus's `sampleCount` array
-  /// convention (`[25, 0, 0, 25, 25]`).
+/// The raw optical deep buffer. Layout is confirmed: the body starts at inner
+/// 18, then 5 blocks of 422 bytes each; every block holds 50 sample-pair slots,
+/// photodiode slot A at `block + 21` and slot B at `block + 221`, and the
+/// samples are sign-extended 20-bit values (see [_signExtend20]). Total inner
+/// length is therefore exactly 2128 ([kGen5V20InnerLen]).
+///
+/// The 5 blocks are the AFE's channels, in index order:
+///
+/// | block | channel |
+/// |-------|---------|
+/// | 0 | green — the primary HR channel |
+/// | 1 | red |
+/// | 2 | a fourth channel |
+/// | 3 | IR |
+/// | 4 | ambient (no LED — the dark/background reference) |
+///
+/// Block 3 falls back to another channel's source when the primary IR emitter
+/// is disabled; bit 0 of [flags] is what signals that fallback, so check it
+/// before assuming block 3 is IR.
+///
+/// **Amplitudes are not comparable across records without the block
+/// metadata.** Each block carries its own LED drive current and per-photodiode
+/// ADC range/offset ([Gen5OpticalBlock.ledACurrentMicroamps],
+/// [Gen5OpticalBlock.channel0AdcRange], ...), and the band re-tunes them
+/// continuously. Two records whose raw counts differ may be the same optical
+/// signal at a different gain; normalise by current and range before comparing
+/// or trending.
+class Gen5OpticalBuffer extends Gen5HistoricalRecord {
+  /// Sample rate of this buffer in Hz, u16 LE @ inner[15:17] — v20 states its
+  /// own rate rather than leaving it to be inferred from the sample count.
+  final int sampleRateHz;
+
+  /// Always 5 entries (blocks 0-4), even the empty 1/2 slots — index == block
+  /// number == channel per the table above, matching the reference corpus's
+  /// `sampleCount` array convention (`[25, 0, 0, 25, 25]`).
   final List<Gen5OpticalBlock> blocks;
 
   const Gen5OpticalBuffer({
     required super.histVersion,
+    required super.flags,
     required super.recordIndex,
     required super.unix,
-    required this.layoutMarker,
+    required super.tsSubsec,
+    required this.sampleRateHz,
     required this.blocks,
   });
 }
@@ -573,11 +716,14 @@ class Gen5V20Decoder implements Gen5RecordDecoder {
       blocks.add(_decodeOpticalBlock(inner, start));
     }
 
+    final v = _view(inner);
     return Gen5OpticalBuffer(
       histVersion: hdr.version,
+      flags: hdr.flags,
       recordIndex: hdr.recordIndex,
       unix: hdr.unix,
-      layoutMarker: hdr.layoutMarker,
+      tsSubsec: v.getUint16(11, Endian.little),
+      sampleRateHz: v.getUint16(15, Endian.little),
       blocks: blocks,
     );
   }
@@ -587,12 +733,9 @@ class Gen5V20Decoder implements Gen5RecordDecoder {
 
 /// Decoded gen5 v21 IMU buffer. High-confidence layout — exact 3-way
 /// agreement between whoop-rs, noop, and this file's own byte-level
-/// verification (§1.5). The 100Hz sample rate is INFERRED from the sample
-/// count only, never independently measured by either reference source —
-/// treat the rate itself, not the samples, as unconfirmed.
+/// verification (§1.5). The 100 Hz sample rate is confirmed: the band
+/// configures both blocks at 100 Hz, so a full block is one second of motion.
 class Gen5ImuBuffer extends Gen5HistoricalRecord {
-  final int layoutMarker;
-
   /// Samples actually present in each block: [countA] for the accel axes,
   /// [countB] for the gyro axes. 1..100 — a block declares how much of its
   /// fixed 100-sample capacity it filled, and a partly-filled buffer is still
@@ -614,9 +757,10 @@ class Gen5ImuBuffer extends Gen5HistoricalRecord {
 
   const Gen5ImuBuffer({
     required super.histVersion,
+    required super.flags,
     required super.recordIndex,
     required super.unix,
-    required this.layoutMarker,
+    required super.tsSubsec,
     required this.countA,
     required this.countB,
     required this.accelXg,
@@ -696,9 +840,10 @@ Gen5ImuBuffer? parseGen5ImuBuffer(Uint8List inner) {
 
   return Gen5ImuBuffer(
     histVersion: hdr.version,
+    flags: hdr.flags,
     recordIndex: hdr.recordIndex,
     unix: hdr.unix,
-    layoutMarker: hdr.layoutMarker,
+    tsSubsec: v.getUint16(11, Endian.little),
     countA: countA,
     countB: countB,
     accelXg: axis(_kV21AxStart, kGen5AccelScaleG, countA),
@@ -723,26 +868,29 @@ class Gen5V21Decoder implements Gen5RecordDecoder {
   Gen5ImuBuffer? decode(Uint8List inner) => parseGen5ImuBuffer(inner);
 }
 
-// ── v26 — 24Hz single-wavelength PPG waveform. ─────────────────────────────
+// ── v26 — single-wavelength PPG waveform, 24 SAMPLES per record. ───────────
+//
+// 24 is a sample COUNT, not a rate: nothing here runs at "24 Hz". The samples
+// were taken at the optical front end's configured rate, which the record
+// states itself via bit 7 of its flags byte — see
+// [Gen5HistoricalRecord.ppgSampleRateHz] (25 or 50 Hz).
 
 class Gen5PpgWaveform extends Gen5HistoricalRecord {
-  final int layoutMarker;
-
-  /// Low byte of [segmentId] @ inner[11] (frame-abs 19).
+  /// Low byte of the record's sub-second @ inner[11] (frame-abs 19).
   ///
-  /// This offset is a u16, not a byte: inner[12] is nonzero on 99% of real
-  /// records, so reading one byte here discards most of the value. Prefer
-  /// [segmentId].
-  @Deprecated('frame-abs 19 is a u16 — use segmentId')
+  /// This offset is the shared u16 sub-second, not a byte: reading one byte
+  /// here discards its high half (nonzero on 99% of real records).
+  @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
   final int rawByte19;
 
-  /// u16 LE @ inner[11:13] (frame-abs 19), constant across the records of one
-  /// burst.
+  /// u16 LE @ inner[11:13] (frame-abs 19) — the SAME field as [tsSubsec], the
+  /// record's Q15 sub-second, kept under its historical name.
   ///
-  /// The value is an integer `k` in 0..99 packed as a Q15 fraction:
-  /// `segmentId == (k * 32768) ~/ 100` holds for every record observed. Use
-  /// [segmentIndex] for `k`. What `k` counts is not established, so it is
-  /// exposed without a claim.
+  /// It reads constant across the records of one burst because a burst shares
+  /// one timestamp. The value is an integer `k` in 0..99 packed as a Q15
+  /// fraction (`segmentId == (k * 32768) ~/ 100` for every record observed):
+  /// `k` is the sub-second in hundredths, i.e. [subSecond] × 100. See
+  /// [segmentIndex].
   final int segmentId;
 
   /// Per-burst counter (NOT a channel/LED id — ranges past 26 in the
@@ -773,8 +921,8 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   int? get subChannelKnown =>
       (subChannel >= 0 && subChannel <= 7) ? subChannel : null;
 
-  /// `k` in 0..99 recovered from [segmentId]'s Q15 packing, or null if this
-  /// record's value doesn't fit the packing.
+  /// `k` in 0..99 recovered from [segmentId]'s Q15 packing — the sub-second in
+  /// hundredths — or null if this record's value doesn't fit the packing.
   int? get segmentIndex {
     final k = ((segmentId * 100) / 32768).round();
     return (k >= 0 && k <= 99 && (k * 32768) ~/ 100 == segmentId) ? k : null;
@@ -783,35 +931,31 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// f32 LE @ inner[67:71] (frame-abs 75). Tracks with [flagA]/[flagB] as a
   /// per-record signal-quality indicator where LOW means a clean record, but
   /// the scale is unpinned. Exposed raw.
-  ///
-  /// Null when the record is too short to carry the trailing metadata block
-  /// (see [kGen5V26MinInnerLenWithMeta]) — never a stand-in value.
-  final double? signalMetric;
+  final double signalMetric;
 
   /// Front-end gain configuration @ inner[71] / inner[72] (frame-abs 79/80).
   /// Each [subChannel] runs a characteristic gain, adjusted within a range.
-  /// Null on a record too short to carry it.
-  final int? gainSetting;
-  final int? gainIndex;
+  final int gainSetting;
+  final int gainIndex;
 
   /// Raw flag bytes @ inner[73] / inner[74] (frame-abs 81/82). Roughly
   /// complementary, and [signalMetric] is about an order of magnitude lower
   /// when [flagB] is set. Meaning otherwise unestablished — exposed raw.
-  /// Null on a record too short to carry them.
-  final int? flagA;
-  final int? flagB;
+  final int flagA;
+  final int flagB;
 
-  /// Raw AC-coupled ADC samples, no physical unit. Always 24 in practice.
-  /// Every channel is DC-removed on the band: the per-record sample mean is
-  /// ~0 for all values of [subChannel].
+  /// Raw AC-coupled ADC samples, no physical unit. Always 24 of them — the
+  /// record's fixed size. Every channel is DC-removed on the band: the
+  /// per-record sample mean is ~0 for all values of [subChannel].
   final List<int> ppgWaveform;
 
   const Gen5PpgWaveform({
     required super.histVersion,
+    required super.flags,
     required super.recordIndex,
     required super.unix,
-    required this.layoutMarker,
-    @Deprecated('frame-abs 19 is a u16 — use segmentId')
+    required super.tsSubsec,
+    @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
     required this.rawByte19,
     required this.segmentId,
     required this.burstIndex,
@@ -829,19 +973,18 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
 const int _kV26SampleCount = 24;
 const int _kV26SamplesStart = 19; // frame-abs 27
 
-/// Minimum inner length to read a full 24-sample waveform. v26's declared
-/// length varies with the sample count in principle, but is always 24 in
-/// practice — this is a floor, not the exact match v20/v21 use.
-const int kGen5V26MinInnerLen = _kV26SamplesStart + 2 * _kV26SampleCount; // 67
+/// The EXACT inner length of a v26 record: 76 bytes — 24 samples at
+/// inner[19:67] plus the trailing metadata block ending at inner[74], padded
+/// to a 4-byte boundary. An exact gate, like v20/v21: a truncated record's
+/// trailing metadata would otherwise decode out of whatever bytes happened to
+/// follow.
+const int kGen5V26InnerLen = 76;
 
-/// Minimum inner length to also read the metadata block that follows the
-/// waveform (signal metric, gain, flags — the last is inner[74]).
-///
-/// Kept separate from [kGen5V26MinInnerLen] on purpose: a record shorter than
-/// this still decodes its waveform, and the trailing fields come back null
-/// rather than the record being rejected. Every real record observed carries
-/// an inner length of 76.
-const int kGen5V26MinInnerLenWithMeta = 75;
+@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
+const int kGen5V26MinInnerLen = kGen5V26InnerLen;
+
+@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
+const int kGen5V26MinInnerLenWithMeta = kGen5V26InnerLen;
 
 class Gen5V26Decoder implements Gen5RecordDecoder {
   const Gen5V26Decoder();
@@ -851,7 +994,7 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
 
   @override
   bool matches(Uint8List inner) =>
-      inner.length >= kGen5V26MinInnerLen && inner[1] == 26;
+      inner.length == kGen5V26InnerLen && inner[1] == 26;
 
   @override
   Gen5PpgWaveform? decode(Uint8List inner) {
@@ -864,7 +1007,6 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
     for (int i = 0; i < _kV26SampleCount; i++) {
       samples.add(v.getInt16(_kV26SamplesStart + 2 * i, Endian.little));
     }
-    final hasMeta = inner.length >= kGen5V26MinInnerLenWithMeta;
 
     return Gen5PpgWaveform(
       histVersion: hdr.version,
@@ -876,21 +1018,19 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
       // it non-monotonic.
       recordIndex: hdr.recordIndex,
       unix: hdr.unix,
-      layoutMarker: hdr.layoutMarker,
+      tsSubsec: v.getUint16(11, Endian.little),
+      flags: hdr.flags,
       // ignore: deprecated_member_use_from_same_package
       rawByte19: inner[11],
       segmentId: v.getUint16(11, Endian.little),
       burstIndex: inner[13],
       frontEndMetaRaw: v.getUint16(15, Endian.little),
       subChannel: inner[17],
-      // The metadata block sits AFTER the waveform, so a short record can
-      // legitimately lack it. Null out rather than reject the record or
-      // invent a value.
-      signalMetric: hasMeta ? v.getFloat32(67, Endian.little) : null,
-      gainSetting: hasMeta ? inner[71] : null,
-      gainIndex: hasMeta ? inner[72] : null,
-      flagA: hasMeta ? inner[73] : null,
-      flagB: hasMeta ? inner[74] : null,
+      signalMetric: v.getFloat32(67, Endian.little),
+      gainSetting: inner[71],
+      gainIndex: inner[72],
+      flagA: inner[73],
+      flagB: inner[74],
       ppgWaveform: samples,
     );
   }

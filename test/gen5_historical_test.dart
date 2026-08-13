@@ -91,7 +91,7 @@ void main() {
     test('steps + activity', () {
       expect(sample.stepMotionCounter, 50);
       expect(sample.stepCadence, 170);
-      expect(sample.activityClass, 0); // still
+      expect(sample.activityClass, 0); // unknown/unclassified, NOT "still"
     });
 
     test('temperature (gen5-specific scales)', () {
@@ -101,11 +101,10 @@ void main() {
     });
 
     test('optical front-end', () {
-      expect(sample.opticalBaselineA, 101);
-      expect(sample.opticalBaselineB, 111);
-      expect(sample.opticalAmpA, 30);
-      expect(sample.opticalAmpB, 30);
-      expect(sample.isOpticalAmpSentinel, isFalse); // not the 128/128 sentinel
+      // Two BIG-ENDIAN u16s, not four bytes: inner[98:100] and inner[100:102].
+      expect(sample.opticalBaseline, 0x656F);
+      expect(sample.opticalAmp, 0x1E1E);
+      expect(sample.isOpticalAmpSentinel, isFalse); // not the 0x8080 sentinel
     });
 
     test('experimental fields exposed raw, not fabricated', () {
@@ -313,22 +312,17 @@ void main() {
       }
     });
 
-    test('a record too short for the trailing block still decodes its waveform',
-        () {
+    test('a record short of the exact 76-byte length is rejected outright', () {
+      // v26's inner is exactly 76 bytes. A truncated one used to decode its
+      // waveform with the trailing metadata nulled out; it is now rejected,
+      // because a record that is not 76 bytes is not a v26 record and its
+      // "waveform" is whatever bytes happened to arrive.
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
-      final short = Uint8List.fromList(
-        parsed.inner.sublist(0, kGen5V26MinInnerLen),
-      );
-      final wf = parseGen5Historical(short) as Gen5PpgWaveform;
-      expect(wf.ppgWaveform.length, 24);
-      expect(wf.subChannel, 5); // sits before the samples, still readable
-      expect(wf.segmentId, 18350);
-      // The block after the waveform is absent — null, never a stand-in.
-      expect(wf.signalMetric, isNull);
-      expect(wf.gainSetting, isNull);
-      expect(wf.gainIndex, isNull);
-      expect(wf.flagA, isNull);
-      expect(wf.flagB, isNull);
+      expect(parsed.inner.length, 76);
+      for (final len in [67, 75, 74]) {
+        final short = Uint8List.fromList(parsed.inner.sublist(0, len));
+        expect(parseGen5Historical(short), isNull, reason: 'len=$len');
+      }
     });
   });
 

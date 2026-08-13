@@ -36,9 +36,17 @@ class Cmd {
   static const int linkValid = 0x01;
   // Report the highest wire-protocol revision the strap understands. Response
   // carries the max protocol version — used for feature gating.
+  // GEN4-ONLY: not implemented on gen5, which silently no-ops it (no response).
   static const int getMaxProtocolVersion = 0x02;
   static const int toggleRealtimeHr = 0x03;
+  // GEN4-ONLY: not implemented on gen5, which silently no-ops it.
   static const int reportVersionInfo = 0x07;
+  // Generic HR service profile on/off. The setting is written to NV, so it
+  // survives a reboot until explicitly changed back.
+  static const int setGenericHrProfile = 0x0E;
+  // Erase the bond / pairing keys. DANGER — the link drops and the user must
+  // re-pair from scratch; there is no undo.
+  static const int forgetBonds = 0x0F; // DANGER
   static const int setClock =
       0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
   static const int getClock = 0x0B; // → strap RTC epoch (ClockRef correlation)
@@ -70,7 +78,23 @@ class Cmd {
   static const int startUpdateLoad = 0x24; // DANGER (gen4-empirical)
   static const int loadUpdateData = 0x25; // DANGER (gen4-empirical)
   static const int processUpdateImage = 0x26; // DANGER (gen4-empirical)
+  // Toggle whether the strap pushes EVENT packets over the link. Body is the
+  // bare state byte — this opcode takes NO revision byte. Safe.
+  static const int sendEventPackets = 0x30;
+  // Optical front-end (AFE) parameter set/get. SET retunes the sensor
+  // front-end, so it can degrade the strap's own HR quality — treat as
+  // advanced/diagnostic. GET is read-only and safe.
+  static const int setAfeParams = 0x3D;
+  static const int getAfeParams = 0x3E;
+  // GEN4-ONLY: gen5 does not implement 0x3F at all. gen5's realtime-raw entry
+  // point is START_RAW_DATA (0x51) / STOP_RAW_DATA (0x52) instead.
   static const int sendR10R11Realtime = 0x3F;
+  // gen5 realtime raw start/stop — THE gen5 realtime-raw entry point. Revision
+  // 1 of START defaults the collection duration to 86,400,000 (a full day), so
+  // always send revision 2 with an explicit bounded duration. Safe, but a raw
+  // flood is a battery cost: always pair a start with a stop.
+  static const int startRawData = 0x51;
+  static const int stopRawData = 0x52;
   // On-device haptic alarm. SET carries a wall-clock epoch + a haptic waveform
   // pattern (see cmdSetAlarm in commands.dart for the exact, hardware-verified
   // layout). The short "epoch only" form ACKs but never buzzes.
@@ -78,22 +102,68 @@ class Cmd {
   static const int getAlarmTime = 0x43;
   static const int runAlarm = 0x44; // fire/test the alarm haptics immediately
   static const int disableAlarm = 0x45;
+  // GEN4-ONLY (both): not implemented on gen5. The gen5 equivalents are
+  // SET/GET_CUSTOM_ADVERTISING_NAME (0x8C / 0x8D).
   static const int getAdvertisingNameHarvard = 0x4C;
   static const int setAdvertisingNameHarvard =
       0x4D; // [0x01][len u8][ascii name][u32 0]
   static const int getBodyLocationAndStatus = 0x54;
   static const int enterHighFreqSync = 0x60;
   static const int exitHighFreqSync = 0x61; // defensive stuck-strap recovery
+  // GEN4-ONLY: not implemented on gen5 (which reports pack state via
+  // GET_BATTERY_PACK_INFO, 0x97).
   static const int getExtendedBatteryInfo = 0x62;
+  // Turn the BLE UART (console/log) service off. Safe, but it is how console
+  // logs stop arriving — do not send it while debugging.
+  static const int disableBleUart = 0x67;
+  // Persist the IMU data setting. Safe-ish, but it is a stored setting, not a
+  // session toggle: it survives a reboot (contrast TOGGLE_IMU_MODE, 0x6A).
+  static const int saveImuData = 0x69;
   static const int toggleImuMode = 0x6A;
   static const int enableOpticalData = 0x6B;
   static const int toggleOpticalMode = 0x6C;
+  // Config + feature-flag key exchange: the enumerate/fetch pair for each
+  // namespace, then the by-name value reads. All read-only and safe.
+  static const int getConfigKeyCount = 0x73;
+  static const int getConfigKeyName = 0x74;
+  static const int getFlagKeyCount = 0x75;
+  static const int getFlagKeyName = 0x76;
+  static const int getConfigValue = 0x79;
+  static const int getFlagValue = 0x80;
+  // GEN4-ONLY: not implemented on gen5, which buzzes via
+  // RUN_HAPTIC_PATTERN_MAVERICK (0x13) instead.
   static const int runHapticsPattern = 0x4F;
-  static const int stopHaptics = 0x7A;
+  static const int stopHaptics = 0x7A; // safe: cancels an in-progress buzz
+  // Wrist selection — also the wrist selector for an ECG reading. Safe.
   static const int selectWrist = 0x7B;
+  // ECG. Main control arms/disarms a reading; the save/send pairs cover the
+  // raw and the filtered trace. Safe, but a reading is a battery cost.
+  static const int ecgMainControl = 0x7C;
+  static const int ecgSaveRawData = 0x7D;
+  static const int ecgSendRawData = 0x7E;
+  static const int ecgSaveFilteredData = 0x7F;
+  static const int ecgSendFilteredData = 0x8B;
+  // Signal-processing configuration. Advanced/diagnostic: it retunes the
+  // on-strap algorithms, so it can change what the strap itself reports.
+  static const int setSigprocConfig = 0x8A;
+  // gen5 custom advertising name set/get — the gen5 equivalents of gen4's
+  // 0x4C/0x4D, which gen5 does not implement. Safe.
+  static const int setCustomAdvertisingName = 0x8C;
+  static const int getCustomAdvertisingName = 0x8D;
   static const int getHello = 0x91;
+  // Override the strap's on/off-body decision. Advanced: while overridden the
+  // strap's own wear detection no longer reflects reality.
+  static const int wearDetectOverride = 0x94;
+  static const int setLedAccessibility = 0x95; // LED accessibility mode. Safe.
+  // Gyroscope enable / status. Safe, but the gyro is a real power draw.
+  static const int gyroEnable = 0x96;
+  static const int gyroStatus = 0x98;
   static const int getBatteryPackInfo = 0x97;
-  static const int togglePersistentR21 = 0x9A; // DANGER
+  static const int togglePersistentR21 = 0x9A; // DANGER — persistent IMU save
+  // Persistent OPTICAL save — the twin of 0x9A (persistent IMU save). DANGER:
+  // this is the one that leaves the optical LEDs running across reconnects and
+  // reboots, i.e. the stuck-LED / battery-drain footgun.
+  static const int persistentOpticalSave = 0x99; // DANGER
 
   // ── gen5-exclusive opcode VALUES (replace the gen4 opcode of the same
   // purpose; see BandProfile — everything else in this class is shared
@@ -173,7 +243,15 @@ class OpcodeSafety {
 /// only sub-classifies and is likewise not self-enforcing).
 const Set<int> dangerousCmds = {
   Cmd.forceTrim,
+  // Same 8-byte `[u32 read_page LE][u32 wrap_count LE]` shape as FORCE_TRIM:
+  // it moves the strap's flash READ pointer, so a wrong value skips past
+  // unsynced records (they are never served again) or replays old ones.
+  Cmd.setReadPointer,
   Cmd.togglePersistentR21,
+  // Persistent optical save — the stuck-LED / battery-drain footgun.
+  Cmd.persistentOpticalSave,
+  // Erases the pairing: the link drops and the user must re-pair by hand.
+  Cmd.forgetBonds,
   Cmd.rebootStrap,
   Cmd.powerCycleStrap,
   // gen4-empirical device-update numbering (unverified; inert on gen5).
@@ -190,12 +268,21 @@ const Set<int> dangerousCmds = {
 };
 
 /// Historical-data record type (inner[1] of a 0x2F / data packet).
+///
+/// ⚠ These are the GEN4 record versions. gen5 builds a DIFFERENT set —
+/// 16, 17, 18, 20, 21, 22 and 26 — and never builds 24, so a gen5 link will
+/// not deliver [r24] no matter what is requested. The gen5-specific decoders
+/// live in gen5_records.dart; the ids named here are only the identifiers.
 class Record {
   static const int r10 = 10;
   static const int r12 = 12;
+  static const int r16 = 16; // gen5: raw ECG
+  static const int r17 = 17; // gen5: filtered ECG
   static const int r21 = 21;
-  static const int r24 = 24;
+  static const int r22 = 22; // gen5: research
+  static const int r24 = 24; // gen4 only — never built by gen5
   static const int r25 = 25;
+  static const int r26 = 26; // gen5: PIP
 }
 
 /// Metadata (sync) sub-type — inner[2] of a 0x31 METADATA packet.
@@ -218,10 +305,16 @@ class EventId {
   // The strap's RTC latched a new wall-clock time (emitted after a successful
   // SET_CLOCK). This is our authoritative confirmation the clock stuck.
   static const int setRtc = 16;
-  static const int temperatureLevel = 17;
+
+  /// Skin-temperature level. The event id is 111 — NOT 17, which is a
+  /// different event entirely and never carries a temperature.
+  static const int temperatureLevel = 111;
   static const int batteryPackConnected = 21;
   static const int batteryPackRemoved = 22;
-  static const int bleBonded = 23;
+
+  /// BLE bond established. The event id is 31 — NOT 23; a listener waiting on
+  /// 23 never sees the bond complete.
+  static const int bleBonded = 31;
   // gen5-only: toggling the realtime HR stream on/off is confirmed via these
   // events (gen4 has no equivalent confirmation event for this action).
   static const int bleRealtimeHrOn = 33;
@@ -231,17 +324,28 @@ class EventId {
   static const int trimAllDataEnded = 27;
   static const int flashInitComplete = 28;
   // Optical / accel front-end saturation warnings.
+  //
+  // ⚠ NEVER EMITTED. 40/41/42 are defined ids but nothing on the strap raises
+  // them, so saturation is not observable this way — do not gate anything on
+  // one arriving, and never wait for one.
   static const int ch1Saturation = 40;
   static const int ch2Saturation = 41;
   static const int accelSaturation = 42;
+  // ⚠ NEVER EMITTED. 46/47 are defined ids the strap does not raise: raw-data
+  // collection starting/stopping is NOT reported as an event. Confirm a raw
+  // stream from the data packets themselves, not from these.
   static const int rawDataCollectionOn = 46;
   static const int rawDataCollectionOff = 47;
   // Alarm lifecycle events — how the strap tells us the alarm latched and fired.
   // "strap-driven" = the strap's own scheduled alarm; "app-driven" = one we
   // triggered over BLE. These 56–59 events are the confirmation that our
   // SET_ALARM_TIME write actually took (the older short form never emitted them).
+  // Only 56 and 57 actually arrive.
   static const int strapDrivenAlarmSet = 56;
   static const int strapDrivenAlarmExecuted = 57;
+  // ⚠ NEVER EMITTED (58/59). An app-triggered alarm run and an alarm being
+  // disabled are not reported as events — confirm those from the command
+  // response instead. Nothing may block waiting on either of these.
   static const int appDrivenAlarmExecuted = 58;
   static const int strapDrivenAlarmDisabled = 59;
   static const int hapticsFired = 60;

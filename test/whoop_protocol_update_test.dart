@@ -232,7 +232,7 @@ void main() {
       expect(frame.inner, [
         0x23, 0x0B, Cmd.setAlarmTime, // COMMAND, seq, SET_ALARM_TIME 0x42
         0x04, //                         rich-form marker (fires haptics)
-        0x00, //                         alarm slot index (default 0)
+        0x00, //                         gen4 default slot (the one WHOOP 4 fires)
         0x78, 0x56, 0x34, 0x12, //       epoch seconds u32 LE
         0x00, 0x40, //                   sub-seconds u16 LE
         47, 152, 0, 0, 0, 0, 0, 0, //    8× waveform effects

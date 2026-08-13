@@ -179,16 +179,15 @@ void main() {
       expect(() => cmdSetConfigGen5(1, 'ok', '22'), throwsArgumentError);
     });
 
-    test(
-        'buildR22EnableSequence builds all 16 flags, in order, with sequential seq',
+    test('buildR22EnableSequence builds one frame per flag, sequential seq',
         () {
       final frames = buildR22EnableSequence(startSeq: 1);
-      expect(frames.length, 16);
-      expect(kGen5R22EnableFlags.length, 16);
-      // Spot-check ordering-sensitive entries (issue #423's corrected value).
-      expect(kGen5R22EnableFlags[0], ('enable_r22_packets', '2'));
+      expect(frames.length, kGen5R22EnableFlags.length);
+      // '1' = enable ('2' would force-DISABLE these). See
+      // gen5_command_surface_test.dart for the full value coverage.
+      expect(kGen5R22EnableFlags[0], ('enable_r22_packets', '1'));
       expect(kGen5R22EnableFlags[3], ('enable_r22_v4_packets', '1'));
-      expect(kGen5R22EnableFlags[15], ('enable_sig12', '1'));
+      expect(kGen5R22EnableFlags.last, ('disable_pip_r26_packets', '2'));
       for (int i = 0; i < frames.length; i++) {
         final parsed = parseFrame(frames[i], profile: BandProfile.gen5)!;
         expect(parsed.valid, isTrue);

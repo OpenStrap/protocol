@@ -123,10 +123,16 @@ Uint8List cmdGetDataRange(int seq) =>
     buildCommand(seq, Cmd.getDataRange, const [0x00]);
 Uint8List cmdReportVersionInfo(int seq) =>
     buildCommand(seq, Cmd.reportVersionInfo, const []);
-Uint8List cmdGetBodyLocationAndStatus(int seq) =>
-    buildCommand(seq, Cmd.getBodyLocationAndStatus, const []);
-Uint8List cmdGetBatteryPackInfo(int seq) =>
-    buildCommand(seq, Cmd.getBatteryPackInfo, const []);
+
+// Both of these used to send an EMPTY body. gen5 reads the missing first byte
+// as revision 0 and rejects the command outright, so neither ever returned
+// anything there — the caller just saw silence. The body is the revision byte.
+Uint8List cmdGetBodyLocationAndStatus(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getBodyLocationAndStatus, const [revision1], profile);
+Uint8List cmdGetBatteryPackInfo(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getBatteryPackInfo, const [revision1], profile);
 Uint8List cmdExitHighFreqSync(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.exitHighFreqSync, const [], profile);
@@ -155,21 +161,32 @@ Uint8List cmdEnterHighFreqSync(int seq,
       seq, Cmd.enterHighFreqSync, payload.buffer.asUint8List(), profile);
 }
 
-Uint8List cmdSelectWrist(int seq, WristSelection selection) =>
-    buildCommand(seq, Cmd.selectWrist, [revision1, selection.value]);
+/// Select the wrist the strap is worn on (0x7B). Also the wrist selector for
+/// an ECG reading.
+Uint8List cmdSelectWrist(int seq, WristSelection selection,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.selectWrist, [revision1, selection.value], profile);
 
-// Live streams. Optical is WRIST-GATED (0x6B only) — never force (0x6C) or
-// persist (0x9A); persistent causes the stuck-green-LED footgun ().
+// Live streams. Optical is WRIST-GATED (0x6B only) — never force (0x6C), and
+// never persist. The persistent OPTICAL save is 0x99, and that is the one that
+// causes the stuck-green-LED / battery-drain footgun; 0x9A is the persistent
+// IMU save (a separate command, also blocked).
 Uint8List cmdToggleHr(int seq, bool on) =>
     buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00]);
 
 /// Toggle the realtime raw (R10/R11) stream (SEND_R10_R11_REALTIME = 0x3F).
 ///
-/// NOTE: sending this with payload `[0x00]` (i.e. `cmdSendR10R11(seq, false)`)
-/// is the REAL persistent raw-flood OFF-switch — the off state persists across
-/// reconnects. STOP_RAW_DATA (0x52) does nothing.
+/// GEN4 ONLY. On gen4, sending this with payload `[0x00]` (i.e.
+/// `cmdSendR10R11(seq, false)`) is the REAL persistent raw-flood OFF-switch —
+/// the off state persists across reconnects — and STOP_RAW_DATA (0x52) does
+/// nothing.
+///
+/// ⚠ That is INVERTED on gen5, which does not implement 0x3F at all: this
+/// command is silently ignored there, and 0x51/0x52 ([cmdRawDataStart] /
+/// [cmdRawDataStop]) are the realtime-raw start and stop instead.
 Uint8List cmdSendR10R11(int seq, bool on) =>
     buildCommand(seq, Cmd.sendR10R11Realtime, [on ? 0x01 : 0x00]);
+
 /// Toggle the IMU data stream (IMU_SET_DATA_STREAM = 0x6A).
 ///
 /// The body differs by generation: gen4 takes a bare on/off byte, gen5 wants a
@@ -249,6 +266,26 @@ int _alarmEpochSec(DateTime when) => when.millisecondsSinceEpoch ~/ 1000;
 int _alarmSubsec(DateTime when) =>
     ((when.millisecondsSinceEpoch % 1000) * 32768) ~/ 1000; // 0..32767
 
+/// Valid alarm slot ids, per generation.
+///
+/// On gen5, RUN_ALARM and DISABLE_ALARM reject an id of 0, so an alarm written
+/// to slot 0 there can never be fired on demand or cancelled afterwards — the
+/// usable range is 1..6.
+///
+/// gen4 is NOT the same and must not inherit that rule: slot 0 is the slot a
+/// real WHOOP 4 fires from, verified on hardware. Rejecting it here would break
+/// the one alarm path we have actually seen work.
+int _checkAlarmId(int id, String name, BandProfile profile) {
+  final lo = profile.isGen5 ? 1 : 0;
+  if (id < lo || id > 6) {
+    throw ArgumentError.value(id, name, 'alarm ids are $lo..6 on this band');
+  }
+  return id;
+}
+
+/// Default alarm slot for [profile] — gen4 fires from slot 0, gen5 from 1.
+int _defaultAlarmId(BandProfile profile) => profile.isGen5 ? 1 : 0;
+
 /// SHORT alarm form (SET_ALARM_TIME = 0x42).
 ///
 /// Payload = 7 bytes: `[0x01][u32 epoch-seconds LE][u16 sub-seconds LE]`.
@@ -299,11 +336,21 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
 /// to customise. The strap confirms the alarm latched via the
 /// STRAP_DRIVEN_ALARM_SET (56) event and its firing via
 /// STRAP_DRIVEN_ALARM_EXECUTED (57) / HAPTICS_FIRED (60).
+///
+/// [index] is the alarm slot, 1..6 — NOT 0, which RUN_ALARM/DISABLE_ALARM
+/// reject, leaving the alarm un-runnable and un-cancellable.
+///
+/// GENERATION DIFFERENCE — the haptic block length:
+///   • gen4 reads 12 bytes (payload 20). Hardware-verified; unchanged.
+///   • gen5 reads 13 bytes (payload 21), the 13th being [crescendo], which
+///     must be exactly 0 or 1 — any other value is rejected. [hapticPattern]
+///     stays 12 bytes on both; the crescendo byte is appended for gen5.
 Uint8List cmdSetAlarm(
   int seq,
   DateTime when, {
-  int index = 0,
+  int? index,
   List<int>? hapticPattern,
+  int crescendo = 0,
   BandProfile profile = BandProfile.gen4,
 }) {
   final pattern = hapticPattern ?? kDefaultAlarmHaptics;
@@ -311,11 +358,15 @@ Uint8List cmdSetAlarm(
     throw ArgumentError.value(pattern.length, 'hapticPattern.length',
         'haptic pattern must be 12 bytes');
   }
+  final slot = _checkAlarmId(index ?? _defaultAlarmId(profile), 'index', profile);
+  if (crescendo != 0 && crescendo != 1) {
+    throw ArgumentError.value(crescendo, 'crescendo', 'must be 0 or 1');
+  }
   final sec = _alarmEpochSec(when);
   final subsec = _alarmSubsec(when);
   final p = <int>[
     0x04,
-    index & 0xff,
+    slot & 0xff,
     sec & 0xff,
     (sec >> 8) & 0xff,
     (sec >> 16) & 0xff,
@@ -323,18 +374,44 @@ Uint8List cmdSetAlarm(
     subsec & 0xff,
     (subsec >> 8) & 0xff,
     ...pattern.map((b) => b & 0xff),
+    if (profile.isGen5) crescendo,
   ];
   return buildCommand(seq, Cmd.setAlarmTime, p, profile);
 }
 
+/// Read back the armed alarm (GET_ALARM_TIME = 0x43).
+///
+/// gen4 takes the plain revision byte `[0x01]`. gen5 takes `[0x04][alarm_id]`
+/// — it reads one slot at a time, so it needs the id (1..6, default 1); the
+/// gen4 body is rejected there.
+Uint8List cmdGetAlarmTime(int seq,
+        {int alarmId = 1, BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(
+      seq,
+      Cmd.getAlarmTime,
+      profile.isGen5
+          ? <int>[0x04, _checkAlarmId(alarmId, 'alarmId', profile)]
+          : const <int>[revision1],
+      profile,
+    );
+
 /// Fire / test the alarm haptics immediately (RUN_ALARM = 0x44).
 ///
 /// Two forms:
-///   - revision 1 (default, [mode] == null): payload `[0x01]`.
+///   - revision 1 (gen4 default, [mode] == null): payload `[0x01]`.
 ///   - revision 2 ([mode] set): payload `[0x02][u8 mode]`, where `mode` selects
 ///     the run behaviour understood by the firmware.
+///
+/// gen5 accepts revision 2 ONLY, and `mode` there is the alarm SLOT ID (1..6),
+/// so it is required — the rev-1 form does nothing on gen5.
 Uint8List cmdRunAlarm(int seq,
     {int? mode, BandProfile profile = BandProfile.gen4}) {
+  if (profile.isGen5) {
+    if (mode == null) {
+      throw ArgumentError.notNull('mode (gen5 RUN_ALARM needs an id, 1..6)');
+    }
+    _checkAlarmId(mode, 'mode', profile);
+  }
   final p = mode == null ? const [0x01] : [0x02, mode & 0xff];
   return buildCommand(seq, Cmd.runAlarm, p, profile);
 }
@@ -342,12 +419,17 @@ Uint8List cmdRunAlarm(int seq,
 /// Disable / cancel the on-device alarm (DISABLE_ALARM = 0x45).
 ///
 /// Payload is the revision byte:
-///   - revision 1 (default): `[0x01]`.
-///   - revision 2: `[0x02][0xFF]` — the trailing 0xFF is the firmware's
-///     "clear all" sentinel for the rev-2 disable.
+///   - revision 1 (gen4 default): `[0x01]`.
+///   - revision 2: `[0x02][0xFF]` — 0xFF is the "clear all" sentinel — or
+///     `[0x02][alarm_id]` to cancel one slot (1..6).
+///
+/// gen5 accepts revision 2 ONLY; [revision] is ignored there.
 Uint8List cmdDisableAlarm(int seq,
-    {int revision = 1, BandProfile profile = BandProfile.gen4}) {
-  final p = revision == 2 ? const [0x02, 0xFF] : [revision & 0xff];
+    {int revision = 1, int? alarmId, BandProfile profile = BandProfile.gen4}) {
+  final target =
+      alarmId == null ? 0xFF : _checkAlarmId(alarmId, 'alarmId', profile);
+  final rev2 = profile.isGen5 || revision == 2;
+  final p = rev2 ? [0x02, target] : [revision & 0xff];
   return buildCommand(seq, Cmd.disableAlarm, p, profile);
 }
 
@@ -464,83 +546,236 @@ Uint8List cmdBuzzGen5Maverick(int seq, {int overallLoop = 1}) {
 // real `enable_r22_packets` capture): 40-byte body = ASCII key name
 // NUL-padded to 32 bytes, + 1 value byte @ offset 32, + 7 zero bytes.
 
-/// One SET_CONFIG (120) frame: `[0x23][seq][120][0x01][name:32B NUL-padded]
-/// [value:1B][zero:7B]`. [name] must fit in 31 bytes (leaving room for the
-/// NUL terminator within the 32-byte field) and [value] must be a single
-/// ASCII character (this package's config values are always `'1'` or `'2'`).
-Uint8List cmdSetConfigGen5(int seq, String name, String value) {
-  if (name.codeUnits.any((c) => c > 0x7f) || name.length > 31) {
+/// A 32-byte NUL-padded ASCII key/value field — the unit both SET_CONFIG (120)
+/// and SET_DEVICE_CONFIG_VALUE (119) are built from. [max] leaves room for the
+/// NUL terminator inside the field.
+Uint8List _asciiField32(String s, String argName, {int max = 31}) {
+  if (s.length > max || s.codeUnits.any((c) => c > 0x7f)) {
     throw ArgumentError.value(
-        name, 'name', 'must be <=31 ASCII chars (32-byte NUL-padded field)');
+        s, argName, 'must be <=$max ASCII chars (32-byte NUL-padded field)');
   }
+  return Uint8List(32)..setRange(0, s.length, s.codeUnits);
+}
+
+void _checkConfigValue(String value) {
   if (value.length != 1 || value.codeUnitAt(0) > 0x7f) {
     throw ArgumentError.value(
         value, 'value', 'must be a single ASCII character');
   }
-  final nameBytes = Uint8List(32)..setRange(0, name.length, name.codeUnits);
+}
+
+/// One SET_CONFIG (120) frame: `[0x23][seq][120][0x01][name:32B NUL-padded]
+/// [value:32B NUL-padded]` — a 65-byte body. Both fields are the same 32-byte
+/// shape; the value field being 32 bytes (not 1 + 7 pad) is why an over-short
+/// body used to work by accident: the strap stopped at the first NUL. [name]
+/// must fit in 31 bytes and [value] must be a single ASCII character (this
+/// package's config values are always `'0'`, `'1'` or `'2'`).
+Uint8List cmdSetConfigGen5(int seq, String name, String value) {
+  _checkConfigValue(value);
   final payload = <int>[
     revision1,
-    ...nameBytes,
-    value.codeUnitAt(0),
-    0, 0, 0, 0, 0, 0, 0, // 7 zero bytes
+    ..._asciiField32(name, 'name'),
+    ..._asciiField32(value, 'value'),
   ];
   return buildCommand(seq, Cmd.setFfValue, payload, BandProfile.gen5);
 }
 
-/// SET_DEVICE_CONFIG_VALUE (119) — a distinct, SMALLER sibling of SET_CONFIG
-/// (120): a 33-byte body with NO trailing padding (`[name:32B NUL-padded]
-/// [value:1B]`, vs 120's 40-byte body). ASSUMPTION: the multiband spec
-/// confirms the body is 33 bytes with no padding but does not give a
-/// byte-verified real capture for this opcode specifically — this mirrors
-/// 120's name/value convention as the best-supported guess. Verify against a
-/// real capture before relying on it.
+/// SET_DEVICE_CONFIG_VALUE (119) — the smaller-numbered sibling of SET_CONFIG
+/// (120), same 65-byte body: `[0x01][name:32B NUL-padded][value:32B
+/// NUL-padded]`. This previously sent a 33-byte body with no revision byte,
+/// which the strap read as revision 'n' (the name's first byte) and rejected.
 Uint8List cmdSetDeviceConfigValueGen5(int seq, String name, String value) {
-  if (name.codeUnits.any((c) => c > 0x7f) || name.length > 31) {
-    throw ArgumentError.value(
-        name, 'name', 'must be <=31 ASCII chars (32-byte NUL-padded field)');
-  }
-  if (value.length != 1 || value.codeUnitAt(0) > 0x7f) {
-    throw ArgumentError.value(
-        value, 'value', 'must be a single ASCII character');
-  }
-  final nameBytes = Uint8List(32)..setRange(0, name.length, name.codeUnits);
-  final payload = <int>[...nameBytes, value.codeUnitAt(0)];
+  _checkConfigValue(value);
+  final payload = <int>[
+    revision1,
+    ..._asciiField32(name, 'name'),
+    ..._asciiField32(value, 'value'),
+  ];
   return buildCommand(seq, Cmd.setDeviceConfigValue, payload, BandProfile.gen5);
 }
 
-/// The 16 SET_CONFIG flags (name, value) that unlock gen5's R22 deep buffers
-/// (v20/v21/v26), in the exact order + values a real capture verified.
-/// INDEX-SENSITIVE — do not reorder or "clean up" (per issue #423's corrected
-/// `enable_sig12` value, a prior reordering attempt shipped the wrong value).
+// ⚠ THE THREE ACCEPTED CONFIG VALUES, and nothing else:
+//     '0' — restore the firmware default
+//     '1' — enable
+//     '2' — DISABLE
+// These are PERSISTENT (NVM) writes: a wrong value survives reboot and
+// reconnect, and only writing '0' (or the opposite value) undoes it. Sending
+// '2' to a flag named `enable_*` force-DISABLES that feature — which is what
+// this list used to do to 13 of its 16 entries, including the very
+// `enable_r22_*` packet flags the sequence claims to turn on, plus
+// `hr_ch_switching` (degrading the strap's own HR) and `wear_detect_bias`
+// (altering on/off-body detection). Get the value right before sending.
+
+/// The SET_CONFIG flags (name, value) that unlock gen5's R22 deep buffers
+/// (v20 optical / v21 IMU / v26 PPG). Nothing else is touched: flags that do
+/// not gate a deep buffer are deliberately absent, because every entry here is
+/// a persistent write to a real user-visible setting.
+///
+/// Order is irrelevant — the strap looks each setting up BY NAME, so this list
+/// can be reordered or trimmed freely.
+///
+/// `disable_pip_r26_packets` is the one double negative: it is the SUPPRESSOR
+/// for v26 PIP packets, so it takes '2' (disable the suppressor) to let those
+/// packets flow. Every other entry is a plain `enable_*` taking '1'.
 const List<(String, String)> kGen5R22EnableFlags = [
-  ('enable_r22_packets', '2'),
-  ('enable_r22_v2_packets', '2'),
-  ('enable_r22_v3_packets', '2'),
+  ('enable_r22_packets', '1'),
+  ('enable_r22_v2_packets', '1'),
+  ('enable_r22_v3_packets', '1'),
   ('enable_r22_v4_packets', '1'),
-  ('enable_r22_v5_packets', '2'),
-  ('enable_r22_v6_packets', '2'),
-  ('enable_r22_v8_packets', '2'),
-  ('make_hrfm_visible', '2'),
+  ('enable_r22_v5_packets', '1'),
+  ('enable_r22_v6_packets', '1'),
+  ('enable_r22_v8_packets', '1'),
   ('disable_pip_r26_packets', '2'),
-  ('wear_detect_bias', '2'),
-  ('hr_ch_switching', '2'),
-  ('ir_hw_switching', '2'),
-  ('enable_passive_strap_fit_gen5', '1'),
-  ('enable_sig11_during_sleep', '2'),
-  ('dorset_inhibit_wpt', '2'),
-  ('enable_sig12', '1'),
 ];
 
-/// Build the 16-frame R22 enable sequence (SET_CONFIG per [kGen5R22EnableFlags],
+/// Build the R22 enable sequence (one SET_CONFIG per [kGen5R22EnableFlags],
 /// sequential `seq` starting at [startSeq]). This is a hard prerequisite for
 /// ever receiving v20 (optical)/v21 (IMU)/v26 (PPG) deep buffers from a real
 /// gen5 strap — the official WHOOP app never sends it, so a fresh connection
 /// without this sequence will only ever yield v18.
-List<Uint8List> buildR22EnableSequence({int startSeq = 1}) => [
-      for (int i = 0; i < kGen5R22EnableFlags.length; i++)
-        cmdSetConfigGen5(
-          (startSeq + i) & 0xFF,
-          kGen5R22EnableFlags[i].$1,
-          kGen5R22EnableFlags[i].$2,
-        ),
+List<Uint8List> buildR22EnableSequence({int startSeq = 1}) =>
+    _configSequence(kGen5R22EnableFlags, startSeq);
+
+/// Undo [buildR22EnableSequence]: writes '0' (restore firmware default) to
+/// every name it touched. These settings persist across reboots, so this is
+/// the only way back — turning the deep buffers off is NOT a matter of
+/// disconnecting.
+List<Uint8List> buildR22RestoreDefaultsSequence({int startSeq = 1}) =>
+    _configSequence(
+      [for (final f in kGen5R22EnableFlags) (f.$1, '0')],
+      startSeq,
+    );
+
+List<Uint8List> _configSequence(List<(String, String)> flags, int startSeq) => [
+      for (int i = 0; i < flags.length; i++)
+        cmdSetConfigGen5((startSeq + i) & 0xFF, flags[i].$1, flags[i].$2),
     ];
+
+// ── Ready-to-wire builders for the rest of the gen5 command surface ────────
+//
+// Nothing in this package calls these yet. Each is byte-shaped for the strap
+// and takes a [profile] so a gen5 caller gets a gen5 envelope; the gen5-only
+// opcodes still default to gen4 for signature consistency, and simply do
+// nothing if sent to a gen4 strap.
+
+/// Gyroscope on/off (0x96) — `[0x01][0|1]`. The gyro is a real power draw;
+/// turn it off when done.
+Uint8List cmdGyroEnable(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.gyroEnable, [revision1, on ? 0x01 : 0x00], profile);
+
+/// Read whether the gyroscope is currently enabled (0x98) — `[0x01]`.
+Uint8List cmdGyroStatus(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.gyroStatus, const [revision1], profile);
+
+/// Start the realtime raw stream (START_RAW_DATA = 0x51) for [durationMs].
+///
+/// Revision 2 (`[0x02][u32 duration-ms LE]`) is used deliberately: revision 1
+/// takes no duration and the strap falls back to 86,400,000 ms — a full day of
+/// raw streaming, which flattens the battery. Always bound it, and stop early
+/// with [cmdRawDataStop] when finished.
+Uint8List cmdRawDataStart(int seq,
+    {required int durationMs, BandProfile profile = BandProfile.gen4}) {
+  if (durationMs <= 0 || durationMs > 86400000) {
+    throw ArgumentError.value(
+        durationMs, 'durationMs', 'must be 1..86400000 (a bounded duration)');
+  }
+  final p = ByteData(5)
+    ..setUint8(0, 0x02)
+    ..setUint32(1, durationMs, Endian.little);
+  return buildCommand(seq, Cmd.startRawData, p.buffer.asUint8List(), profile);
+}
+
+/// Stop the realtime raw stream (STOP_RAW_DATA = 0x52) — `[0x01]`.
+Uint8List cmdRawDataStop(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.stopRawData, const [revision1], profile);
+
+/// Read the custom advertising name (0x8D) — `[0x01]`. gen5's equivalent of
+/// gen4's 0x4C, which gen5 does not implement.
+Uint8List cmdGetCustomAdvertisingName(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getCustomAdvertisingName, const [revision1], profile);
+
+/// Set the custom advertising name (0x8C) — `[0x01][len u8][ascii][u32 0]`,
+/// the same body shape as gen4's 0x4D. Name must be ASCII and <=31 chars.
+Uint8List cmdSetCustomAdvertisingName(int seq, String name,
+    {BandProfile profile = BandProfile.gen4}) {
+  if (name.isEmpty || name.length > 31 || name.codeUnits.any((c) => c > 0x7f)) {
+    throw ArgumentError.value(name, 'name', 'must be 1..31 ASCII chars');
+  }
+  return buildCommand(
+    seq,
+    Cmd.setCustomAdvertisingName,
+    <int>[revision1, name.length, ...name.codeUnits, 0, 0, 0, 0],
+    profile,
+  );
+}
+
+/// How many device-config keys the strap exposes (0x73) — `[0x01]`.
+Uint8List cmdGetConfigKeyCount(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getConfigKeyCount, const [revision1], profile);
+
+/// The config key name at [index] (0x74) — `[0x01][index]`. Walk 0..count-1
+/// from [cmdGetConfigKeyCount].
+Uint8List cmdGetConfigKeyName(int seq, int index,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getConfigKeyName, [revision1, index & 0xff], profile);
+
+/// How many feature-flag keys the strap exposes (0x75) — `[0x01]`.
+Uint8List cmdGetFlagKeyCount(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getFlagKeyCount, const [revision1], profile);
+
+/// The feature-flag key name at [index] (0x76) — `[0x01][index]`.
+Uint8List cmdGetFlagKeyName(int seq, int index,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getFlagKeyName, [revision1, index & 0xff], profile);
+
+/// Read one device-config value by name (0x79) — `[0x01][name:32B
+/// NUL-padded]`, the read counterpart of [cmdSetDeviceConfigValueGen5].
+Uint8List cmdGetConfigValue(int seq, String name,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getConfigValue,
+        <int>[revision1, ..._asciiField32(name, 'name')], profile);
+
+/// Read one feature-flag value by name (0x80) — same body as
+/// [cmdGetConfigValue], different namespace.
+Uint8List cmdGetFlagValue(int seq, String name,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getFlagValue,
+        <int>[revision1, ..._asciiField32(name, 'name')], profile);
+
+/// Turn the strap's EVENT packet stream on/off (0x30).
+///
+/// ⚠ Body is the BARE state byte — this opcode takes NO revision byte, unlike
+/// almost everything around it. Turning this off silences every EventId.
+Uint8List cmdSetEventPackets(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.sendEventPackets, [on ? 0x01 : 0x00], profile);
+
+/// Read the optical front-end (AFE) parameters (0x3E) — `[0x01]`. Read-only;
+/// the SET twin (0x3D) is deliberately not built here.
+Uint8List cmdGetAfeParams(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getAfeParams, const [revision1], profile);
+
+/// Cancel an in-progress haptic buzz (0x7A) — `[0x01]`.
+Uint8List cmdStopHaptics(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.stopHaptics, const [revision1], profile);
+
+/// Arm / disarm an ECG reading (ECG main control, 0x7C) — `[0x01][0|1]`.
+/// Select the wrist first with [cmdSelectWrist] (0x7B).
+Uint8List cmdEcgControl(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(
+        seq, Cmd.ecgMainControl, [revision1, on ? 0x01 : 0x00], profile);
+
+/// Send the raw ECG trace (0x7E) — `[0x01]`. Arrives as record version 16.
+Uint8List cmdEcgSendRaw(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.ecgSendRawData, const [revision1], profile);
+
+/// Send the filtered ECG trace (0x8B) — `[0x01]`. Arrives as record
+/// version 17.
+Uint8List cmdEcgSendFiltered(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.ecgSendFilteredData, const [revision1], profile);
