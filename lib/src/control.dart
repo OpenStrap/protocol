@@ -453,6 +453,22 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   final op = inner[2];
   final payload = Uint8List.sublistView(inner, 3);
   final dec = <String, dynamic>{};
+  // A response body is preceded by the ECHOED REQUEST SEQ at inner[3] (the
+  // status follows it at inner[4]) — the same byte several decoders here
+  // already skip past to find their real first body byte.
+  //
+  // Surfaced so a caller can tell WHICH of its outstanding requests a reply
+  // belongs to. Without it every response for an opcode is indistinguishable,
+  // and a caller that awaits a specific read can be satisfied by an unrelated
+  // earlier request's reply — which matters for GET_CLOCK, where the app
+  // polls the RTC from several places at once and gates history offload on
+  // the answer.
+  //
+  // NOTE: that the strap echoes back the seq the PHONE sent is the layout this
+  // package has always assumed; it is not confirmed against a hardware capture
+  // here. Treat a mismatch as "not the reply I awaited", never as an error,
+  // and always keep a path that works when the correlation never matches.
+  if (inner.length >= 4) dec['req_seq'] = inner[3];
   if (op == Cmd.getBatteryLevel && inner.length >= (profile.isGen5 ? 6 : 7)) {
     // Byte-verified: gen5 returns a DIRECT percent @ inner[5] (u8, e.g.
     // 0x2F=47%) — NOT deci-percent like gen4's u16 LE @[5:7]. Conflating the
