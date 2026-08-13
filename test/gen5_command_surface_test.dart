@@ -244,11 +244,14 @@ void main() {
       expect(_body(cmdDisableAlarm(1))[0], 0x01);
     });
 
-    test('GET_ALARM_TIME is [0x01] on gen4 and [0x04][id] on gen5', () {
+    test('GET_ALARM_TIME is [0x01] on gen4 and the bare slot id on gen5', () {
       expect(_body(cmdGetAlarmTime(1))[0], 0x01);
+      // gen5 range-checks the FIRST body byte as the alarm id, so a leading
+      // 0x04 would read slot 4 and throw the real id away.
       final g5 =
-          _body(cmdGetAlarmTime(1, alarmId: 6, profile: gen5), profile: gen5);
-      expect(g5.sublist(0, 2), [0x04, 0x06]);
+          _body(cmdGetAlarmTime(1, alarmId: 3, profile: gen5), profile: gen5);
+      expect(g5[0], 3);
+      expect(_body(cmdGetAlarmTime(1, profile: gen5), profile: gen5)[0], 1);
       expect(() => cmdGetAlarmTime(1, alarmId: 0, profile: gen5),
           throwsArgumentError);
     });
@@ -316,14 +319,16 @@ void main() {
         expect(f.opcode, opcode);
         expect(f.inner[3], 0x01);
       });
+      // Cursor-walk iterators: the strap keeps its own position, so the body
+      // is just the revision byte — there is no index to send.
       final keyName =
-          parseFrame(cmdGetConfigKeyName(1, 5, profile: gen5), profile: gen5)!;
+          parseFrame(cmdGetConfigKeyName(1, profile: gen5), profile: gen5)!;
       expect(keyName.opcode, 0x74);
-      expect(keyName.inner.sublist(3, 5), [0x01, 5]);
+      expect(keyName.inner[3], 0x01);
       final flagName =
-          parseFrame(cmdGetFlagKeyName(1, 2, profile: gen5), profile: gen5)!;
+          parseFrame(cmdGetFlagKeyName(1, profile: gen5), profile: gen5)!;
       expect(flagName.opcode, 0x76);
-      expect(flagName.inner.sublist(3, 5), [0x01, 2]);
+      expect(flagName.inner[3], 0x01);
       // By-name reads use the same 32-byte NUL-padded field as the writes.
       for (final (opcode, frame) in [
         (0x79, cmdGetConfigValue(1, 'some_key', profile: gen5)),
@@ -377,8 +382,8 @@ void main() {
       expect(ctl.opcode, 0x7C);
       expect(ctl.inner.sublist(3, 5), [0x01, 0x01]);
       for (final (opcode, frame) in [
-        (0x7E, cmdEcgSendRaw(1, profile: gen5)),
-        (0x8B, cmdEcgSendFiltered(1, profile: gen5)),
+        (0x7E, cmdEcgSendRaw(1, true, profile: gen5)),
+        (0x8B, cmdEcgSendFiltered(1, true, profile: gen5)),
       ]) {
         final f = parseFrame(frame, profile: gen5)!;
         expect(f.opcode, opcode);

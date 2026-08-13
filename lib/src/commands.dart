@@ -382,16 +382,17 @@ Uint8List cmdSetAlarm(
 
 /// Read back the armed alarm (GET_ALARM_TIME = 0x43).
 ///
-/// gen4 takes the plain revision byte `[0x01]`. gen5 takes `[0x04][alarm_id]`
-/// — it reads one slot at a time, so it needs the id (1..6, default 1); the
-/// gen4 body is rejected there.
+/// gen4 takes the plain revision byte `[0x01]`. gen5 reads one slot at a time
+/// and takes the alarm id ALONE as the first body byte (1..6, default 1) — it
+/// is the id that is range-checked there, not a revision. Sending `[0x04][id]`
+/// reads slot 4 and ignores the id.
 Uint8List cmdGetAlarmTime(int seq,
         {int alarmId = 1, BandProfile profile = BandProfile.gen4}) =>
     buildCommand(
       seq,
       Cmd.getAlarmTime,
       profile.isGen5
-          ? <int>[0x04, _checkAlarmId(alarmId, 'alarmId', profile)]
+          ? <int>[_checkAlarmId(alarmId, 'alarmId', profile)]
           : const <int>[revision1],
       profile,
     );
@@ -712,11 +713,13 @@ Uint8List cmdGetCustomAdvertisingName(int seq,
     buildCommand(seq, Cmd.getCustomAdvertisingName, const [revision1], profile);
 
 /// Set the custom advertising name (0x8C) — `[0x01][len u8][ascii][u32 0]`,
-/// the same body shape as gen4's 0x4D. Name must be ASCII and <=31 chars.
+/// the same body shape as gen4's 0x4D. The strap copies only 16 body bytes and
+/// refuses a length over 15, so the name must be ASCII and <=15 chars — a
+/// longer one is rejected or silently truncated.
 Uint8List cmdSetCustomAdvertisingName(int seq, String name,
     {BandProfile profile = BandProfile.gen4}) {
-  if (name.isEmpty || name.length > 31 || name.codeUnits.any((c) => c > 0x7f)) {
-    throw ArgumentError.value(name, 'name', 'must be 1..31 ASCII chars');
+  if (name.isEmpty || name.length > 15 || name.codeUnits.any((c) => c > 0x7f)) {
+    throw ArgumentError.value(name, 'name', 'must be 1..15 ASCII chars');
   }
   return buildCommand(
     seq,
@@ -731,21 +734,24 @@ Uint8List cmdGetConfigKeyCount(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.getConfigKeyCount, const [revision1], profile);
 
-/// The config key name at [index] (0x74) — `[0x01][index]`. Walk 0..count-1
-/// from [cmdGetConfigKeyCount].
-Uint8List cmdGetConfigKeyName(int seq, int index,
+/// The NEXT config key name (0x74) — `[0x01]`. This is an iterator, not a
+/// random-access read: the strap walks an internal cursor that
+/// [cmdGetConfigKeyCount] (0x73) resets, so call that first and then this
+/// once per key. There is no index to pass.
+Uint8List cmdGetConfigKeyName(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.getConfigKeyName, [revision1, index & 0xff], profile);
+    buildCommand(seq, Cmd.getConfigKeyName, const [revision1], profile);
 
 /// How many feature-flag keys the strap exposes (0x75) — `[0x01]`.
 Uint8List cmdGetFlagKeyCount(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.getFlagKeyCount, const [revision1], profile);
 
-/// The feature-flag key name at [index] (0x76) — `[0x01][index]`.
-Uint8List cmdGetFlagKeyName(int seq, int index,
+/// The NEXT feature-flag key name (0x76) — `[0x01]`, the same cursor-walk as
+/// [cmdGetConfigKeyName], reset by [cmdGetFlagKeyCount] (0x75).
+Uint8List cmdGetFlagKeyName(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.getFlagKeyName, [revision1, index & 0xff], profile);
+    buildCommand(seq, Cmd.getFlagKeyName, const [revision1], profile);
 
 /// Read one device-config value by name (0x79) — `[0x01][name:32B
 /// NUL-padded]`, the read counterpart of [cmdSetDeviceConfigValueGen5].
@@ -785,12 +791,17 @@ Uint8List cmdEcgControl(int seq, bool on,
     buildCommand(
         seq, Cmd.ecgMainControl, [revision1, on ? 0x01 : 0x00], profile);
 
-/// Send the raw ECG trace (0x7E) — `[0x01]`. Arrives as record version 16.
-Uint8List cmdEcgSendRaw(int seq, {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.ecgSendRawData, const [revision1], profile);
-
-/// Send the filtered ECG trace (0x8B) — `[0x01]`. Arrives as record
-/// version 17.
-Uint8List cmdEcgSendFiltered(int seq,
+/// Start/stop the raw ECG trace (0x7E) — `[0x01][on]`. The second byte is a
+/// real selector, not padding: the strap reads both bytes as one word and
+/// rejects anything above 1. Arrives as record version 16.
+Uint8List cmdEcgSendRaw(int seq, bool on,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.ecgSendFilteredData, const [revision1], profile);
+    buildCommand(
+        seq, Cmd.ecgSendRawData, [revision1, on ? 0x01 : 0x00], profile);
+
+/// Start/stop the filtered ECG trace (0x8B) — `[0x01][on]`, same two-byte
+/// selector as [cmdEcgSendRaw]. Arrives as record version 17.
+Uint8List cmdEcgSendFiltered(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(
+        seq, Cmd.ecgSendFilteredData, [revision1, on ? 0x01 : 0x00], profile);

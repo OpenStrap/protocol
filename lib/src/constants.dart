@@ -248,6 +248,17 @@ const Set<int> dangerousCmds = {
   // unsynced records (they are never served again) or replays old ones.
   Cmd.setReadPointer,
   Cmd.togglePersistentR21,
+  // Persistent CONFIG writes. These land in non-volatile storage and survive a
+  // reboot, so a wrong value is not undone by disconnecting — writing the
+  // default back is the only way out. buildR22EnableSequence goes around this
+  // gate deliberately (it is opt-in and ships a restore-defaults companion);
+  // nothing else should reach them by accident.
+  Cmd.setDeviceConfigValue,
+  Cmd.setFfValue,
+  Cmd.setGenericHrProfile,
+  // Forces the strap to believe it is on-wrist: sensors keep running off the
+  // body, and it persists.
+  Cmd.wearDetectOverride,
   // Persistent optical save — the stuck-LED / battery-drain footgun.
   Cmd.persistentOpticalSave,
   // Erases the pairing: the link drops and the user must re-pair by hand.
