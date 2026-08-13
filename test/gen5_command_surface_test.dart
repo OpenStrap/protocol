@@ -414,7 +414,7 @@ void main() {
         Cmd.stopRawData,
         Cmd.disableBleUart,
         Cmd.saveImuData,
-        Cmd.setSigprocConfig,
+        Cmd.setSignalConfig,
         Cmd.setCustomAdvertisingName,
         Cmd.getCustomAdvertisingName,
         Cmd.wearDetectOverride,

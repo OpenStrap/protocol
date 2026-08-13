@@ -281,7 +281,12 @@ HelloInfo parseHello(Uint8List payload) {
   // bound used to be 1009 (= 100.9%), which let an impossible reading through;
   // a percentage is 0..100 by definition, so 1000 is the ceiling. Out of
   // range = not the battery field, keep scanning / leave batteryPct null.
-  for (int off = 1; off < 10; off++) {
+  //
+  // The scan starts at payload[2] — the first byte of the response BODY.
+  // payload[0] is the echoed request seq and payload[1] the status, and a
+  // status of 1 next to a small body byte reads as a perfectly plausible
+  // 0.1–76.9%, so starting at 1 reported the status byte as a battery level.
+  for (int off = 2; off < 10; off++) {
     if (off + 2 <= payload.length) {
       final v = u16(payload, off);
       if (v >= 10 && v <= 1000) {
@@ -373,6 +378,18 @@ class EventInfo {
   }) : body = body ?? Uint8List(0);
 }
 
+/// The declared body of an event-shaped packet. EVENT (0x30) and CONSOLE_LOGS
+/// (0x32) share one envelope:
+///   `[type][u8 seq][u16 event id][u32 unix][u16 subsec][u16 body len][body…]`
+/// The length field at [10] is what bounds the body — a frame can carry
+/// padding past it, which used to be handed back to callers as body bytes.
+Uint8List _envelopeBody(Uint8List inner) {
+  if (inner.length < 12) return Uint8List(0);
+  final end = 12 + u16(inner, 10);
+  return Uint8List.sublistView(
+      inner, 12, end < inner.length ? end : inner.length);
+}
+
 EventInfo? parseEvent(Uint8List inner) {
   if (inner.length < 4 || inner[0] != PacketType.event) return null;
   final eid = u16(inner, 2);
@@ -381,8 +398,7 @@ EventInfo? parseEvent(Uint8List inner) {
   // begins at [12]. All guarded by length so short frames degrade cleanly.
   final ts = inner.length >= 8 ? u32(inner, 4) : 0;
   final subsec = inner.length >= 10 ? u16(inner, 8) : 0;
-  final body =
-      inner.length > 12 ? Uint8List.sublistView(inner, 12) : Uint8List(0);
+  final body = _envelopeBody(inner);
   final dec = <String, dynamic>{};
   switch (eid) {
     case EventId.chargingOn:
@@ -405,15 +421,20 @@ EventInfo? parseEvent(Uint8List inner) {
       // DECI-percent — divide by 10; this is a DIFFERENT convention from
       // COMMAND_RESPONSE's GET_BATTERY_LEVEL, which is direct-percent on
       // gen5. Don't conflate the two.), battery_mV @ body[5] (u16),
-      // charging @ bit0 of body[10]. Shared across gen4/gen5 — these are
+      // charging @ body[9]. Shared across gen4/gen5 — these are
       // inner-relative offsets, identical across generations.
+      //
+      // Body: [0] revision = 2, [1:5] u32 state-of-charge ×10, [5:9] u32
+      // millivolts, [9] charger/pack-attached flag, [10] always 0, then two
+      // packed pairs at [11:15] and [15:19]. `charging` used to be read from
+      // [10], the byte that is always zero, so it was permanently false.
       if (body.length >= 12) {
         final soc = _round(u16(body, 1) / 10.0, 1);
         if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
           dec['battery_pct'] = soc;
         }
         dec['battery_mv'] = u16(body, 5);
-        dec['charging'] = (body[10] & 0x01) != 0;
+        dec['charging'] = body[9] != 0;
       }
       break;
     case EventId.highFreqSyncPrompt:
@@ -534,28 +555,60 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     }
   } else if (op == Cmd.getAdvertisingNameHarvard) {
     dec['strap_name'] = _decodeAdvName(payload);
-  } else if (op == Cmd.getClock) {
-    final c = _firstPlausibleUnix(payload);
-    if (c != null) dec['clock_epoch'] = c;
-  } else if (op == Cmd.getDataRange) {
-    final range = _plausibleUnixRange(payload);
-    if (range != null) {
-      dec['range_oldest'] = range[0];
-      dec['range_newest'] = range[1];
+  } else if (op == Cmd.getClock || op == Cmd.getClockGen5) {
+    // Reply bodies (the body starts at payload[2]):
+    //   gen4 0x0B: 8 B  [u32 sec][u32 subsec]         → seconds @ payload[2]
+    //   gen5 0x93: 7 B  [rev=1][u32 sec][u16 subsec]  → seconds @ payload[3]
+    // Read the field; never scan for one that "looks like an epoch". A
+    // byte-wise scan matched the straddle at payload[1]
+    // ([status][sec b0][sec b1][sec b2]) — which is in range for every
+    // current wall-clock time and sits BEFORE the real field, so clock_epoch
+    // was essentially never the strap's actual clock.
+    final at = op == Cmd.getClockGen5 ? 3 : 2;
+    final revOk =
+        op != Cmd.getClockGen5 || (payload.length > 2 && payload[2] == 1);
+    if (revOk && payload.length >= at + 4) {
+      final v = u32(payload, at);
+      // Emit nothing rather than a guess: a value outside the plausible
+      // window means we are not looking at the clock field.
+      if (_plausibleUnix(v)) dec['clock_epoch'] = v;
     }
-    // Ring-buffer backlog telemetry (noop only — not in whoop-rs at all).
-    // Field-to-offset mapping for oldest/newest above is itself flagged as
-    // genuinely unresolved/inconsistent across the two reference sources
-    // (§1.6 TODO — needs a real-capture confirmation before hardening
-    // further); this backlog read is additive and independently gated on
-    // the known-constant capacity, so it degrades safely if wrong.
-    if (payload.length >= 28) {
-      final capacity = u32(payload, 24);
-      if (capacity == 131072) {
+  } else if (op == Cmd.getDataRange) {
+    // 65-byte reply body, starting at payload[2] (payload[0] = echoed request
+    // seq, payload[1] = status), so every body offset below is +2:
+    //   body[0]                        revision = 1
+    //   body[1][5][9][13][17][21][25][29]  u32 RawOldPage, ReadPage,
+    //     WritePage, TrimPage, WrapCount, TotalPages, UsedRecords, FreeRecords
+    //   body[33],[37] (sec, subsec) oldest   body[41],[45] trim
+    //   body[49],[53] current read           body[57],[61] newest
+    // The old code walked a 4-byte grid from payload[0] looking for plausible
+    // epochs; the real seconds sit at payload[35] and payload[59], both ≡ 3
+    // (mod 4), so the grid could never land on either and range_oldest /
+    // range_newest were never emitted at all.
+    final revOk = payload.length > 2 && payload[2] == 1;
+    if (revOk && payload.length >= 63) {
+      final oldest = u32(payload, 35);
+      final newest = u32(payload, 59);
+      if (_plausibleUnix(oldest) && _plausibleUnix(newest) && oldest <= newest) {
+        dec['range_oldest'] = oldest;
+        dec['range_newest'] = newest;
+      }
+    }
+    // Ring-buffer backlog telemetry. The trim page and wrap count are the
+    // strap's own view of its ring buffer, which is what separates a stalled
+    // offload from an idle one. Degrades safely: implausible values emit
+    // nothing at all.
+    if (revOk && payload.length >= 35) {
+      final writePage = u32(payload, 11);
+      final capacity = u32(payload, 23); // TotalPages
+      if (capacity > 0 && writePage <= capacity) {
         dec['pages_behind'] = {
-          'written': u32(payload, 12),
-          'used': u32(payload, 16),
+          'written': writePage,
+          'used': u32(payload, 27), // UsedRecords
           'capacity': capacity,
+          'trim_page': u32(payload, 15),
+          'wrap_count': u32(payload, 19),
+          'free_records': u32(payload, 31),
         };
       }
     }
@@ -652,42 +705,9 @@ String _printableRun(Uint8List p, int a, int b) {
 const int _minPlausibleUnix = 1700000000; // 2023-11
 const int _maxPlausibleUnix = 4102444800; // 2100-01
 
-/// First u32 LE in [payload] that looks like a real unix epoch — used to read the
-/// strap RTC out of a GET_CLOCK response without pinning a firmware-specific
-/// offset (the field has drifted across revisions, like HELLO).
-int? _firstPlausibleUnix(Uint8List payload) {
-  for (int o = 0; o + 4 <= payload.length; o++) {
-    final v = u32(payload, o);
-    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnix) return v;
-  }
-  return null;
-}
-
-// GET_DATA_RANGE-specific bounds/scan, tighter than the generic
-// _firstPlausibleUnix used for GET_CLOCK. Cross-validated against a real
-// GET_DATA_RANGE capture against whoop-rs's ground truth: the generic
-// [_maxPlausibleUnix] (year 2100) let a spurious far-future word through as
-// "newest", and scanning every unaligned byte offset of the payload (rather
-// than the u32 grid) picked up an off-grid straddle word neither field
-// actually occupies. Both fixed here without touching GET_CLOCK's own
-// (deliberately more permissive) scan.
-const int _maxPlausibleUnixForRange = 1900000000; // ~2030 — tighter than 2100
-
-/// [oldest, newest] from the two plausible-unix u32s in a GET_DATA_RANGE response
-/// (min and max of all plausible epochs found), scanned on the 4-byte grid
-/// anchored at payload offset 0 (== frame-absolute offset 7, i.e. right after
-/// the 7-byte inner header [type,seq,cmd,result]) — never at an arbitrary
-/// unaligned byte offset. Null if fewer than one is present.
-List<int>? _plausibleUnixRange(Uint8List payload) {
-  final found = <int>[];
-  for (int o = 0; o + 4 <= payload.length; o += 4) {
-    final v = u32(payload, o);
-    if (v >= _minPlausibleUnix && v <= _maxPlausibleUnixForRange) found.add(v);
-  }
-  if (found.isEmpty) return null;
-  found.sort();
-  return [found.first, found.last];
-}
+/// Could [v] be a real wall-clock epoch? Used to sanity-check a field we read
+/// at a known offset — never to go looking for one.
+bool _plausibleUnix(int v) => v >= _minPlausibleUnix && v <= _maxPlausibleUnix;
 
 // ── METADATA (0x31) sync markers ─────────────────────────────────────────────
 class MetaMarker {
@@ -695,6 +715,12 @@ class MetaMarker {
   final String name;
   final int? expectedPacketCount;
   final Uint8List? token; // 8-byte batch token (HistoryEnd only)
+
+  /// The ring buffer's WRAP COUNT — the second u32 of the 8-byte trim token
+  /// (`[u32 trim_page][u32 wrap_count]`). It is NOT an identifier the strap
+  /// assigns per batch: it only changes when the ring wraps, so consecutive
+  /// batches routinely share a value. Named `batchId` for compatibility with
+  /// existing callers; treat it as a wrap counter, never as a unique key.
   final int? batchId;
   MetaMarker(
     this.sub,
@@ -751,15 +777,19 @@ MetaMarker? parseMetadata(Uint8List inner) {
 
 // ── CONSOLE_LOGS (0x32) ──────────────────────────────────────────────────────
 //
-// New decoder — not previously implemented for either generation. Layout per
-// the multiband spec §1.8 (frame-absolute offsets, converted -8 to inner):
-//   record_index u16 @ inner[1:3]   (frame-abs 9)
-//   unix         u32 @ inner[4:8]   (frame-abs 12)
-//   subsec       u16 @ inner[8:10]  (frame-abs 16)
-//   chunk_len    u16 @ inner[10:12] (frame-abs 18)
-//   channel      u8  @ inner[12]    (frame-abs 20)
-//   text             @ inner[13:]   (frame-abs 21), trailing-NUL-trimmed only
+// A 0x32 packet is an event packet whose event id is 2, so it carries the
+// EVENT envelope (see [_envelopeBody]) — not an envelope of its own:
+//   record_index u8  @ inner[1]      (the packet seq)
+//   event id     u16 @ inner[2:4]    (= 2)
+//   unix         u32 @ inner[4:8]
+//   subsec       u16 @ inner[8:10]
+//   chunk_len    u16 @ inner[10:12]
+//   text             @ inner[12 : 12+chunk_len], trailing-NUL-trimmed only
 //     (embedded NULs preserved), capped at 2048 chars, CRC-independent.
+// This used to read record_index as a u16, which picked up the event id's low
+// byte (i.e. `seq | 0x0200`) and wrapped wrongly, and to treat inner[12] as a
+// "channel" byte — there is no channel byte, so every chunk's first character
+// was reported as one and dropped from the text.
 // A real gen5 log line looks like "146552119: BLE_CMD: Command Send
 // Historical Data\n" (boot-tick-ms : tag : message).
 class ConsoleLogChunk {
@@ -767,7 +797,6 @@ class ConsoleLogChunk {
   final int unix;
   final int subsec;
   final int chunkLen;
-  final int channel;
   final String text;
 
   const ConsoleLogChunk({
@@ -775,7 +804,6 @@ class ConsoleLogChunk {
     required this.unix,
     required this.subsec,
     required this.chunkLen,
-    required this.channel,
     required this.text,
   });
 }
@@ -798,17 +826,13 @@ String _consoleLogText(Uint8List raw) {
 }
 
 ConsoleLogChunk? parseConsoleLog(Uint8List inner) {
-  if (inner.length < 13 || inner[0] != PacketType.consoleLogs) return null;
-  final text = inner.length > 13
-      ? _consoleLogText(Uint8List.sublistView(inner, 13))
-      : '';
+  if (inner.length < 12 || inner[0] != PacketType.consoleLogs) return null;
   return ConsoleLogChunk(
-    recordIndex: u16(inner, 1),
+    recordIndex: inner[1],
     unix: u32(inner, 4),
     subsec: u16(inner, 8),
     chunkLen: u16(inner, 10),
-    channel: inner[12],
-    text: text,
+    text: _consoleLogText(_envelopeBody(inner)),
   );
 }
 
@@ -830,9 +854,9 @@ class ConsoleLogReassembler {
   /// should call [flush] after a `false` return to retrieve what came before).
   bool add(ConsoleLogChunk chunk) {
     final contiguous = _lastIndex != null &&
-        // record_index is a u16 — allow wraparound at 0xFFFF, matching the
-        // wire's own modulo-65536 counter.
-        (chunk.recordIndex == (_lastIndex! + 1) & 0xFFFF);
+        // record_index is a u8 — allow wraparound at 0xFF, matching the
+        // wire's own modulo-256 counter.
+        (chunk.recordIndex == (_lastIndex! + 1) & 0xFF);
     if (_lastIndex != null && !contiguous) {
       // Caller must flush() before this chunk's text is appended, or the
       // discontinuity is silently lost. We still start the new run here.
@@ -904,7 +928,6 @@ Decoded decodeFrame(Frame frame, {BandProfile profile = BandProfile.gen4}) {
           return Decoded('console_log', {
             'record_index': c.recordIndex,
             'ts_epoch': c.unix,
-            'channel': c.channel,
             'text': c.text,
           });
         }

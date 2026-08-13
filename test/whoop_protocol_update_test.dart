@@ -306,13 +306,13 @@ void main() {
 
     test('parseEvent decodes id@2, ts@4, subsec@8 and body@12', () {
       // 0x30 EVENT: eid=16 (SET_RTC) @2, ts=0x12345678 @4, subsec=0x4000 @8,
-      // pad @10..12, body [0xAA,0xBB] @12.
+      // body length @10, body [0xAA,0xBB] @12.
       final inner = Uint8List.fromList([
         0x30, 0x00, //             packet type EVENT, seq
         0x10, 0x00, //             event id u16 LE = 16
         0x78, 0x56, 0x34, 0x12, // ts seconds u32 LE
         0x00, 0x40, //             sub-seconds u16 LE
-        0x00, 0x00, //             pad to the body offset
+        0x02, 0x00, //             body length u16 LE = 2
         0xAA, 0xBB, //             event body
       ]);
       final e = parseEvent(inner)!;

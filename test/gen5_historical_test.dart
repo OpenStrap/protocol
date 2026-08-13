@@ -590,27 +590,31 @@ void main() {
   });
 
   group('CONSOLE_LOGS (0x32) decoder', () {
+    // A 0x32 packet carries the EVENT envelope with event id 2: the seq is a
+    // u8 at [1], the id a u16 at [2], and the text starts at [12] — there is
+    // no channel byte. This builder used to write a u16 record_index over the
+    // seq+id field and a fake channel at [12], which matched the decoder's own
+    // (wrong) offsets.
     Uint8List buildConsoleLog(int recordIndex, int unix, String text) {
       final textBytes = text.codeUnits;
-      final inner = Uint8List(13 + textBytes.length);
+      final inner = Uint8List(12 + textBytes.length);
       inner[0] = PacketType.consoleLogs;
-      ByteData.sublistView(inner).setUint16(1, recordIndex, Endian.little);
+      inner[1] = recordIndex;
+      ByteData.sublistView(inner).setUint16(2, 2, Endian.little); // event id
       ByteData.sublistView(inner).setUint32(4, unix, Endian.little);
       ByteData.sublistView(inner).setUint16(8, 0, Endian.little); // subsec
       ByteData.sublistView(inner)
           .setUint16(10, textBytes.length, Endian.little); // chunk_len
-      inner[12] = 1; // channel
-      inner.setRange(13, 13 + textBytes.length, textBytes);
+      inner.setRange(12, 12 + textBytes.length, textBytes);
       return inner;
     }
 
-    test('decodes record_index/unix/channel/text', () {
+    test('decodes record_index/unix/text', () {
       final inner = buildConsoleLog(100, 1780000000,
           '146552119: BLE_CMD: Command Send Historical Data\n');
       final c = parseConsoleLog(inner)!;
       expect(c.recordIndex, 100);
       expect(c.unix, 1780000000);
-      expect(c.channel, 1);
       expect(c.text, '146552119: BLE_CMD: Command Send Historical Data\n');
     });
 

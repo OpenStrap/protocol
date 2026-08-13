@@ -199,6 +199,9 @@ ImuFrame? frameAccelForBand(String hex) =>
 ///   • 0x28 REALTIME_DATA (compact HR): rr_count u8 @ [9],  rr i16 LE @ [10 + 2i]
 ///   • R10  (rec_type 10):              rr_count u8 @ [18], rr i16 LE @ [19 + 2i]
 /// Returns {ts, rr_ms} or null.
+///
+/// The declared count is untrusted on both forms and is capped at the number
+/// of R-R slots that form actually has (4 for 0x28, [kMaxRrPerRecord] for R10).
 RealtimeRrResult? realtimeRr(String hex) {
   Uint8List b;
   try {
@@ -209,13 +212,24 @@ RealtimeRrResult? realtimeRr(String hex) {
   if (b.length < 12) return null;
   final view = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
   final pkt = b[0], rec = b[1];
-  int tsOff, cntOff;
+  int tsOff, cntOff, maxRr;
   if (pkt == 0x28) {
     tsOff = 2;
     cntOff = 9;
+    // A 0x28 packet is 20 bytes and has exactly FOUR R-R slots — [10] [12]
+    // [14] [16] — bounded by the wearing byte at [18]. A declared count of
+    // 5..8 used to be accepted, which read [18] (and the byte after it) as
+    // heartbeats, with the 200–2500 ms range check as the only thing standing
+    // between the wearing flag and live HRV/breathing compute. Four slots
+    // exist, so four is the ceiling.
+    maxRr = 4;
   } else if (rec == 10) {
     tsOff = 7;
     cntOff = 18;
+    // R10 declares its count at [18] and carries the values from [19], inside
+    // a 1920-byte record — there is genuine room for these, so the historical
+    // ceiling applies unchanged.
+    maxRr = kMaxRrPerRecord;
   } else {
     return null;
   }
@@ -223,8 +237,8 @@ RealtimeRrResult? realtimeRr(String hex) {
   final ts = view.getUint32(tsOff, Endian.little);
   if (ts <= 0) return null;
   final n = b[cntOff];
-  if (n == 0 || n > 8) {
-    return null; // realtime carries 0–4; large count = wrong offset
+  if (n == 0 || n > maxRr) {
+    return null; // more beats than this form has slots = wrong offset
   }
   final rrMs = <int>[];
   final first = cntOff + 1;
@@ -295,6 +309,27 @@ _Motion? _r10Motion(ByteData view, int len) {
   const activityFloor = 0.05;
   if (std < activityFloor || n < 24) return _Motion(activity, 0);
 
+  // ── What this step search can and cannot find ────────────────────────────
+  // gen4 R10 is 100 Hz: 100 accel samples per record, one record per second
+  // (verified on real captures — consecutive R10 timestamps step by exactly
+  // 1 s while each record carries 100 samples per axis). At that rate:
+  //
+  //   • the detrend window below is ±9 samples = 190 ms, which high-passes
+  //     around 5 Hz and attenuates the 1.5–3 Hz gait fundamental before the
+  //     search ever runs;
+  //   • the autocorrelation lag window (7..40 samples = 70–400 ms) can only
+  //     resolve cadences of 150–857 steps/min. Ordinary walking is 100–130
+  //     steps/min, which lives at lags 46–60 and is therefore UNREACHABLE.
+  //
+  // So on every real R10 record available to us this returns 0 steps. Read
+  // that as "this search found no cadence it can see", NOT as a measurement
+  // that the wearer was still.
+  //
+  // The constants are deliberately NOT retuned. Widening the window does not
+  // make any real record we hold produce a step either, so replacement
+  // constants would be exactly as unvalidated as these — they would only hide
+  // the gap behind numbers that look deliberate. Retune against a capture with
+  // an independently known step count, or not at all.
   const w = 9;
   final x = List<double>.filled(n, 0);
   for (int i = 0; i < n; i++) {
@@ -360,8 +395,15 @@ DecodedSample? decodeRecord(String hex) {
     return DecodedSample(
       ts: ts,
       hr: hr,
-      activity: 0,
-      stepsInc: 0,
+      // A 0x28 packet is 20 bytes of timing + HR + R-R + a wearing byte. It
+      // carries NO IMU at all, so there is no motion window to measure —
+      // exactly the absence [DecodedSample.activity] documents, not a measured
+      // 0.0/0. Reporting zero here fabricated "the wrist was perfectly still"
+      // out of bytes that never described motion, which is the same bug this
+      // decoder family was fixed to stop making on the R10 and historical
+      // paths.
+      activity: null,
+      stepsInc: null,
       wristOn: hr > 0,
       recType: 28,
     );

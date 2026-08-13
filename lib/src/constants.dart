@@ -145,7 +145,7 @@ class Cmd {
   static const int ecgSendFilteredData = 0x8B;
   // Signal-processing configuration. Advanced/diagnostic: it retunes the
   // on-strap algorithms, so it can change what the strap itself reports.
-  static const int setSigprocConfig = 0x8A;
+  static const int setSignalConfig = 0x8A;
   // gen5 custom advertising name set/get — the gen5 equivalents of gen4's
   // 0x4C/0x4D, which gen5 does not implement. Safe.
   static const int setCustomAdvertisingName = 0x8C;
