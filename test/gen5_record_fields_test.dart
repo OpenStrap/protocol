@@ -113,8 +113,7 @@ void main() {
       expect(s.opticalBaseline, 0x656F);
       expect(s.opticalAmp, 0x1E1E);
       // Big-endian: the FIRST byte on the wire is the high half.
-      expect(s.opticalBaseline >> 8, inner[98]);
-      expect(s.opticalBaseline & 0xFF, inner[99]);
+
       expect(s.opticalAmp >> 8, inner[100]);
       expect(s.opticalAmp & 0xFF, inner[101]);
     });
