@@ -58,6 +58,8 @@ List<int> _u32le(int v) =>
     [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
 
 void main() {
+  _reqSeqTests();
+
   // ── 1. R-R count / value bounds in the historical record decoder ──────────
   group('R24 R-R intervals are bounded (count + physiological value)', () {
     test('baseline: the unmodified record still decodes its 2 real beats', () {
@@ -461,6 +463,32 @@ void main() {
       for (final bad in ['0g', 'zz', '0x', '00 11', 'a', 'abc']) {
         expect(() => hexToBytes(bad), throwsFormatException, reason: bad);
       }
+    });
+  });
+}
+
+/// The echoed request seq lets a caller tell WHICH outstanding request a reply
+/// answers — see the note in [parseCommandResponse]. Regression: it used to be
+/// dropped on the floor, so every reply for an opcode looked identical and a
+/// caller awaiting one specific read could be satisfied by an earlier one's.
+void _reqSeqTests() {
+  group('cmd_response echoes the request seq', () {
+    test('surfaces inner[3] as req_seq', () {
+      // `_cmdResponse` writes [0x24][seq][opcode] then the payload, so the
+      // payload's first byte IS inner[3] — the echoed seq, here 0x2A.
+      final r = parseCommandResponse(_cmdResponse(0x0B, [0x2A, 0x01]))!;
+      expect(r.decoded['req_seq'], 0x2A);
+    });
+
+    test('two replies to the same opcode are distinguishable', () {
+      final a = parseCommandResponse(_cmdResponse(0x0B, [7, 0x01]))!;
+      final b = parseCommandResponse(_cmdResponse(0x0B, [8, 0x01]))!;
+      expect(a.decoded['req_seq'], isNot(b.decoded['req_seq']));
+    });
+
+    test('a truncated response carries no req_seq rather than a bogus one', () {
+      final r = parseCommandResponse(Uint8List.fromList([0x24, 0x11, 0x0B]))!;
+      expect(r.decoded.containsKey('req_seq'), isFalse);
     });
   });
 }
