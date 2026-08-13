@@ -221,6 +221,17 @@ void main() {
       expect(body.sublist(0, 2), [0x02, 0x03]);
     });
 
+    test('a targeted cancel on the revision-1 body throws, never cancels all',
+        () {
+      // rev 1 has nowhere to put an id and cancels EVERY alarm. Dropping the
+      // id silently would cancel all of them for a caller asking for one.
+      expect(() => cmdDisableAlarm(1, alarmId: 3), throwsArgumentError);
+      // Explicit rev 2 carries it, and omitting the id still means "all".
+      expect(_body(cmdDisableAlarm(1, revision: 2, alarmId: 3))[0], 0x02);
+      expect(_body(cmdDisableAlarm(1, revision: 2, alarmId: 3))[1], 3);
+      expect(_body(cmdDisableAlarm(1))[0], 0x01);
+    });
+
     test('gen5 DISABLE_ALARM is rev 2: 0xFF for all, or one id', () {
       final all = _body(cmdDisableAlarm(1, profile: gen5), profile: gen5);
       expect(all.sublist(0, 2), [0x02, 0xFF]);

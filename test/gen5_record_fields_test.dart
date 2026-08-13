@@ -82,7 +82,7 @@ void main() {
       expect(w.segmentId, w.tsSubsec);
       expect(w.segmentIndex, 56);
       // The deprecated byte read keeps only the low half.
-      // ignore: deprecated_member_use
+      // ignore: deprecated_member_use_from_same_package
       expect(w.rawByte19, w.tsSubsec & 0xFF);
     });
 

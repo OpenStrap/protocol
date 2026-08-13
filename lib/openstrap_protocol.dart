@@ -11,7 +11,15 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 
 // Source 1 — record decoders.
 export 'src/records.dart'
-    show R24, parseR24, FirmwareAwareR24Decoder, R24DecodeStrategy;
+    show
+        R24,
+        parseR24,
+        FirmwareAwareR24Decoder,
+        R24DecodeStrategy,
+        // The historical versions parseR24 can actually decode. Exported so a
+        // caller routes on the real set instead of keeping its own copy, which
+        // silently rots the day this one grows.
+        kKnownRecordVersions;
 // gen5 historical-record decoders (v18/v20/v21/v26) — see gen5_records.dart
 // for why these replace the old, wrong parseGen5Record/{9,12,24} set.
 export 'src/gen5_records.dart'

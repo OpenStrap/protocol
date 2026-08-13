@@ -358,7 +358,8 @@ Uint8List cmdSetAlarm(
     throw ArgumentError.value(pattern.length, 'hapticPattern.length',
         'haptic pattern must be 12 bytes');
   }
-  final slot = _checkAlarmId(index ?? _defaultAlarmId(profile), 'index', profile);
+  final slot =
+      _checkAlarmId(index ?? _defaultAlarmId(profile), 'index', profile);
   if (crescendo != 0 && crescendo != 1) {
     throw ArgumentError.value(crescendo, 'crescendo', 'must be 0 or 1');
   }
@@ -426,9 +427,23 @@ Uint8List cmdRunAlarm(int seq,
 /// gen5 accepts revision 2 ONLY; [revision] is ignored there.
 Uint8List cmdDisableAlarm(int seq,
     {int revision = 1, int? alarmId, BandProfile profile = BandProfile.gen4}) {
+  final rev2 = profile.isGen5 || revision == 2;
+  // Only the revision-2 body has somewhere to put an id. The revision-1 form
+  // cancels EVERY alarm, so silently dropping the id here would cancel all of
+  // them for a caller that asked for one — throw instead of doing something
+  // other than what was asked. Not auto-promoted to revision 2: on gen4 the
+  // revision-1 disable-all is the form verified on hardware, and quietly
+  // sending an unverified body there could leave the alarm armed.
+  if (alarmId != null && !rev2) {
+    throw ArgumentError.value(
+      alarmId,
+      'alarmId',
+      'cancelling one alarm needs revision 2; revision 1 cancels all of them '
+          '(pass revision: 2, or omit alarmId to cancel all)',
+    );
+  }
   final target =
       alarmId == null ? 0xFF : _checkAlarmId(alarmId, 'alarmId', profile);
-  final rev2 = profile.isGen5 || revision == 2;
   final p = rev2 ? [0x02, target] : [revision & 0xff];
   return buildCommand(seq, Cmd.disableAlarm, p, profile);
 }
