@@ -156,12 +156,39 @@ class R10Lite {
   final int tsEpoch; // u32 @[7:11]
   final int hr; // u8 @[17]
   final int counter; // u32 @[3:7]
-  R10Lite(this.tsEpoch, this.hr, this.counter);
+
+  /// Beat-to-beat intervals (ms): declared count @[18], `i16` LE from [19].
+  ///
+  /// Header-ONLY used to mean the R-R block was dropped too. On the historical
+  /// ingest path that is permanent: the record commits as decoded (so it is not
+  /// archived) and the band is then acked to trim it, so beats that were
+  /// physically present in the offloaded bytes had nothing left to recover
+  /// them from. Reports what was ACCEPTED, never what the byte declared.
+  final List<int> rrIntervalsMs;
+
+  R10Lite(this.tsEpoch, this.hr, this.counter,
+      {this.rrIntervalsMs = const []});
 }
 
 R10Lite? parseR10Lite(Uint8List inner) {
   if (inner.length < 18) return null;
-  return R10Lite(u32(inner, 7), inner[17], u32(inner, 3));
+  return R10Lite(u32(inner, 7), inner[17], u32(inner, 3),
+      rrIntervalsMs: _r10Rr(inner));
+}
+
+/// Same offsets and the same accept-only-plausible-values discipline the live
+/// decoder applies (`live.dart`'s `realtimeRr`, R10 branch).
+List<int> _r10Rr(Uint8List inner) {
+  if (inner.length < 19) return const [];
+  final declared = inner[18];
+  if (declared == 0 || declared > kMaxRrPerRecord) return const [];
+  final view = ByteData.sublistView(inner);
+  final out = <int>[];
+  for (var i = 0; i < declared && 19 + 2 * i + 2 <= inner.length; i++) {
+    final v = view.getInt16(19 + 2 * i, Endian.little);
+    if (v >= kMinRrMs && v <= kMaxRrMs) out.add(v);
+  }
+  return out;
 }
 
 // ── Compact realtime HR (small 0x28 packet body) ─────────────────────────────

@@ -87,35 +87,53 @@ void main() {
     });
   });
 
-  group('a gen5 v18 with an unusable accel is archived, not fabricated', () {
-    test('the record is declined so nothing writes a zeroed gravity vector', () {
-      // Keeping the second and reporting only the accel as absent is the right
-      // shape, but it does not survive storage: decoded_onehz's ax/ay/az are
-      // REAL NOT NULL, so absent becomes exact (0,0,0), and zAngle(0,0,0) is
-      // 0.0 rather than NaN — a run of those reads as a perfectly still wrist
-      // in four consumers that never consult the absent-marker. Declining sends
-      // the record to raw_archive with its bytes intact instead, so it can be
-      // re-decoded once the columns are nullable.
+  group('a gen5 v18 with an unusable accel keeps the rest of the record', () {
+    test('an unusable accel is reported ABSENT, not fabricated and not fatal',
+        () {
+      // Declining the whole record used to be the lesser evil, because
+      // decoded_onehz's ax/ay/az were REAL NOT NULL and absent would have been
+      // stored as exact (0,0,0) — a perfectly still wrist. Storage can say
+      // "absent" now (edge schema v39), so an unreadable accel costs the accel
+      // and nothing else: HR, RR, steps and temperature from the same second
+      // survive.
       final inner = Uint8List(kGen5V18InnerLen);
       inner[0] = PacketType.historicalData;
       inner[1] = 18;
       final v = ByteData.sublistView(inner);
       v.setUint32(7, 1780000000, Endian.little);
       inner[14] = 102;
-      v.setFloat32(33, 0.01, Endian.little);
-      v.setFloat32(37, 40.0, Endian.little); // gravity far out of window
-      v.setFloat32(41, 40.0, Endian.little);
-      v.setFloat32(45, 40.0, Endian.little);
-      expect(parseGen5Historical(inner), isNull);
+      v.setFloat32(33, double.nan, Endian.little);
+      v.setFloat32(37, 4.0e6, Endian.little); // beyond any real full scale
+      v.setFloat32(41, 4.0e6, Endian.little);
+      v.setFloat32(45, 4.0e6, Endian.little);
+      final g = parseGen5Historical(inner) as Gen5HistorySample?;
+      expect(g, isNotNull);
+      expect(g!.heartRate, 102);
+      expect(g.gravityG, isEmpty, reason: 'absent, not (0,0,0)');
+      expect(g.dynamicAccelerationG, isNull);
+    });
 
-      // A non-finite dynamic-accel word is declined for the same reason.
-      final nan = Uint8List.fromList(inner);
-      final nv = ByteData.sublistView(nan);
-      nv.setFloat32(33, double.nan, Endian.little);
-      nv.setFloat32(37, 0.0, Endian.little);
-      nv.setFloat32(41, 0.0, Endian.little);
-      nv.setFloat32(45, 1.0, Endian.little);
-      expect(parseGen5Historical(nan), isNull);
+    test('NO gen4 gravity window on gen5: hard motion still decodes', () {
+      // gen4's magSq window [0.25, 3.24] is a bound on a NORMALISED GRAVITY
+      // VECTOR. Gen5's gravityG is a different quantity — per-axis means of
+      // raw accel — so a wrist in hard motion legitimately reads well above
+      // 1.8 g, and the borrowed window rejected the whole record for exactly
+      // the workout seconds that matter.
+      final inner = Uint8List(kGen5V18InnerLen);
+      inner[0] = PacketType.historicalData;
+      inner[1] = 18;
+      final v = ByteData.sublistView(inner);
+      v.setUint32(7, 1780000000, Endian.little);
+      inner[14] = 165; // working hard
+      v.setFloat32(33, 3.5, Endian.little);
+      v.setFloat32(37, 2.5, Endian.little); // magSq = 18.75, far past 3.24
+      v.setFloat32(41, 2.5, Endian.little);
+      v.setFloat32(45, 2.5, Endian.little);
+      final g = parseGen5Historical(inner) as Gen5HistorySample?;
+      expect(g, isNotNull);
+      expect(g!.heartRate, 165);
+      expect(g.gravityG, [2.5, 2.5, 2.5]);
+      expect(g.dynamicAccelerationG, 3.5);
     });
 
     test('a good accel still decodes the whole record', () {
