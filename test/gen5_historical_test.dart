@@ -91,7 +91,7 @@ void main() {
     test('steps + activity', () {
       expect(sample.stepMotionCounter, 50);
       expect(sample.stepCadence, 170);
-      expect(sample.activityClass, 0); // still
+      expect(sample.activityClass, 0); // unknown/unclassified, NOT "still"
     });
 
     test('temperature (gen5-specific scales)', () {
@@ -101,11 +101,10 @@ void main() {
     });
 
     test('optical front-end', () {
-      expect(sample.opticalBaselineA, 101);
-      expect(sample.opticalBaselineB, 111);
-      expect(sample.opticalAmpA, 30);
-      expect(sample.opticalAmpB, 30);
-      expect(sample.isOpticalAmpSentinel, isFalse); // not the 128/128 sentinel
+      // Two BIG-ENDIAN u16s, not four bytes: inner[98:100] and inner[100:102].
+      expect(sample.opticalBaseline, 0x656F);
+      expect(sample.opticalAmp, 0x1E1E);
+      expect(sample.isOpticalAmpSentinel, isFalse); // not the 0x8080 sentinel
     });
 
     test('experimental fields exposed raw, not fabricated', () {
@@ -184,19 +183,17 @@ void main() {
       '4fe15ff5cff405fb33c50080101006cb67c17',
     );
 
-    test(
-        'decodes record_index as u16 (NOT u32 — cross-validated against '
-        'whoop-rs real_frames.json, where consecutive v26 frames give clean '
-        'consecutive u16 record_ids like 48077,48078,48079 — the u32 reading '
-        'jumps erratically because inner[5:7] is a distinct, unrelated field)',
-        () {
+    test('decodes record_index as the shared u32, not a truncated u16', () {
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
       expect(parsed.valid, isTrue);
       final r = parseGen5Historical(parsed.inner);
       expect(r, isA<Gen5PpgWaveform>());
       final wf = r as Gen5PpgWaveform;
       expect(wf.histVersion, 26);
-      expect(wf.recordIndex, 16813); // u32 read would give 25444781 — wrong
+      // Same u32 counter every other version uses. A u16 read truncates to
+      // 16813 and wraps every ~18h; inner[5:7] is this value's high half, not
+      // a separate field.
+      expect(wf.recordIndex, 25444781);
       expect(wf.unix, 1780917232);
       expect(wf.rawByte19, 174);
       expect(wf.burstIndex, 1);
@@ -228,35 +225,33 @@ void main() {
       ]);
     });
 
-    test(
-        'record_index is a clean consecutive counter across real consecutive '
-        'frames (whoop-rs real_frames.json ppg_frames — the strongest ground '
-        'truth: three real captured frames one second apart give record_id '
-        '48077,48078,48079; a u32 read of the same bytes would NOT be '
-        'consecutive since inner[5:7] is a distinct field)', () {
+    test('record_index is one consecutive u32 across real consecutive frames',
+        () {
       final hexes = [
         'aa015000010035412f1a80cdbb7601e700556a33',
         'aa015000010035412f1a80cebb7601e800556a33',
         'aa015000010035412f1a80cfbb7601e900556a33',
       ];
-      final expectedIds = [48077, 48078, 48079];
+      // The full u32 is consecutive; inner[5:7] is its high half, constant
+      // across the capture, not a separate field. A u16 read yields only the
+      // low half (48077..48079), which wraps every ~18h.
+      final expectedIds = [24558541, 24558542, 24558543];
       final expectedUnix = [1783955687, 1783955688, 1783955689];
       for (var i = 0; i < hexes.length; i++) {
-        // These fixtures are truncated (real-world capture excerpt, only the
-        // header + record_index/unix bytes) — long enough to exercise the
-        // shared header parse without needing the full 61-byte v26 payload.
+        // Truncated capture excerpts — header + record_index/unix only, enough
+        // to exercise the shared header parse without the full v26 payload.
         final inner = hex(hexes[i]).sublist(8); // strip the 8-byte gen5 header
         final hdr = Gen5HistoricalHeader.tryParse(inner);
         expect(hdr, isNotNull);
         expect(hdr!.version, 26);
-        // The shared header still reads the WRONG u32 value (inner[3:7]) —
-        // that's fine, only Gen5V26Decoder.decode() applies the v26-specific
-        // u16 correction. Confirm that distinction explicitly here.
-        expect(hdr.recordIndex, isNot(expectedIds[i]));
-        final u16RecordIndex = inner[3] | (inner[4] << 8);
-        expect(u16RecordIndex, expectedIds[i]);
+        expect(hdr.recordIndex, expectedIds[i]);
+        expect(hdr.recordIndex >> 16, 374); // shared high half
         expect(hdr.unix, expectedUnix[i]);
       }
+      // Counter and clock advance together — the two fixtures below are a
+      // v18/v26 pair from one session, so the counter cannot be per-version.
+      expect(
+          expectedIds[2] - expectedIds[0], expectedUnix[2] - expectedUnix[0]);
     });
   });
 
@@ -317,22 +312,17 @@ void main() {
       }
     });
 
-    test('a record too short for the trailing block still decodes its waveform',
-        () {
+    test('a record short of the exact 76-byte length is rejected outright', () {
+      // v26's inner is exactly 76 bytes. A truncated one used to decode its
+      // waveform with the trailing metadata nulled out; it is now rejected,
+      // because a record that is not 76 bytes is not a v26 record and its
+      // "waveform" is whatever bytes happened to arrive.
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
-      final short = Uint8List.fromList(
-        parsed.inner.sublist(0, kGen5V26MinInnerLen),
-      );
-      final wf = parseGen5Historical(short) as Gen5PpgWaveform;
-      expect(wf.ppgWaveform.length, 24);
-      expect(wf.subChannel, 5); // sits before the samples, still readable
-      expect(wf.segmentId, 18350);
-      // The block after the waveform is absent — null, never a stand-in.
-      expect(wf.signalMetric, isNull);
-      expect(wf.gainSetting, isNull);
-      expect(wf.gainIndex, isNull);
-      expect(wf.flagA, isNull);
-      expect(wf.flagB, isNull);
+      expect(parsed.inner.length, 76);
+      for (final len in [67, 75, 74]) {
+        final short = Uint8List.fromList(parsed.inner.sublist(0, len));
+        expect(parseGen5Historical(short), isNull, reason: 'len=$len');
+      }
     });
   });
 
@@ -381,11 +371,26 @@ void main() {
       expect(imu.gyroXdps.first, closeTo(16384 * (2000.0 / 32768.0), 1e-9));
     });
 
-    test('rejects a buffer whose counts are not both 100', () {
+    test('a partly-filled block decodes only the samples it declares', () {
       final inner = buildV21(recordIndex: 1, unix: 1780000000);
-      ByteData.sublistView(inner)
-          .setUint16(622, 99, Endian.little); // countB wrong
-      expect(parseGen5Historical(inner), isNull);
+      ByteData.sublistView(inner).setUint16(622, 40, Endian.little);
+      final r = parseGen5Historical(inner) as Gen5ImuBuffer;
+      // Accel block is still full; the gyro block declared 40, so decoding the
+      // block's full capacity here would emit 60 samples of stale trailing
+      // bytes as if they were real motion.
+      expect(r.countB, 40);
+      expect(r.accelXg, hasLength(100));
+      expect(r.gyroXdps, hasLength(40));
+      expect(r.gyroYdps, hasLength(40));
+      expect(r.gyroZdps, hasLength(40));
+    });
+
+    test('rejects counts outside the block capacity', () {
+      for (final bad in [0, 101]) {
+        final inner = buildV21(recordIndex: 1, unix: 1780000000);
+        ByteData.sublistView(inner).setUint16(622, bad, Endian.little);
+        expect(parseGen5Historical(inner), isNull, reason: 'countB=$bad');
+      }
     });
 
     test(
@@ -510,16 +515,32 @@ void main() {
 
   group('gen5 COMMAND_RESPONSE — battery scale + GET_HELLO', () {
     test('gen5 GET_BATTERY_LEVEL is direct-percent, not deci-percent', () {
-      // inner = [0x24][seq][0x1A][47%] — gen5's direct-percent form.
+      // inner = [0x24][seq][0x1A][echoed seq][status=1][47%] — gen5's
+      // direct-percent form, body starting after the 5-byte response header.
       final inner = Uint8List(6);
       inner[0] = PacketType.commandResponse;
       inner[1] = 0;
       inner[2] = Cmd.getBatteryLevel;
-      inner[3] = 0;
-      inner[4] = 0;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       inner[5] = 47;
       final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
       expect(r.decoded['battery_pct'], 47.0);
+    });
+
+    test('gen5 GET_BATTERY_LEVEL reports nothing when the strap says it failed',
+        () {
+      // On a fuel-gauge error the body is left untouched, so these bytes are
+      // stale — a plausible-looking percentage that was never measured.
+      final inner = Uint8List(6);
+      inner[0] = PacketType.commandResponse;
+      inner[2] = Cmd.getBatteryLevel;
+      inner[3] = 7;
+      inner[4] = 0; // status: failed
+      inner[5] = 47;
+      final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      expect(r.decoded.containsKey('battery_pct'), isFalse);
+      expect(r.decoded['cmd_status'], 0);
     });
 
     test('the same bytes read as gen4 would misinterpret as deci-percent', () {
@@ -537,11 +558,13 @@ void main() {
       inner[0] = PacketType.commandResponse;
       inner[1] = 0;
       inner[2] = Cmd.getHello;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       final payload = Uint8List.sublistView(inner, 3);
-      // device_name @ pay[16]
+      // device_name @ pay[51] — a 30-byte field in the reply body
       final name = 'MyStrap';
       for (int i = 0; i < name.length; i++) {
-        payload[16 + i] = name.codeUnitAt(i);
+        payload[51 + i] = name.codeUnitAt(i);
       }
       // fw_version @ pay[93:97], gated on pay[93]==50
       payload[93] = 50;
@@ -558,6 +581,8 @@ void main() {
       final inner = Uint8List(120);
       inner[0] = PacketType.commandResponse;
       inner[2] = Cmd.getHello;
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: ok
       inner[3 + 93] = 99; // not 50
       final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
       expect(r.decoded.containsKey('fw_version'), isFalse);
@@ -565,27 +590,31 @@ void main() {
   });
 
   group('CONSOLE_LOGS (0x32) decoder', () {
+    // A 0x32 packet carries the EVENT envelope with event id 2: the seq is a
+    // u8 at [1], the id a u16 at [2], and the text starts at [12] — there is
+    // no channel byte. This builder used to write a u16 record_index over the
+    // seq+id field and a fake channel at [12], which matched the decoder's own
+    // (wrong) offsets.
     Uint8List buildConsoleLog(int recordIndex, int unix, String text) {
       final textBytes = text.codeUnits;
-      final inner = Uint8List(13 + textBytes.length);
+      final inner = Uint8List(12 + textBytes.length);
       inner[0] = PacketType.consoleLogs;
-      ByteData.sublistView(inner).setUint16(1, recordIndex, Endian.little);
+      inner[1] = recordIndex;
+      ByteData.sublistView(inner).setUint16(2, 2, Endian.little); // event id
       ByteData.sublistView(inner).setUint32(4, unix, Endian.little);
       ByteData.sublistView(inner).setUint16(8, 0, Endian.little); // subsec
       ByteData.sublistView(inner)
           .setUint16(10, textBytes.length, Endian.little); // chunk_len
-      inner[12] = 1; // channel
-      inner.setRange(13, 13 + textBytes.length, textBytes);
+      inner.setRange(12, 12 + textBytes.length, textBytes);
       return inner;
     }
 
-    test('decodes record_index/unix/channel/text', () {
+    test('decodes record_index/unix/text', () {
       final inner = buildConsoleLog(100, 1780000000,
           '146552119: BLE_CMD: Command Send Historical Data\n');
       final c = parseConsoleLog(inner)!;
       expect(c.recordIndex, 100);
       expect(c.unix, 1780000000);
-      expect(c.channel, 1);
       expect(c.text, '146552119: BLE_CMD: Command Send Historical Data\n');
     });
 

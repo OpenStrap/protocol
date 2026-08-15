@@ -3,3 +3,9 @@ include: package:lints/recommended.yaml
 analyzer:
   language:
     strict-casts: true
+  errors:
+    # we deprecate fields in place instead of renaming them — they have consumers
+    # in edge/analytics and matching sqlite columns. the package keeps reading its
+    # own deprecated symbols on purpose; the warning is aimed at consumers.
+    # (only the 3.5.0 analyzer emits this one, which is how it got past a local run.)
+    deprecated_member_use_from_same_package: ignore
