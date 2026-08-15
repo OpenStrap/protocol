@@ -1,8 +1,11 @@
 // records.dart — 1:1 Dart port of ts/records.ts.
 // Owns the WHOOP historical biometric record decode used by type-47 payloads.
-// PURE Dart — dart:typed_data only.
+// PURE Dart — dart:typed_data plus constants.dart (itself dependency-free),
+// so the packet-type values are not a second copy of the same magic numbers.
 
 import 'dart:typed_data';
+
+import 'constants.dart';
 
 /// Decoded Type-24 historical biometric record.
 class R24 {
@@ -25,17 +28,68 @@ class R24 {
   /// Raw green-LED PPG ADC count @ inner[29] (frame[33]).
   final int ppgGreen;
 
-  /// Raw red/IR-LED PPG ADC count @ inner[31] (frame[35]).
+  /// A u16 read at inner[31] (frame[35]).
+  ///
+  /// NOT a red/IR PPG ADC count, despite the name. inner[32:36] is a
+  /// well-formed float32 — range 0.005–3.44, finite in all 1887 real v24
+  /// records in our parity corpus — so a u16 read at 31 is inner[31] glued to
+  /// that float's mantissa LSB. Its high byte is therefore the low bit of an
+  /// unrelated quantity, and the value as a whole is noise: it is not a field.
+  ///
+  /// Kept and still emitted because it is a live column downstream, not
+  /// because it means anything. inner[31] alone and the float32 at 32 are both
+  /// in [rawTail] (which starts at inner[13], so they are at rawTail bytes 18
+  /// and 19:23) — neither is named here, because we do not know what either is.
+  @Deprecated(
+    'Not a PPG channel: a u16 at inner[31] straddles the float32 at '
+    'inner[32:36], so its high byte is that float\'s mantissa LSB and the '
+    'value is noise. Do not derive anything from it. The underlying bytes are '
+    'available via rawTail.',
+  )
   final int ppgRedIr;
 
   /// Gravity/accel vector (g), 3x float32 @ inner[36:48] (frame[40:52]),
   /// rounded to 4 decimals.
+  ///
+  /// The record carries this vector TWICE: inner[52:64] is byte-identical to
+  /// inner[36:48] in all 1887 real v24 records in our parity corpus. There is
+  /// no second vector to decode, so there is no second field.
+  ///
+  /// The magnitude is NOT calibrated to 1 g. Over those same records |accelG|
+  /// averages 1.046 — about 4.6% high — so anything treating it as absolute g
+  /// inherits that bias; treat it as a relative motion vector. We deliberately
+  /// do NOT apply a correction factor here: a scale derived from one corpus
+  /// would be a fabricated calibration, and it would silently move every value
+  /// downstream code has already stored.
   final List<double> accelG;
 
-  /// Skin-contact quality @ inner[51] (frame[55]) (u8, 0-198).
+  /// The u8 at inner[51] (frame[55]).
+  ///
+  /// NOT a contact quality, and NOT a 0–198 scale. inner[48:52] is a float32:
+  /// integer-valued, ranging ±32608, with inner[48] zero in all 1887 real v24
+  /// records in our parity corpus. inner[51] is that float's sign+exponent
+  /// byte — which is exactly why the "quality" only ever takes the values
+  /// {0, 63–70, 194–198}. Those are IEEE-754 exponents, not a measurement.
+  ///
+  /// Kept and still emitted because it is a live column downstream. Do not
+  /// threshold it, plot it as quality, or infer wear state from it.
+  @Deprecated(
+    'Not a contact quality: inner[51] is the sign+exponent byte of the float32 '
+    'at inner[48:52], which is why its only observed values are {0, 63-70, '
+    '194-198}. There is no contact-quality field here to point at.',
+  )
   final int skinContact;
 
   /// Raw red-channel ADC @ inner[64] (frame[68], WHOOP 4 v24/v12).
+  ///
+  /// WARNING — [spo2RedRaw] and [spo2IrRaw] are ONE signal, not two channels.
+  /// In a real 13-day export, `spo2IrRaw - spo2RedRaw` is a fixed integer
+  /// within a capture session: constant across 178 of 300 hours, covering 61%
+  /// of a million consecutive rows, while both values drift together. Any
+  /// red/IR ratio — and any ratio-of-ratios — built from them therefore
+  /// collapses to a function of one channel's baseline drift, and measures
+  /// that drift rather than oxygenation. They are published because they ARE
+  /// the bytes at those offsets. Do NOT build an SpO2 metric on them.
   ///
   /// Note: WHOOP offsets are often quoted in FRAME-absolute coordinates.
   /// `parseR24` receives the INNER record starting at packet type `0x2f`, so
@@ -44,9 +98,32 @@ class R24 {
   final int spo2RedRaw;
 
   /// Raw IR-channel ADC @ inner[66] (frame[70], WHOOP 4 v24/v12).
+  /// See [spo2RedRaw] — the two are one signal, not a red/IR pair.
   final int spo2IrRaw;
 
-  /// Raw skin-temperature ADC @ inner[68] (frame[72], WHOOP 4 v24/v12).
+  /// The u16 at inner[68] (frame[72], WHOOP 4 v24/v12).
+  ///
+  /// NOT a temperature, despite the name. Checked against a 1,047,400-row real
+  /// export, it is the noisiest value in this block: it moves 5–10 counts per
+  /// second between consecutive 1 Hz samples, while the heart rate carried by
+  /// those same records moves 0.72 bpm/s. Skin temperature cannot do that.
+  /// Whatever this is, it is some fast optical-block quantity.
+  ///
+  /// Two genuinely slow, temperature-shaped candidates do exist in this block
+  /// — the u16 at inner[72] and inner[88], both ~0.02 counts/s — but neither
+  /// is decoded or named here: moving slowly is not evidence of being a
+  /// temperature, and naming one would repeat the mistake this field is. Both
+  /// are in [rawTail] (which starts at inner[13]) for anyone investigating.
+  ///
+  /// Kept and still emitted because it is a live column downstream. Do not
+  /// convert it to °C, trend it as body temperature, or feed it to a
+  /// temperature-based metric.
+  @Deprecated(
+    'Not skin temperature: this u16 moves ~5-10 counts/second between '
+    'consecutive 1 Hz records, which no skin temperature does. No verified '
+    'temperature field is known; the slow candidates at inner[72] and '
+    'inner[88] are unconfirmed and available via rawTail.',
+  )
   final int skinTempRaw;
 
   /// Raw ambient-light ADC @ inner[70] (frame[74], WHOOP 4 v24/v12).
@@ -81,6 +158,12 @@ class R24 {
   }) : _rawTailBytes = rawTailBytes;
 
   /// Map matching the TS `out` shape (snake_case keys) for parity comparison.
+  ///
+  /// The key set is FROZEN: it is checked 1:1 against the golden oracle in
+  /// `decode_parity_cases.json`, and it is a shipped SQLite column set
+  /// downstream. `ppg_red_ir`, `skin_contact` and `skin_temp_raw` are emitted
+  /// here for those two reasons alone — see each field's doc for what the
+  /// bytes actually are (and are not). Adding or removing a key breaks both.
   Map<String, dynamic> toMap() => {
         'ts_epoch': tsEpoch,
         'ts_subsec': tsSubsec,
@@ -129,12 +212,16 @@ double _round(double v, int decimals) {
 }
 
 /// Largest R-R interval count a single 1 s historical record can plausibly
-/// declare. The sibling realtime decoder (live.dart `realtimeRr`) applies the
-/// same ceiling for the same reason: the wire form carries 0–4 beats, so a
-/// larger count byte means we are reading the wrong offset — not a second
-/// containing dozens of heartbeats. A record declaring more than this yields
-/// NO intervals at all (absence), never a truncated read of whatever bytes
-/// happen to follow (ppg, accel float32s, skin contact, spo2, temp, ambient).
+/// declare. A larger count byte means we are reading the wrong offset — not a
+/// second containing dozens of heartbeats. A record declaring more than this
+/// yields NO intervals at all (absence), never a truncated read of whatever
+/// bytes happen to follow (ppg, accel float32s, spo2, the optical block,
+/// ambient).
+///
+/// This is the HISTORICAL-record ceiling only. live.dart's `realtimeRr` uses
+/// it for the R10 form, which declares its count inside a 1920-byte record,
+/// but a 0x28 realtime packet is 20 bytes with exactly four R-R slots, so that
+/// branch caps at 4 instead — see `realtimeRr`.
 const int kMaxRrPerRecord = 8;
 
 /// Physiologically possible beat-to-beat interval bounds, ms — 2500 ms = 24 bpm,
@@ -259,10 +346,25 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 ///     This degrades a firmware layout change to a validated best-effort read
 ///     instead of emitting garbage.
 /// Returns null if too short or if the version-specific decode fails.
+/// Record types 10 and 11 arrive under BOTH packet types, so the gate is
+/// {historical, realtime} — narrowing it to historical alone would break
+/// [frameAccel].
+bool _isRecordPacket(Uint8List inner) =>
+    inner.isNotEmpty &&
+    (inner[0] == PacketType.historicalData ||
+        inner[0] == PacketType.realtimeData);
+
 R24? parseR24(Uint8List inner) {
   if (inner.length < 2) {
     return null;
   }
+  // Every sibling decoder checks inner[0]; this family dispatched purely on
+  // inner[1], which on a control frame is the SEQUENCE byte. A sequence of 24
+  // or 12 lands on the trusted path, which skips the plausibility gate — so a
+  // console-log or command frame whose seq happened to be 24 decoded as a
+  // record, with a heart rate and an accel vector read out of log text. Two in
+  // 256 of any control frame long enough to try.
+  if (!_isRecordPacket(inner)) return null;
 
   final version = inner[1];
   if (version == 25) return _parseV25(inner);
@@ -323,14 +425,23 @@ R24? _parseV24Layout(
   // R-R intervals: rr_count @ [18], then rr_count signed int16 LE from [19].
   //
   // The declared count is UNTRUSTED. Taken raw it addresses up to 255 int16s
-  // starting at [19], which walks straight through ppg@29/31, the accel
-  // float32s@36/40/44, skin contact@51, spo2@64/66, skin temp@68 and
+  // starting at [19], which walks straight through ppg@29, the accel
+  // float32s@36/40/44, the float32@48, spo2@64/66, the u16@68 and
   // ambient@70 — reinterpreting all of them as "beats" that then feed
   // RMSSD/HRV. So: reject an implausible count outright, and accept only
   // values inside the physiological interval range. Both guards run on EVERY
   // path, including the "trusted" v24/v12 one that skips
   // [_physiologicallyPlausible].
-  final declaredRrCount = inner[18];
+  //
+  // And they are read ONLY where the v24 field map itself is confirmed. For
+  // every other version only the HR offset is established — v7 puts HR at 27
+  // and v18 at 14, which is proof the layout differs — so reading rr_count at
+  // 18 and intervals from 19 is reading v24's map over bytes known not to be
+  // v24's. The range filter cannot save that: it only checks 200..2500 ms, and
+  // arbitrary bytes land in range often enough to hand RMSSD a full set of
+  // fabricated beats. HR, timing and accel are what the plausibility gate
+  // actually evidences; beats are not, so they are absent rather than invented.
+  final declaredRrCount = validate ? 0 : inner[18];
   final rrIntervalsMs = <int>[];
   if (declaredRrCount <= kMaxRrPerRecord) {
     for (int i = 0; i < declaredRrCount && 19 + 2 * i + 2 <= inner.length; i++) {
@@ -457,6 +568,7 @@ class FirmwareAwareR24Decoder {
 
   R24? decode(Uint8List inner) {
     if (inner.length < 2) return null;
+    if (!_isRecordPacket(inner)) return null; // see parseR24
     final version = inner[1];
     if (version == 25) return parseR24(inner); // no known firmware variant for v25 yet.
 
@@ -484,3 +596,25 @@ class FirmwareAwareR24Decoder {
     return null; // every strategy failed — caller archives as undecodable, as before.
   }
 }
+
+// ── gen5 (WHOOP 5) historical records ───────────────────────────────────────
+//
+// SUPERSEDED (2026-08, multiband port): this file used to also own a
+// `parseGen5Record` targeting `_gen5NormalHistoryVersions = {9, 12, 24}`.
+// That version set is WRONG — 9/12/24 are WHOOP4's thin/rich HR-only and
+// full-optical layouts, not anything a real WHOOP 5.0/MG strap ships. Both
+// independent reference implementations (whoop-rs, hardware-tested; noop,
+// tens of thousands of captured records across multiple straps/firmware
+// builds) agree that real gen5 historical data (packet type 0x2F) ships
+// hist_version bytes 18, 20, 21, 26 — never 9/12/24. Running gen5 bytes
+// through this file's v24 field map (which is what the old `parseGen5Record`
+// effectively did, gated down to just the HR byte) reads all-zero garbage on
+// real captures — exactly the symptom this file's old doc comment described,
+// which was itself the tell that the version set was wrong, not that gen5's
+// 1 Hz record is "deliberately thin".
+//
+// The real decoders now live in gen5_records.dart: [parseGen5Historical]
+// dispatches to the v18 (per-second biometric summary — the actual gen5
+// analogue of this file's R24/v24), v20 (optical deep buffer), v21 (IMU deep
+// buffer), and v26 (PPG waveform) decoders. See that file for the full field
+// maps and the byte-level verification behind them.

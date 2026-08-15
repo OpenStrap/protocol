@@ -50,7 +50,7 @@ void main() {
       expect(f.inner[1], seq);
       // Rich form: [0x04][index][u32 epoch LE][u16 subsec LE][12-byte pattern].
       expect(f.inner[3], 0x04); // rich-form marker (the form that fires)
-      expect(f.inner[4], 0x00); // default slot index
+      expect(f.inner[4], 0x00); // gen4 default slot — the one a WHOOP 4 fires
       final bd =
           f.inner.buffer.asByteData(f.inner.offsetInBytes, f.inner.length);
       expect(bd.getUint32(5, Endian.little), epoch);
@@ -176,6 +176,82 @@ void main() {
 
       expect(frames.map((f) => f.seq), contains(6));
       expect(frames.every((f) => f.valid), isTrue);
+    });
+  });
+
+  group('dangerousCmds (enforced never-send set)', () {
+    test('includes the confirmed gen5 brick trio 0x8E/0x8F/0x90', () {
+      expect(dangerousCmds.containsAll(<int>{0x8E, 0x8F, 0x90}), isTrue);
+    });
+
+    test('keeps the gen4-empirical device-update trio + destructive singles', () {
+      expect(
+        dangerousCmds,
+        containsAll(<int>[
+          Cmd.startUpdateLoad,
+          Cmd.loadUpdateData,
+          Cmd.processUpdateImage,
+          Cmd.forceTrim,
+          Cmd.rebootStrap,
+          Cmd.powerCycleStrap,
+          Cmd.togglePersistentR21,
+        ]),
+      );
+    });
+
+    test('OpcodeSafety.destructive gen5 opcodes (142-144) are actually enforced', () {
+      final gen5Destructive =
+          OpcodeSafety.destructive.where((o) => o >= 142).toSet();
+      expect(gen5Destructive, {142, 143, 144});
+      expect(dangerousCmds.containsAll(gen5Destructive), isTrue,
+          reason: 'classification-only set must be blocked by the enforced set');
+    });
+  });
+
+  group('frame-rev-2 hardening', () {
+    test('gen5 rev-2 frame passes CRC but is flagged non-decodable', () {
+      final raw = Uint8List.fromList(
+          buildCommand(3, Cmd.getHello, const [0x01], BandProfile.gen5));
+
+      final rev1 = parseFrame(raw, profile: BandProfile.gen5)!;
+      expect(rev1.valid, isTrue);
+      expect(rev1.frameRevOk, isTrue);
+      expect(rev1.decodable, isTrue);
+
+      // Forge a rev-2 frame: bump the header revision byte (header[1]) and fix
+      // the header crc16 so the header-integrity check still passes — i.e. the
+      // frame stays .valid, exactly the latent case that used to mis-decode.
+      raw[1] = 0x02;
+      final c = crc16Modbus(raw.sublist(0, 6));
+      raw[6] = c & 0xFF;
+      raw[7] = (c >> 8) & 0xFF;
+
+      final rev2 = parseFrame(raw, profile: BandProfile.gen5)!;
+      expect(rev2.valid, isTrue, reason: 'both CRCs still pass');
+      expect(rev2.frameRevOk, isFalse, reason: 'revision byte 0x02 is not rev-1');
+      expect(rev2.decodable, isFalse,
+          reason: 'surfaced, not silently decoded as rev-1');
+    });
+
+    test('gen4 has no revision byte and is always treated as rev-1', () {
+      final f = parseFrame(buildCommand(0, Cmd.getHelloHarvard, const [0x00]))!;
+      expect(f.frameRevOk, isTrue);
+      expect(f.decodable, isTrue);
+    });
+
+    test('decodeFrame surfaces a rev-2 frame instead of decoding rev-1 fields', () {
+      final raw = Uint8List.fromList(
+          buildCommand(3, Cmd.getHello, const [0x01], BandProfile.gen5));
+      raw[1] = 0x02; // bump frame revision
+      final c = crc16Modbus(raw.sublist(0, 6)); // keep header CRC valid
+      raw[6] = c & 0xFF;
+      raw[7] = (c >> 8) & 0xFF;
+
+      final f = parseFrame(raw, profile: BandProfile.gen5)!;
+      expect(f.valid, isTrue);
+      final d = decodeFrame(f, profile: BandProfile.gen5);
+      expect(d.kind, 'unsupported_frame_rev',
+          reason: 'must not be decoded with rev-1 offsets');
     });
   });
 }

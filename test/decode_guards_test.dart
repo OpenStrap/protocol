@@ -50,14 +50,20 @@ Uint8List _realtimeHrFrame({
   return b;
 }
 
-/// Wrap a COMMAND_RESPONSE body: `[0x24][seq][opcode] + payload`.
-Uint8List _cmdResponse(int opcode, List<int> payload) =>
-    Uint8List.fromList([0x24, 0x11, opcode, ...payload]);
+/// Wrap a COMMAND_RESPONSE body the way a strap actually frames one:
+/// `[0x24][strap seq][opcode][echoed request seq][status] + body`.
+/// [body] is the command's own reply payload, i.e. what the strap writes after
+/// that 5-byte header — so tests state real offsets rather than the parser's.
+Uint8List _cmdResponse(int opcode, List<int> body,
+        {int status = 1, int reqSeq = 0x07}) =>
+    Uint8List.fromList([0x24, 0x11, opcode, reqSeq, status, ...body]);
 
 List<int> _u32le(int v) =>
     [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff];
 
 void main() {
+  _reqSeqTests();
+
   // ── 1. R-R count / value bounds in the historical record decoder ──────────
   group('R24 R-R intervals are bounded (count + physiological value)', () {
     test('baseline: the unmodified record still decodes its 2 real beats', () {
@@ -80,8 +86,8 @@ void main() {
       // v24 and v12 skip the physiological-plausibility gate entirely, so the
       // R-R guard has to be independent of it.
       for (final version in [24, 12]) {
-        final r = parseR24(
-            hexToBytes(_patched(_goodV24, {1: version, 18: 0xff})))!;
+        final r =
+            parseR24(hexToBytes(_patched(_goodV24, {1: version, 18: 0xff})))!;
         expect(r.rrCount, 0, reason: 'v$version must still bound the count');
         expect(r.rrIntervalsMs, isEmpty, reason: 'v$version');
       }
@@ -147,8 +153,8 @@ void main() {
 
     test('the guard covers the trusted v12 path, not just the validated ones',
         () {
-      final r = parseR24(
-          hexToBytes(_patched(_goodV24, {1: 12, ...at(36, nan)})));
+      final r =
+          parseR24(hexToBytes(_patched(_goodV24, {1: 12, ...at(36, nan)})));
       expect(r, isNull);
     });
 
@@ -308,7 +314,11 @@ void main() {
     test('the RICH (0x04) form reads the epoch at offset 2', () {
       // [0x04][u8 index][u32 epoch][u16 subsec][12-byte haptic pattern]
       final payload = <int>[
-        0x04, 0x00, ..._u32le(epoch), 0x00, 0x40,
+        0x04,
+        0x00,
+        ..._u32le(epoch),
+        0x00,
+        0x40,
         ...kDefaultAlarmHaptics,
       ];
       expect(payload.length, 20);
@@ -404,8 +414,8 @@ void main() {
         () {
       // u16 @1 = 0x03ed = 1005 → 100.5%, which is not a battery percentage.
       // Every later offset is 0xffff, so nothing else qualifies → null.
-      final payload = Uint8List.fromList(
-          [0x00, 0xed, 0x03, ...List<int>.filled(9, 0xff)]);
+      final payload =
+          Uint8List.fromList([0x00, 0xed, 0x03, ...List<int>.filled(9, 0xff)]);
       expect(parseHello(payload).batteryPct, isNull);
     });
 
@@ -452,8 +462,8 @@ void main() {
       // rawTail is encoded lazily, so the record must own its bytes: mutating
       // the caller's buffer afterwards must not change what it reports.
       inner[13] = before ^ 0xFF;
-      expect(rec.rawTail.substring(0, 2),
-          before.toRadixString(16).padLeft(2, '0'),
+      expect(
+          rec.rawTail.substring(0, 2), before.toRadixString(16).padLeft(2, '0'),
           reason: 'rawTail must reflect parse time, not later mutation');
     });
 
@@ -461,6 +471,36 @@ void main() {
       for (final bad in ['0g', 'zz', '0x', '00 11', 'a', 'abc']) {
         expect(() => hexToBytes(bad), throwsFormatException, reason: bad);
       }
+    });
+  });
+}
+
+/// The echoed request seq lets a caller tell WHICH outstanding request a reply
+/// answers — see the note in [parseCommandResponse]. Regression: it used to be
+/// dropped on the floor, so every reply for an opcode looked identical and a
+/// caller awaiting one specific read could be satisfied by an earlier one's.
+void _reqSeqTests() {
+  group('cmd_response echoes the request seq', () {
+    test('surfaces inner[3] as req_seq', () {
+      // `_cmdResponse` frames a real response: [0x24][seq][opcode] then the
+      // echoed request seq and status, then the body.
+      final r =
+          parseCommandResponse(_cmdResponse(0x0B, const [0x01], reqSeq: 0x2A))!;
+      expect(r.decoded['req_seq'], 0x2A);
+      expect(r.decoded['cmd_status'], 1);
+    });
+
+    test('two replies to the same opcode are distinguishable', () {
+      final a =
+          parseCommandResponse(_cmdResponse(0x0B, const [0x01], reqSeq: 7))!;
+      final b =
+          parseCommandResponse(_cmdResponse(0x0B, const [0x01], reqSeq: 8))!;
+      expect(a.decoded['req_seq'], isNot(b.decoded['req_seq']));
+    });
+
+    test('a truncated response carries no req_seq rather than a bogus one', () {
+      final r = parseCommandResponse(Uint8List.fromList([0x24, 0x11, 0x0B]))!;
+      expect(r.decoded.containsKey('req_seq'), isFalse);
     });
   });
 }

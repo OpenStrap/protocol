@@ -47,12 +47,12 @@ class R24 {
   final int rrCount;          // 0-4 beat-to-beat intervals this second
   final List<int> rrIntervalsMs;
   final int ppgGreen;         // raw green-LED PPG ADC @ inner[29]
-  final int ppgRedIr;         // raw red/IR-LED PPG ADC @ inner[31]
+  final int ppgRedIr;         // DEPRECATED — a u16@31 straddling the float32 at 32
   final List<double> accelG;  // 3x float32 gravity vector @ inner[36:48]
-  final int skinContact;      // contact QUALITY @ inner[51] — NOT wear/on-wrist state
+  final int skinContact;      // DEPRECATED — the float32@48's sign+exponent byte
   final int spo2RedRaw;       // raw red-channel ADC @ inner[64]
   final int spo2IrRaw;        // raw IR-channel ADC @ inner[66]
-  final int skinTempRaw;      // raw skin-temp ADC @ inner[68]
+  final int skinTempRaw;      // DEPRECATED — not temperature; moves ~5-10 counts/s
   final int ambientRaw;       // raw ambient-light ADC @ inner[70]
   // ...
 }
@@ -67,10 +67,19 @@ if (sample != null) {
 }
 ```
 
-All the SpO2/skin-temp/ambient fields are **raw relative ADC counts**, not calibrated
-units — there's no absolute % or °C conversion here, and there shouldn't be one anywhere
-downstream either. `skinContact` is a contact-quality signal, not a wear-state flag —
-don't use it to decide if the band is on the wrist.
+All the SpO2/ambient fields are **raw relative ADC counts**, not calibrated units —
+there's no absolute % or °C conversion here, and there shouldn't be one anywhere
+downstream either.
+
+Three of these turned out not to be what their names say, so they're deprecated but
+still emitted (renaming them would break the app and orphan shipped DB columns):
+`ppgRedIr` is a u16 read at inner[31] that straddles the float32 at inner[32:36];
+`skinContact` is that float's sign+exponent byte, which is why it only ever reads
+{0, 63-70, 194-198}; and `skinTempRaw` is not temperature — it moves 5-10 counts every
+second, where a real body-temperature signal moves ~0.02. Don't build anything new on
+them. `spo2RedRaw`/`spo2IrRaw` are real bytes, but they move in lockstep with a fixed
+offset within a session, so a red/IR ratio built from them tracks one channel's drift,
+not oxygenation.
 
 Historical records don't all ship the same layout, and finding that out cost more time
 than it should have. `parseR24` decodes v24/v12 verbatim; `FirmwareAwareR24Decoder`

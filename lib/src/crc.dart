@@ -56,3 +56,23 @@ int crc32(List<int> data) {
   }
   return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
 }
+
+/// CRC-16/MODBUS (init 0xFFFF, reflected poly 0xA001, no final XOR) over the
+/// WHOOP 5 (gen5 / "fd4b") 8-byte frame header bytes [0:6]. WHOOP 4 (gen4)
+/// frames use [crc8] for header integrity instead; the payload trailer stays
+/// [crc32] on BOTH generations. Verified byte-exact against the gen5 client
+/// HELLO frame (header `aa 01 08 00 00 01` → 0x71E6).
+int crc16Modbus(List<int> data) {
+  int crc = 0xFFFF;
+  for (final b in data) {
+    crc ^= b & 0xFF;
+    for (int i = 0; i < 8; i++) {
+      if ((crc & 1) != 0) {
+        crc = (crc >> 1) ^ 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc & 0xFFFF;
+}
