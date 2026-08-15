@@ -46,6 +46,35 @@ void main() {
       );
     });
 
+    test('enter high-frequency sync rejects what gen5 rejects, gen4 unchanged',
+        () {
+      // gen5 refuses interval <= 60 and duration >= 28800, so those frames just
+      // mean the mode silently never engages.
+      expect(
+          () => cmdEnterHighFreqSync(1,
+              intervalSeconds: 60,
+              durationSeconds: 900,
+              profile: BandProfile.gen5),
+          throwsArgumentError);
+      expect(
+          () => cmdEnterHighFreqSync(1,
+              intervalSeconds: 300,
+              durationSeconds: 28800,
+              profile: BandProfile.gen5),
+          throwsArgumentError);
+      expect(
+          cmdEnterHighFreqSync(1,
+              intervalSeconds: 61,
+              durationSeconds: 28799,
+              profile: BandProfile.gen5),
+          isNotNull);
+      // gen4's limits are unverified, so it keeps the permissive u16 range —
+      // 60 is what the app actually sends today and must not start throwing.
+      expect(
+          cmdEnterHighFreqSync(1, intervalSeconds: 60, durationSeconds: 900),
+          isNotNull);
+    });
+
     test('exit high-frequency sync is payloadless', () {
       final frame = parseFrame(cmdExitHighFreqSync(0x34))!;
       expect(frame.valid, isTrue);

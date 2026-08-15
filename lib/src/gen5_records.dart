@@ -40,6 +40,8 @@ ByteData _view(Uint8List b) =>
 /// toward +Infinity). Non-finite input passed through unchanged — see
 /// records.dart's `_jsRound` doc for why: folding NaN to 0.0 here would turn
 /// "these bytes are not the field this map claims" into a fabricated reading.
+double? _finiteOrNull(double v) => v.isFinite ? v : null;
+
 double _round(double v, int decimals) {
   if (!v.isFinite) return v;
   double p = 1;
@@ -436,6 +438,17 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
 /// fields.
 const int kGen5V18InnerLen = 112;
 
+/// Shortest v18 inner every field read below stays inside (the last one is the
+/// f32 at 105).
+///
+/// This, not [kGen5V18InnerLen], is the ACCEPTANCE gate. Requiring exactly 112
+/// is a stricter claim than the field map needs, and gen5 has never run against
+/// real hardware here — v18 is the only gen5 record that becomes a 1 Hz sample,
+/// so if real inners are any other length the band yields zero rows and
+/// everything lands in the archive. A prior lenient-decode fix on this branch
+/// exists precisely because a strict gate rejected real captures.
+const int kGen5V18MinReadableLen = 109;
+
 @Deprecated('v18 inner is exactly 112 bytes, not a floor — use kGen5V18InnerLen')
 const int kGen5V18MinInnerLen = kGen5V18InnerLen;
 
@@ -447,7 +460,7 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
 
   @override
   bool matches(Uint8List inner) =>
-      inner.length == kGen5V18InnerLen && inner[1] == 18;
+      inner.length >= kGen5V18MinReadableLen && inner[1] == 18;
 
   @override
   Gen5HistorySample? decode(Uint8List inner) {
@@ -470,6 +483,22 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       }
     }
 
+    // A bad accel costs the WHOLE record, deliberately, and this is the lesser
+    // of two bad options until the storage can say "absent".
+    //
+    // Keeping the record and reporting only the accel as absent is the right
+    // shape and was tried. It does not survive persistence: decoded_onehz's
+    // ax/ay/az are REAL NOT NULL, so an absent vector is written as exact
+    // (0, 0, 0), and zAngle(0,0,0) is 0.0 rather than NaN — a run of those
+    // reads as a perfectly still wrist. Only the van Hees coverage gate
+    // consults the absent-marker; immobility, auto-workout detection and the
+    // ENMO feeds all take the axes raw, so the substituted zeros would become
+    // confident stillness in four places instead of an honest gap in one.
+    //
+    // Returning null archives the record with its bytes intact, so nothing is
+    // lost — it can be re-decoded once the columns are nullable and the readers
+    // are absence-aware. Widening this window (it was 2.25) already cut how
+    // often it fires.
     final dynAccel = _round(v.getFloat32(33, Endian.little), 4);
     if (!dynAccel.isFinite || dynAccel < 0 || dynAccel > 8) return null;
 
@@ -478,10 +507,8 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
     final gz = _round(v.getFloat32(45, Endian.little), 4);
     if (!gx.isFinite || !gy.isFinite || !gz.isFinite) return null;
     // These are per-axis means of raw accel, NOT a normalised gravity vector,
-    // so a worn strap in motion legitimately exceeds 1.5 g. The old 2.25 ceiling
-    // threw away whole records — HR and RR included — for seconds that were only
-    // moving. Use the same window gen4 uses (records.dart), and reject only
-    // physically impossible vectors.
+    // so a worn strap in motion legitimately exceeds 1.5 g. Same window gen4
+    // uses (records.dart); reject only physically impossible vectors.
     final magSq = gx * gx + gy * gy + gz * gz;
     if (magSq < 0.25 || magSq > 3.24) return null; // 0.5g..1.8g
 
@@ -931,7 +958,10 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// f32 LE @ inner[67:71] (frame-abs 75). Tracks with [flagA]/[flagB] as a
   /// per-record signal-quality indicator where LOW means a clean record, but
   /// the scale is unpinned. Exposed raw.
-  final double signalMetric;
+  /// Null when the bytes are not finite. v18 checks every float it reads; this
+  /// one did not, so a corrupt frame put NaN/Inf into a value the doc invites
+  /// callers to use as a quality weight.
+  final double? signalMetric;
 
   /// Front-end gain configuration @ inner[71] / inner[72] (frame-abs 79/80).
   /// Each [subChannel] runs a characteristic gain, adjusted within a range.
@@ -1026,7 +1056,7 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
       burstIndex: inner[13],
       frontEndMetaRaw: v.getUint16(15, Endian.little),
       subChannel: inner[17],
-      signalMetric: v.getFloat32(67, Endian.little),
+      signalMetric: _finiteOrNull(v.getFloat32(67, Endian.little)),
       gainSetting: inner[71],
       gainIndex: inner[72],
       flagA: inner[73],

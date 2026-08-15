@@ -153,6 +153,22 @@ Uint8List cmdEnterHighFreqSync(int seq,
     throw ArgumentError.value(
         durationSeconds, 'durationSeconds', 'must fit in u16');
   }
+  // gen5 refuses interval <= 60 or duration >= 28800 outright and answers with
+  // an "Invalid parameters" reply, so a frame outside that range just means the
+  // mode silently never engages — the same class of failure the profile fix
+  // above addressed. Enforced for gen5 only: the equivalent bounds on gen4 are
+  // unknown, and gen4 is the generation that demonstrably works, so it keeps
+  // the permissive u16 range rather than inheriting a limit we cannot check.
+  if (profile.isGen5) {
+    if (intervalSeconds <= 60) {
+      throw ArgumentError.value(intervalSeconds, 'intervalSeconds',
+          'gen5 requires > 60 seconds');
+    }
+    if (durationSeconds >= 28800) {
+      throw ArgumentError.value(
+          durationSeconds, 'durationSeconds', 'gen5 requires < 28800 seconds');
+    }
+  }
   final payload = ByteData(5)
     ..setUint8(0, 0x02)
     ..setUint16(1, intervalSeconds, Endian.little)
@@ -167,10 +183,15 @@ Uint8List cmdSelectWrist(int seq, WristSelection selection,
         {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.selectWrist, [revision1, selection.value], profile);
 
-// Live streams. Optical is WRIST-GATED (0x6B only) — never force (0x6C), and
-// never persist. The persistent OPTICAL save is 0x99, and that is the one that
-// causes the stuck-green-LED / battery-drain footgun; 0x9A is the persistent
-// IMU save (a separate command, also blocked).
+// Live streams. Never persist optical: the persistent OPTICAL save is 0x99 and
+// that is the one that causes the stuck-green-LED / battery-drain footgun; 0x9A
+// is the persistent IMU save (a separate command, also blocked).
+//
+// ⚠ On gen5 the two optical opcodes are the REVERSE of what this comment used
+// to claim: 0x6B is the save-to-history toggle and 0x6C is the realtime stream.
+// That puts [cmdEnableOptical] (0x6B) next to the 0x99 persistent-save family
+// rather than next to a live stream. Unconfirmed for gen4, so the opcodes are
+// left pointed where they are — only the description is corrected.
 Uint8List cmdToggleHr(int seq, bool on) =>
     buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00]);
 
@@ -383,16 +404,17 @@ Uint8List cmdSetAlarm(
 /// Read back the armed alarm (GET_ALARM_TIME = 0x43).
 ///
 /// gen4 takes the plain revision byte `[0x01]`. gen5 reads one slot at a time
-/// and takes the alarm id ALONE as the first body byte (1..6, default 1) — it
-/// is the id that is range-checked there, not a revision. Sending `[0x04][id]`
-/// reads slot 4 and ignores the id.
+/// and takes `[0x04][id]` — revision 4 FIRST, then the alarm id (1..6). Sending
+/// the bare id is rejected as an unsupported revision for every id but 4, so
+/// the read never lands. Every gen5 alarm opcode is rev-then-id (RUN 0x44 is
+/// `[0x02][id]`, DISABLE 0x45 is `[0x02][0xFF|id]`); this is not the exception.
 Uint8List cmdGetAlarmTime(int seq,
         {int alarmId = 1, BandProfile profile = BandProfile.gen4}) =>
     buildCommand(
       seq,
       Cmd.getAlarmTime,
       profile.isGen5
-          ? <int>[_checkAlarmId(alarmId, 'alarmId', profile)]
+          ? <int>[0x04, _checkAlarmId(alarmId, 'alarmId', profile)]
           : const <int>[revision1],
       profile,
     );
@@ -481,12 +503,10 @@ Uint8List cmdSendHistoricalGen5(int seq) =>
 // ── gen5 clock (SET_CLOCK_MAVERICK=146 / GET_CLOCK_GEN5=147) ───────────────
 //
 // gen5 replaces gen4's SET_CLOCK(0x0A)/GET_CLOCK(0x0B) with distinct opcode
-// VALUES (§1.4) — the payload shapes are otherwise unverified for gen5 on
-// real hardware, so these mirror [cmdSetClock]/[cmdGetClock]'s
-// hardware-verified gen4 payload shape (8-byte two-u32 form) as the
-// best-supported assumption, clearly marked: hardware verification for gen5
-// specifically is still needed before relying on this to actually latch the
-// RTC on a real Maverick/5.0 strap.
+// VALUES (§1.4). The bodies are NOT gen4's 8-byte two-u32 form — see each
+// builder's own doc for the shape it sends. Still unverified against a real
+// strap end to end: the bytes are right, but nothing here has watched an RTC
+// actually latch.
 
 /// gen5 SET_CLOCK_MAVERICK (146).
 ///

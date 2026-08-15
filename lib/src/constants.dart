@@ -1,18 +1,6 @@
 // Protocol constants — WHOOP 4.0 protocol (Gen4 / "Harvard").
 // PURE Dart. See PROTOCOL.md §1–2.
 
-/// Gen4 / "Harvard" GATT service + characteristic UUIDs (the reference client uuids_for).
-class GattUuids {
-  static const String service = '61080001-8d6d-82b8-614a-1c8cb0f8dcc6';
-  static const String cmdTo = '61080002-8d6d-82b8-614a-1c8cb0f8dcc6'; // write
-  static const String cmdFrom =
-      '61080003-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
-  static const String events = '61080004-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
-  static const String data = '61080005-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
-  static const String memfault =
-      '61080007-8d6d-82b8-614a-1c8cb0f8dcc6'; // notify
-}
-
 const int sof = 0xAA; // start of frame
 const int revision1 = 0x01; // magic first byte for *_HARVARD / 2-byte toggles
 const int hapticShortPulse = 2;
@@ -55,8 +43,12 @@ class Cmd {
   static const int historicalDataResult = 0x17; // the batch ACK
   // DANGER — never send. Body is NOT empty and is NOT a range/erase: it is an
   // 8-byte `[u32 trim_page LE][u32 wrap_count LE]` — the
-  // same 8 bytes as the HISTORY_END trim token. It advances the strap's flash
-  // trim pointer, so a wrong value discards unsynced records.
+  // same 8 bytes as the HISTORY_END trim token. NOT a range: the two words are
+  // a single TARGET (trim_page, wrap_count) fed straight to the trim, so a
+  // wrong value discards unsynced records. Two sentinels, both requiring the
+  // pair: 0xFEFEFEFE erases everything, 0xFDFDFDFD resets the trim and read
+  // pointers to oldest (i.e. re-serve all of flash). 0xFFFFFFFF in the first
+  // word is a no-op, so it is a safe probe.
   static const int forceTrim = 0x19;
   static const int getBatteryLevel = 0x1A;
   static const int rebootStrap = 0x1D; // DANGER
@@ -116,8 +108,10 @@ class Cmd {
   // Turn the BLE UART (console/log) service off. Safe, but it is how console
   // logs stop arriving — do not send it while debugging.
   static const int disableBleUart = 0x67;
-  // Persist the IMU data setting. Safe-ish, but it is a stored setting, not a
-  // session toggle: it survives a reboot (contrast TOGGLE_IMU_MODE, 0x6A).
+  // Writes no non-volatile CONFIG, despite the name — it posts an event and
+  // nothing else. Not the same as harmless: the capture it starts keeps writing
+  // IMU records to the flash log until it is switched off or the strap reboots.
+  // The persistent IMU save is TOGGLE_PERSISTENT_R21 (0x9A), gated below.
   static const int saveImuData = 0x69;
   static const int toggleImuMode = 0x6A;
   static const int enableOpticalData = 0x6B;
@@ -154,7 +148,9 @@ class Cmd {
   // Override the strap's on/off-body decision. Advanced: while overridden the
   // strap's own wear detection no longer reflects reality.
   static const int wearDetectOverride = 0x94;
-  static const int setLedAccessibility = 0x95; // LED accessibility mode. Safe.
+  // LED accessibility mode. Writes the non-volatile config store, so it
+  // survives a reboot — see dangerousCmds.
+  static const int setLedAccessibility = 0x95;
   // Gyroscope enable / status. Safe, but the gyro is a real power draw.
   static const int gyroEnable = 0x96;
   static const int gyroStatus = 0x98;
@@ -261,6 +257,17 @@ const Set<int> dangerousCmds = {
   Cmd.wearDetectOverride,
   // Persistent optical save — the stuck-LED / battery-drain footgun.
   Cmd.persistentOpticalSave,
+  // Both write the non-volatile config store, and neither has a caller: gating
+  // them costs nothing today and stops an accidental first use.
+  //
+  // The persistent commands behind a user action — alarms, strap rename — are
+  // deliberately NOT here, same carve-out as the R22 sequence below: this gate
+  // exists to stop a command being sent by accident, not to stop one the user
+  // asked for. Note that is about intent, not mechanism — arming an alarm has a
+  // grace-window retry timer that re-sends it, so "no automatic path" would be
+  // too strong a claim.
+  Cmd.setLedAccessibility,
+  Cmd.setSignalConfig,
   // Erases the pairing: the link drops and the user must re-pair by hand.
   Cmd.forgetBonds,
   Cmd.rebootStrap,

@@ -175,6 +175,20 @@ class FrameReassembler {
       final frame =
           parseFrame(Uint8List.fromList(_buf.sublist(0, total)), profile: profile);
       if (frame != null) out.add(frame);
+      if (frame != null && !frame.crc32Ok) {
+        // The length field is covered only by the header check — 8 bits on
+        // gen4 — so roughly 1 in 254 corrupt length pairs still passes it. A
+        // payload CRC32 failure means `declared` itself cannot be trusted, and
+        // consuming it swallows every frame packed in behind this one: a single
+        // corrupted length field costs up to 4090 bytes of good stream, leaving
+        // one CRC failure as the only trace while the band goes on to trim
+        // records we never banked. Resync instead of stepping over it.
+        //
+        // The frame is still emitted above, so corruption accounting sees it;
+        // `valid` is false, so nothing ingests it as records.
+        if (!resync()) break;
+        continue;
+      }
       _buf.removeRange(0, total);
       // skip inter-record null padding
       int i = 0;

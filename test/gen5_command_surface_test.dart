@@ -244,14 +244,15 @@ void main() {
       expect(_body(cmdDisableAlarm(1))[0], 0x01);
     });
 
-    test('GET_ALARM_TIME is [0x01] on gen4 and the bare slot id on gen5', () {
+    test('GET_ALARM_TIME is [0x01] on gen4 and [0x04][id] on gen5', () {
       expect(_body(cmdGetAlarmTime(1))[0], 0x01);
-      // gen5 range-checks the FIRST body byte as the alarm id, so a leading
-      // 0x04 would read slot 4 and throw the real id away.
+      // gen5 checks body[0] as a REVISION and must see 4, then reads the id
+      // from body[1]. A bare id is rejected as an unsupported revision.
       final g5 =
           _body(cmdGetAlarmTime(1, alarmId: 3, profile: gen5), profile: gen5);
-      expect(g5[0], 3);
-      expect(_body(cmdGetAlarmTime(1, profile: gen5), profile: gen5)[0], 1);
+      expect(g5.sublist(0, 2), [0x04, 3]);
+      expect(_body(cmdGetAlarmTime(1, profile: gen5), profile: gen5).sublist(0, 2),
+          [0x04, 1]);
       expect(() => cmdGetAlarmTime(1, alarmId: 0, profile: gen5),
           throwsArgumentError);
     });

@@ -38,6 +38,10 @@ export 'src/gen5_records.dart'
         Gen5V21Decoder,
         Gen5V26Decoder,
         kGen5HistoricalDecoders,
+        // The exact lengths are the live names; the *MinInnerLen* aliases below
+        // are deprecated and exported only so existing callers still resolve.
+        kGen5V18InnerLen,
+        kGen5V26InnerLen,
         kGen5V18MinInnerLen,
         kGen5V20InnerLen,
         kGen5V21InnerLen,

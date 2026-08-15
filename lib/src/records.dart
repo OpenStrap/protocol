@@ -1,8 +1,11 @@
 // records.dart — 1:1 Dart port of ts/records.ts.
 // Owns the WHOOP historical biometric record decode used by type-47 payloads.
-// PURE Dart — dart:typed_data only.
+// PURE Dart — dart:typed_data plus constants.dart (itself dependency-free),
+// so the packet-type values are not a second copy of the same magic numbers.
 
 import 'dart:typed_data';
+
+import 'constants.dart';
 
 /// Decoded Type-24 historical biometric record.
 class R24 {
@@ -343,10 +346,25 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 ///     This degrades a firmware layout change to a validated best-effort read
 ///     instead of emitting garbage.
 /// Returns null if too short or if the version-specific decode fails.
+/// Record types 10 and 11 arrive under BOTH packet types, so the gate is
+/// {historical, realtime} — narrowing it to historical alone would break
+/// [frameAccel].
+bool _isRecordPacket(Uint8List inner) =>
+    inner.isNotEmpty &&
+    (inner[0] == PacketType.historicalData ||
+        inner[0] == PacketType.realtimeData);
+
 R24? parseR24(Uint8List inner) {
   if (inner.length < 2) {
     return null;
   }
+  // Every sibling decoder checks inner[0]; this family dispatched purely on
+  // inner[1], which on a control frame is the SEQUENCE byte. A sequence of 24
+  // or 12 lands on the trusted path, which skips the plausibility gate — so a
+  // console-log or command frame whose seq happened to be 24 decoded as a
+  // record, with a heart rate and an accel vector read out of log text. Two in
+  // 256 of any control frame long enough to try.
+  if (!_isRecordPacket(inner)) return null;
 
   final version = inner[1];
   if (version == 25) return _parseV25(inner);
@@ -414,7 +432,16 @@ R24? _parseV24Layout(
   // values inside the physiological interval range. Both guards run on EVERY
   // path, including the "trusted" v24/v12 one that skips
   // [_physiologicallyPlausible].
-  final declaredRrCount = inner[18];
+  //
+  // And they are read ONLY where the v24 field map itself is confirmed. For
+  // every other version only the HR offset is established — v7 puts HR at 27
+  // and v18 at 14, which is proof the layout differs — so reading rr_count at
+  // 18 and intervals from 19 is reading v24's map over bytes known not to be
+  // v24's. The range filter cannot save that: it only checks 200..2500 ms, and
+  // arbitrary bytes land in range often enough to hand RMSSD a full set of
+  // fabricated beats. HR, timing and accel are what the plausibility gate
+  // actually evidences; beats are not, so they are absent rather than invented.
+  final declaredRrCount = validate ? 0 : inner[18];
   final rrIntervalsMs = <int>[];
   if (declaredRrCount <= kMaxRrPerRecord) {
     for (int i = 0; i < declaredRrCount && 19 + 2 * i + 2 <= inner.length; i++) {
@@ -541,6 +568,7 @@ class FirmwareAwareR24Decoder {
 
   R24? decode(Uint8List inner) {
     if (inner.length < 2) return null;
+    if (!_isRecordPacket(inner)) return null; // see parseR24
     final version = inner[1];
     if (version == 25) return parseR24(inner); // no known firmware variant for v25 yet.
 

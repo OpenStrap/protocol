@@ -567,7 +567,16 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     final at = op == Cmd.getClockGen5 ? 3 : 2;
     final revOk =
         op != Cmd.getClockGen5 || (payload.length > 2 && payload[2] == 1);
-    if (revOk && payload.length >= at + 4) {
+    // Status-gated on gen5 ONLY, matching the battery read a few cases up: a
+    // failure reply leaves the body unpopulated, so the bytes at the clock
+    // offset are whatever the buffer held last, and an epoch is far worse to
+    // guess than a battery percentage — it becomes the reference every alarm is
+    // armed against. gen4 is deliberately NOT gated, for the same reason its
+    // battery read is not: the status byte is unconfirmed there, and a wrong
+    // assumption means clock_epoch is never emitted at all, which fails
+    // silently — no stall, no log, just an RTC that never correlates.
+    final statusOk = op != Cmd.getClockGen5 || status == 1;
+    if (statusOk && revOk && payload.length >= at + 4) {
       final v = u32(payload, at);
       // Emit nothing rather than a guess: a value outside the plausible
       // window means we are not looking at the clock field.
@@ -722,13 +731,25 @@ class MetaMarker {
   /// batches routinely share a value. Named `batchId` for compatibility with
   /// existing callers; treat it as a wrap counter, never as a unique key.
   final int? batchId;
+
+  /// The strap's OWN wall clock at the moment it finished the burst: whole
+  /// seconds at inner[3], sub-seconds (1/32768 s) at inner[7]. HistoryEnd only.
+  ///
+  /// Free on every burst, on exactly the path where clock skew decides whether
+  /// records are admitted or deferred — but nothing reads it yet. Null when the
+  /// marker is not HistoryEnd or the frame is short.
+  final int? strapClockEpoch;
+  final int? strapClockSubsec;
+
   MetaMarker(
     this.sub,
     this.name,
     this.expectedPacketCount,
     this.token,
-    this.batchId,
-  );
+    this.batchId, {
+    this.strapClockEpoch,
+    this.strapClockSubsec,
+  });
 }
 
 /// gen5 offset audit (2026-08 multiband port): parseMetadata's inner-relative
@@ -764,15 +785,27 @@ MetaMarker? parseMetadata(Uint8List inner) {
   int? expectedPacketCount;
   Uint8List? token;
   int? batchId;
+  int? strapClockEpoch;
+  int? strapClockSubsec;
   if (sub == SyncMeta.historyEnd && inner.length >= 13) {
     expectedPacketCount = u32(inner, 9);
+    // Gated like every other epoch this file emits. A band that boots with an
+    // unset RTC puts a small number here, and the consumer for this field is
+    // the clock-skew path — forwarding it raw would be the same mistake the
+    // scanned clock_epoch was.
+    final rawClock = u32(inner, 3);
+    if (_plausibleUnix(rawClock)) {
+      strapClockEpoch = rawClock;
+      strapClockSubsec = u16(inner, 7);
+    }
   }
   if (sub == SyncMeta.historyEnd && inner.length >= 21) {
     token =
         Uint8List.fromList(inner.sublist(13, 21)); // the 8 bytes the ACK echoes
     batchId = u32(inner, 17);
   }
-  return MetaMarker(sub, name, expectedPacketCount, token, batchId);
+  return MetaMarker(sub, name, expectedPacketCount, token, batchId,
+      strapClockEpoch: strapClockEpoch, strapClockSubsec: strapClockSubsec);
 }
 
 // ── CONSOLE_LOGS (0x32) ──────────────────────────────────────────────────────
@@ -957,6 +990,14 @@ Decoded _decodeDataRecord(Uint8List inner,
         'kind': g.runtimeType.toString(),
       });
     }
+    // Declined — a truncated record, or a version we have no decoder for
+    // (16/17/22). Stop here. Falling through would hand a gen5 historical frame
+    // to the gen4 realtime heuristic below, which for anything under 64 bytes
+    // reads inner[8] as a heart rate — that byte is part of the record's own
+    // u32 timestamp, so it invents a plausible-looking bpm out of a clock.
+    // edge routes historical frames elsewhere and never reaches this, but the
+    // decoder must not fabricate for whoever does.
+    return Decoded('data_record', {'rec_type': inner.length > 1 ? inner[1] : -1});
   }
   final recType = inner.length > 1 ? inner[1] : -1;
   // Compact realtime stream (small packet).

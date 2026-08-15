@@ -154,17 +154,26 @@ void main() {
   });
 
   group('exact record lengths', () {
-    test('v18 is exactly 112 bytes and nothing else decodes as v18', () {
+    test('v18 accepts down to the read floor, not just its nominal length', () {
       final inner = innerOf(_v18Frame);
-      expect(inner.length, 112);
+      expect(inner.length, kGen5V18InnerLen, reason: 'nominal length is 112');
       expect(parseGen5Historical(inner), isA<Gen5HistorySample>());
 
+      // The gate is the floor every field read stays inside, NOT an equality.
+      // By the time a record reaches a decoder its frame CRC32 has already
+      // passed, so a shorter inner is not a truncated 112 — it is what the band
+      // actually sent, and refusing it throws away real data. v18 is the only
+      // gen5 record that becomes a 1 Hz sample and gen5 has never run on real
+      // hardware here, so an over-strict gate means the band silently yields
+      // nothing at all.
       for (final len in [109, 110, 111]) {
-        expect(parseGen5Historical(inner.sublist(0, len)), isNull,
-            reason: 'len=$len');
+        expect(parseGen5Historical(inner.sublist(0, len)),
+            isA<Gen5HistorySample>(),
+            reason: 'len=$len is above the read floor');
       }
-      final long = Uint8List(113)..setRange(0, 112, inner);
-      expect(parseGen5Historical(long), isNull, reason: 'len=113');
+      // Below the floor a field read would run off the end, so it must decline.
+      expect(parseGen5Historical(inner.sublist(0, 108)), isNull,
+          reason: 'len=108 cannot carry the last field');
     });
 
     test('v26 is exactly 76 bytes and nothing else decodes as v26', () {
