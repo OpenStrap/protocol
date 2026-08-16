@@ -186,7 +186,10 @@ enum Gen5SleepState {
 /// resolved from bytes alone; those are called out explicitly rather than
 /// silently picking a side.
 class Gen5HistorySample extends Gen5HistoricalRecord {
-  /// bpm. 0 is a legitimate reading (device warming up), not absence.
+  /// bpm. 0 is the band's own "no reading this second" (warming up / off skin),
+  /// and it is also what we emit when the HR byte lands outside 25..230 — an
+  /// out-of-range byte is not a heart rate, and the rest of the record still
+  /// decodes. Never a clamped or carried-forward number.
   final int heartRate;
 
   /// Number of R-R intervals we ACCEPTED (see [rrIntervalsMs] doc) — always
@@ -349,7 +352,10 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// Usable as a quality weight (e.g. to down-weight a second's HR/RR), which
   /// is what it is for. The absolute scale is the band's, not a physical unit,
   /// so compare it against other seconds, not against a threshold you invent.
-  final double signalQualityLogVariance;
+  ///
+  /// Null when those bytes are not finite — they are then not this f32, and a
+  /// NaN weight silently poisons every comparison and mean it touches.
+  final double? signalQualityLogVariance;
 
   const Gen5HistorySample({
     required super.histVersion,
@@ -471,8 +477,14 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
     if (hdr == null) return null;
     final v = _view(inner);
 
-    final hr = inner[14];
-    if (hr != 0 && (hr < 25 || hr > 230)) return null; // implausible
+    // An implausible HR byte costs ONLY THE HR, same as the accel below. It
+    // used to `return null`, which archived the whole record undecoded — so one
+    // artefact bpm also threw away that second's R-R beats, skin temp, steps
+    // and sleep state, and the band then trimmed them. 0 is the stack's
+    // hr-absent sentinel (`hr == 0` is the off-skin/no-reading case every
+    // consumer already gates on), so the rest of the second survives.
+    final hrRaw = inner[14];
+    final hr = (hrRaw >= 25 && hrRaw <= 230) ? hrRaw : 0;
 
     // R-R: up to 4 slots @ inner[16/18/20/22], declared count @ inner[15].
     // Same accept-only-plausible-values discipline as records.dart's R24.
@@ -540,7 +552,8 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       spo2CandidateRaw: inner[74],
       opticalBaseline: v.getUint16(98, Endian.big),
       opticalAmp: v.getUint16(100, Endian.big),
-      signalQualityLogVariance: _round(v.getFloat32(105, Endian.little), 4),
+      signalQualityLogVariance:
+          _finiteOrNull(_round(v.getFloat32(105, Endian.little), 4)),
     );
   }
 }

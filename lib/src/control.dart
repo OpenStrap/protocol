@@ -261,9 +261,15 @@ RealtimeHrV2? parseRealtimeHrV2(Uint8List body) {
 // ── HELLO identity ───────────────────────────────────────────────────────────
 class HelloInfo {
   double? batteryPct;
+
+  /// Always null out of [parseHello] — no charging flag has been located in a
+  /// real HELLO body. Take charging from the CHARGING_ON/OFF events.
   bool? charging;
   String? serial;
   String? commit;
+
+  /// Always null out of [parseHello] — same story as [charging]. Wear comes
+  /// from the WRIST_ON/OFF events (and realtime HR's `wearing` bit).
   bool? wristOn;
   String rawHex;
   HelloInfo({
@@ -325,8 +331,13 @@ HelloInfo parseHello(Uint8List payload) {
       }
     }
   }
-  if (payload.length > 5) info.charging = payload[5] != 0;
-  if (payload.length > 116) info.wristOn = payload[116] != 0;
+  // NO charging / wristOn here. Both used to be read at asserted offsets that
+  // the real bodies disprove: payload[5] is the zero high byte of the u32 the
+  // battery scan above resolves at [3], so `charging` was structurally always
+  // false; payload[116] sits in the all-zero tail of all three captured HELLO
+  // bodies, so `wristOn` was always false and overwrote a true learned from the
+  // WRIST_ON event. Both stay null — absent, not a fabricated "no". Charging
+  // comes from CHARGING_ON/OFF and wear from WRIST_ON/OFF.
 
   // Serial is a NUL-terminated ASCII token at a FIXED offset in the body:
   // payload[16] (= inner[19]), immediately followed by the 64-char firmware
@@ -906,20 +917,26 @@ ConsoleLogChunk? parseConsoleLog(Uint8List inner) {
 /// text together.
 class ConsoleLogReassembler {
   final StringBuffer _buf = StringBuffer();
+
+  /// A run that a gap ended, waiting to be handed back by the next [flush].
+  /// Only the most recent one is held: a caller that ignores a `false` from
+  /// [add] and lets a second gap arrive loses the earlier run.
+  String? _completed;
   int? _lastIndex;
 
   /// Feed one decoded chunk. Returns true if it extended the current
-  /// contiguous run; false if it started a new one (the old run, if any, was
-  /// flushed into the return value of the PREVIOUS [flush] call — callers
-  /// should call [flush] after a `false` return to retrieve what came before).
+  /// contiguous run; false if it started a new one — call [flush] after a
+  /// `false` return to get the run the gap ended.
   bool add(ConsoleLogChunk chunk) {
     final contiguous = _lastIndex != null &&
         // record_index is a u8 — allow wraparound at 0xFF, matching the
         // wire's own modulo-256 counter.
         (chunk.recordIndex == (_lastIndex! + 1) & 0xFF);
     if (_lastIndex != null && !contiguous) {
-      // Caller must flush() before this chunk's text is appended, or the
-      // discontinuity is silently lost. We still start the new run here.
+      // The gap ENDS the buffered run — park it for the caller's next flush().
+      // This used to just _buf.clear(), which destroyed the run before the
+      // caller could ask for it, so a dropped frame ate the line before it.
+      if (_buf.isNotEmpty) _completed = _buf.toString();
       _buf.clear();
     }
     _buf.write(chunk.text);
@@ -927,8 +944,15 @@ class ConsoleLogReassembler {
     return contiguous;
   }
 
-  /// Return everything accumulated so far and reset for the next run.
+  /// Return the oldest run we are holding. If a gap ended a run, that run comes
+  /// back first and the run being built keeps buffering; otherwise this returns
+  /// what has accumulated and resets for the next run.
   String flush() {
+    final done = _completed;
+    if (done != null) {
+      _completed = null;
+      return done;
+    }
     final s = _buf.toString();
     _buf.clear();
     _lastIndex = null;

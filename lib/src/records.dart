@@ -340,7 +340,8 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 ///   - v18 / v9 / v7 → the SAME field map but with the HR byte read at that
 ///     version's offset (only the HR offset is independently confirmed for
 ///     these, so the decode is returned only if it passes a physiological
-///     plausibility gate — otherwise null).
+///     plausibility gate — otherwise null). Timing, HR and accel only: the
+///     R-R block and the optical block are v24's map and come back absent.
 ///   - any other version → treated as an unknown/future layout: we attempt the
 ///     v24 field map and return it only if it is physiologically plausible.
 ///     This degrades a firmware layout change to a validated best-effort read
@@ -473,6 +474,15 @@ R24? _parseV24Layout(
     return null;
   }
 
+  // The optical block gets the SAME rule as rr_count above: it is v24's field
+  // map, so it is read only where that map is confirmed (v24/v12, i.e.
+  // !validate). For every other version the plausibility gate evidences HR,
+  // timing and accel and nothing else — bytes at 29/31/51/64/66/68/70 on a
+  // layout known to differ (v7 puts HR at 27, v18 at 14) are not the optical
+  // channels, and feeding them to relative-ODI hands the user a desaturation
+  // number computed from unknown bytes. 0 is this stack's ADC-absent sentinel
+  // (every consumer gates on `v > 0`), same as _parseV25 already emits.
+  final optical = !validate;
   return R24(
     histVersion: version,
     tsEpoch: view.getUint32(7, Endian.little),
@@ -481,14 +491,14 @@ R24? _parseV24Layout(
     hr: hr,
     rrCount: rrCount,
     rrIntervalsMs: rrIntervalsMs,
-    ppgGreen: view.getUint16(29, Endian.little),
-    ppgRedIr: view.getUint16(31, Endian.little),
+    ppgGreen: optical ? view.getUint16(29, Endian.little) : 0,
+    ppgRedIr: optical ? view.getUint16(31, Endian.little) : 0,
     accelG: accelG,
-    skinContact: inner[51],
-    spo2RedRaw: view.getUint16(64, Endian.little),
-    spo2IrRaw: view.getUint16(66, Endian.little),
-    skinTempRaw: view.getUint16(68, Endian.little),
-    ambientRaw: view.getUint16(70, Endian.little),
+    skinContact: optical ? inner[51] : 0,
+    spo2RedRaw: optical ? view.getUint16(64, Endian.little) : 0,
+    spo2IrRaw: optical ? view.getUint16(66, Endian.little) : 0,
+    skinTempRaw: optical ? view.getUint16(68, Endian.little) : 0,
+    ambientRaw: optical ? view.getUint16(70, Endian.little) : 0,
     // COPY, not sublistView: a view aliases the caller's buffer, and rawTail
     // is now encoded lazily, so a later mutation of `inner` would change bytes
     // that were supposed to be a snapshot of parse time.

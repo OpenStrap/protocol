@@ -87,6 +87,44 @@ void main() {
     });
   });
 
+  group('the optical block is read only where the field map is confirmed', () {
+    // Same rule as the beats above: on a version whose layout is known to
+    // differ, bytes at 29/64/66/68/70 are not the optical channels, and
+    // relative-ODI would turn them into a desaturation number.
+    Uint8List withOptical(int version, int hrOffset) {
+      final inner = _record(version: version, hrOffset: hrOffset);
+      final v = ByteData.sublistView(inner);
+      v.setUint16(29, 1111, Endian.little); // ppg green
+      inner[51] = 66; // skin contact byte
+      v.setUint16(64, 2222, Endian.little); // spo2 red
+      v.setUint16(66, 3333, Endian.little); // spo2 ir
+      v.setUint16(68, 4444, Endian.little); // "skin temp"
+      v.setUint16(70, 5555, Endian.little); // ambient
+      return inner;
+    }
+
+    test('v24 keeps its optical block', () {
+      final r = parseR24(withOptical(24, 17))!;
+      expect(r.ppgGreen, 1111);
+      expect(r.spo2RedRaw, 2222);
+      expect(r.spo2IrRaw, 3333);
+      expect(r.ambientRaw, 5555);
+    });
+
+    test('an unconfirmed version reports the optical block absent', () {
+      for (final entry in {7: 27, 18: 14, 9: 17}.entries) {
+        final r = parseR24(withOptical(entry.key, entry.value));
+        expect(r, isNotNull, reason: 'v${entry.key} still decodes');
+        expect(r!.ppgGreen, 0, reason: 'v${entry.key} ppg');
+        expect(r.spo2RedRaw, 0, reason: 'v${entry.key} red');
+        expect(r.spo2IrRaw, 0, reason: 'v${entry.key} ir');
+        expect(r.ambientRaw, 0, reason: 'v${entry.key} ambient');
+        expect(r.hr, 60, reason: 'v${entry.key} keeps HR and timing');
+        expect(r.tsEpoch, 1780000000);
+      }
+    });
+  });
+
   group('a gen5 v18 with an unusable accel keeps the rest of the record', () {
     test('an unusable accel is reported ABSENT, not fabricated and not fatal',
         () {
@@ -134,6 +172,43 @@ void main() {
       expect(g!.heartRate, 165);
       expect(g.gravityG, [2.5, 2.5, 2.5]);
       expect(g.dynamicAccelerationG, 3.5);
+    });
+
+    test('an implausible HR costs the HR, not the record', () {
+      // 240 bpm is an optical artefact, not a broken frame. Rejecting the whole
+      // record threw away that second's beats, temp and steps as well — and the
+      // band then trimmed them.
+      final inner = Uint8List(kGen5V18InnerLen);
+      inner[0] = PacketType.historicalData;
+      inner[1] = 18;
+      final v = ByteData.sublistView(inner);
+      v.setUint32(7, 1780000000, Endian.little);
+      inner[14] = 240; // out of 25..230
+      inner[15] = 2; // two beats
+      v.setInt16(16, 800, Endian.little);
+      v.setInt16(18, 810, Endian.little);
+      v.setFloat32(33, 0.01, Endian.little);
+      v.setFloat32(37, 0.0, Endian.little);
+      v.setFloat32(41, 0.0, Endian.little);
+      v.setFloat32(45, 1.0, Endian.little);
+      v.setInt16(65, 3057, Endian.little);
+      final g = parseGen5Historical(inner) as Gen5HistorySample?;
+      expect(g, isNotNull);
+      expect(g!.heartRate, 0, reason: 'absent, never the artefact bpm');
+      expect(g.rrIntervalsMs, [800, 810]);
+      expect(g.skinTempC, closeTo(30.57, 0.01));
+    });
+
+    test('a signal-quality float that is not finite comes back null', () {
+      final inner = Uint8List(kGen5V18InnerLen);
+      inner[0] = PacketType.historicalData;
+      inner[1] = 18;
+      final v = ByteData.sublistView(inner);
+      v.setUint32(7, 1780000000, Endian.little);
+      inner[14] = 60;
+      v.setFloat32(105, double.nan, Endian.little);
+      final g = parseGen5Historical(inner) as Gen5HistorySample?;
+      expect(g?.signalQualityLogVariance, isNull);
     });
 
     test('a good accel still decodes the whole record', () {

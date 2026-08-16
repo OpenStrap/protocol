@@ -35,8 +35,10 @@ class Cmd {
   // Erase the bond / pairing keys. DANGER — the link drops and the user must
   // re-pair from scratch; there is no undo.
   static const int forgetBonds = 0x0F; // DANGER
-  static const int setClock =
-      0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
+  // Set the strap RTC. Body is TWO u32 LE: [0:4] whole epoch seconds, [4:8]
+  // sub-seconds in 1/32768 s — NOT padding. Wrong length/shape is ACK'd but not
+  // latched (see cmdSetClock), so build it there.
+  static const int setClock = 0x0A;
   static const int getClock = 0x0B; // → strap RTC epoch (ClockRef correlation)
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
