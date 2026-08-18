@@ -35,8 +35,10 @@ class Cmd {
   // Erase the bond / pairing keys. DANGER — the link drops and the user must
   // re-pair from scratch; there is no undo.
   static const int forgetBonds = 0x0F; // DANGER
-  static const int setClock =
-      0x0A; // [u32 epoch LE, u32 pad] — set the strap RTC
+  // Set the strap RTC. Body is TWO u32 LE: [0:4] whole epoch seconds, [4:8]
+  // sub-seconds in 1/32768 s — NOT padding. Wrong length/shape is ACK'd but not
+  // latched (see cmdSetClock), so build it there.
+  static const int setClock = 0x0A;
   static const int getClock = 0x0B; // → strap RTC epoch (ClockRef correlation)
   static const int abortHistoricalTransmits = 0x14;
   static const int sendHistoricalData = 0x16;
@@ -175,9 +177,13 @@ class Cmd {
   static const int runHapticPatternMaverick = 0x13; // 19
   // SET_DEVICE_CONFIG_VALUE — smaller/older sibling of SET_FF_VALUE (120).
   static const int setDeviceConfigValue = 119;
-  // SET_FF_VALUE / SET_CONFIG — 40-byte name+value body. Shared opcode
-  // number across generations; this is how the gen5 R22 deep-buffer enable
-  // sequence is sent (see commands.dart's buildR22EnableSequence). NOTE: this
+  // SET_FF_VALUE / SET_CONFIG. Shared opcode number across generations; the
+  // only body shape this package builds is gen5's 65 bytes —
+  // `[0x01 revision][name:32B NUL-padded ASCII][value:32B NUL-padded ASCII]`,
+  // see cmdSetConfigGen5. (An earlier note here said 40 bytes: that is the
+  // revision-less form the strap REJECTED.) This is how the gen5 R22
+  // deep-buffer enable sequence is sent (see commands.dart's
+  // buildR22EnableSequence). NOTE: this
   // opcode is ALSO in [OpcodeSafety.forbidden] — see that class's doc for why
   // that is not a contradiction.
   static const int setFfValue = 120;

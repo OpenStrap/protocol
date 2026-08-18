@@ -253,6 +253,18 @@ void main() {
       expect(r.add(parseConsoleLog(logPacket(0x00, 'c'))!), isTrue);
       expect(r.flush(), 'abc');
     });
+
+    test('a gap hands back the run it ended instead of eating it', () {
+      // add() used to clear the buffer itself, so by the time the caller saw
+      // the false return the earlier line was already gone.
+      final r = ConsoleLogReassembler();
+      r.add(parseConsoleLog(logPacket(5, 'BLE_CMD: Command Send '))!);
+      r.add(parseConsoleLog(logPacket(6, 'Historical Data\n'))!);
+      expect(r.add(parseConsoleLog(logPacket(9, 'after the gap'))!), isFalse);
+      expect(r.flush(), 'BLE_CMD: Command Send Historical Data\n');
+      expect(r.add(parseConsoleLog(logPacket(10, '!'))!), isTrue);
+      expect(r.flush(), 'after the gap!');
+    });
   });
 
   group('HELLO battery scan starts on the body, not the status byte', () {

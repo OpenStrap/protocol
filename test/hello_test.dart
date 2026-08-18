@@ -33,6 +33,18 @@ void main() {
     }
   });
 
+  test('charging and wristOn are absent, not a fabricated false', () {
+    // payload[5] is the zero high byte of the battery u32 and payload[116] sits
+    // in the all-zero tail, so both used to report a confident "no" on every
+    // real capture — wristOn then overwrote a true from the WRIST_ON event.
+    for (final body in helloBodies) {
+      final h = parseHello(hexToBytes(body));
+      expect(h.charging, isNull);
+      expect(h.wristOn, isNull);
+      expect(h.batteryPct, isNotNull, reason: 'battery still decodes');
+    }
+  });
+
   test('commit hex follows the serial', () {
     final h = parseHello(hexToBytes(helloBodies.first));
     expect(h.commit, isNotNull);

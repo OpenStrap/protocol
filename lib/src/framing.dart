@@ -46,6 +46,11 @@ class Frame {
   /// Safe to read [packetType]/[seq]/[opcode] with the rev-1 field offsets:
   /// CRCs pass AND the frame revision is one this decoder understands. Check
   /// this (not just [valid]) before trusting [opcode] on an inbound frame.
+  ///
+  /// `valid && !decodable` means the bytes are INTACT and we just cannot read
+  /// this revision's field map — archive them, never drop them. Dropping is how
+  /// a firmware revision bump turns into a silent zero-record sync while the
+  /// band goes on trimming records we could have re-decoded later.
   bool get decodable => valid && frameRevOk;
   int get packetType => inner.isNotEmpty ? inner[0] : -1;
   int get seq => inner.length > 1 ? inner[1] : -1;

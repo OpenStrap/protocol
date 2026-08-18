@@ -186,7 +186,10 @@ enum Gen5SleepState {
 /// resolved from bytes alone; those are called out explicitly rather than
 /// silently picking a side.
 class Gen5HistorySample extends Gen5HistoricalRecord {
-  /// bpm. 0 is a legitimate reading (device warming up), not absence.
+  /// bpm. 0 is the band's own "no reading this second" (warming up / off skin),
+  /// and it is also what we emit when the HR byte lands outside 25..230 — an
+  /// out-of-range byte is not a heart rate, and the rest of the record still
+  /// decodes. Never a clamped or carried-forward number.
   final int heartRate;
 
   /// Number of R-R intervals we ACCEPTED (see [rrIntervalsMs] doc) — always
@@ -234,14 +237,16 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   final int cardiacStatusRaw;
 
   /// Gravity-removed motion magnitude (g) @ inner[33:37] f32 LE (frame-abs
-  /// 41). Gated finite ∈ [0, 8] at decode time (see [Gen5V18Decoder]).
-  final double dynamicAccelerationG;
+  /// 41). NULL when the bytes are not a finite in-full-scale value — absent,
+  /// not zero. The rest of the record is still valid (see [Gen5V18Decoder]).
+  final double? dynamicAccelerationG;
 
-  /// [x, y, z] (g) @ inner[37/41/45] f32 LE each (frame-abs 45/49/53). Gated
-  /// finite with magnitude ∈ [0.5, 1.8] g at decode time — the same window
-  /// gen4 uses. These are per-axis means of raw accel, not a normalised
-  /// vector, so a worn strap in motion legitimately reads above 1 g; do not
-  /// re-reject on a tighter bound than the decoder already applies.
+  /// [x, y, z] (g) @ inner[37/41/45] f32 LE each (frame-abs 45/49/53), or
+  /// EMPTY when absent. These are per-axis means of raw accel, NOT a
+  /// normalised gravity vector, so a worn strap in motion legitimately reads
+  /// well above 1 g: do not gate this field on gen4's gravity-magnitude
+  /// window, or on any bound derived from the other generation. The decoder
+  /// checks only finiteness and the part's ±16 g full scale.
   final List<double> gravityG;
 
   /// Cumulative on-chip step counter @ inner[49:51] u16 LE (frame-abs 57).
@@ -347,7 +352,10 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// Usable as a quality weight (e.g. to down-weight a second's HR/RR), which
   /// is what it is for. The absolute scale is the band's, not a physical unit,
   /// so compare it against other seconds, not against a threshold you invent.
-  final double signalQualityLogVariance;
+  ///
+  /// Null when those bytes are not finite — they are then not this f32, and a
+  /// NaN weight silently poisons every comparison and mean it touches.
+  final double? signalQualityLogVariance;
 
   const Gen5HistorySample({
     required super.histVersion,
@@ -469,8 +477,14 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
     if (hdr == null) return null;
     final v = _view(inner);
 
-    final hr = inner[14];
-    if (hr != 0 && (hr < 25 || hr > 230)) return null; // implausible
+    // An implausible HR byte costs ONLY THE HR, same as the accel below. It
+    // used to `return null`, which archived the whole record undecoded — so one
+    // artefact bpm also threw away that second's R-R beats, skin temp, steps
+    // and sleep state, and the band then trimmed them. 0 is the stack's
+    // hr-absent sentinel (`hr == 0` is the off-skin/no-reading case every
+    // consumer already gates on), so the rest of the second survives.
+    final hrRaw = inner[14];
+    final hr = (hrRaw >= 25 && hrRaw <= 230) ? hrRaw : 0;
 
     // R-R: up to 4 slots @ inner[16/18/20/22], declared count @ inner[15].
     // Same accept-only-plausible-values discipline as records.dart's R24.
@@ -483,34 +497,31 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       }
     }
 
-    // A bad accel costs the WHOLE record, deliberately, and this is the lesser
-    // of two bad options until the storage can say "absent".
+    // An unusable accel costs ONLY THE ACCEL. It used to cost the whole record
+    // (`return null` ⇒ archived undecoded) because the store could not say
+    // "absent"; it can now, so HR/RR/steps/temp from the same second survive.
     //
-    // Keeping the record and reporting only the accel as absent is the right
-    // shape and was tried. It does not survive persistence: decoded_onehz's
-    // ax/ay/az are REAL NOT NULL, so an absent vector is written as exact
-    // (0, 0, 0), and zAngle(0,0,0) is 0.0 rather than NaN — a run of those
-    // reads as a perfectly still wrist. Only the van Hees coverage gate
-    // consults the absent-marker; immobility, auto-workout detection and the
-    // ENMO feeds all take the axes raw, so the substituted zeros would become
-    // confident stillness in four places instead of an honest gap in one.
-    //
-    // Returning null archives the record with its bytes intact, so nothing is
-    // lost — it can be re-decoded once the columns are nullable and the readers
-    // are absence-aware. Widening this window (it was 2.25) already cut how
-    // often it fires.
+    // NO GEN4 BOUND ON THIS FIELD. The window that used to sit here
+    // (magSq ∈ [0.25, 3.24], i.e. 0.5–1.8 g) is gen4's, and it is a bound on a
+    // NORMALISED GRAVITY VECTOR. Gen5's is a different physical quantity — the
+    // per-axis means of raw accel — so a wrist in hard motion legitimately
+    // exceeds it, and applying it here rejected exactly the workout seconds
+    // that matter. All that is left is a full-scale sanity check: the axes come
+    // off a ±16 g part, so anything beyond that is a mis-framed decode, not a
+    // reading. Gen5 is HARDWARE-UNTESTED; this is UNVERIFIED either way, and
+    // absence is the loud-not-silent answer.
+    const fullScaleG = 16.0;
     final dynAccel = _round(v.getFloat32(33, Endian.little), 4);
-    if (!dynAccel.isFinite || dynAccel < 0 || dynAccel > 8) return null;
-
     final gx = _round(v.getFloat32(37, Endian.little), 4);
     final gy = _round(v.getFloat32(41, Endian.little), 4);
     final gz = _round(v.getFloat32(45, Endian.little), 4);
-    if (!gx.isFinite || !gy.isFinite || !gz.isFinite) return null;
-    // These are per-axis means of raw accel, NOT a normalised gravity vector,
-    // so a worn strap in motion legitimately exceeds 1.5 g. Same window gen4
-    // uses (records.dart); reject only physically impossible vectors.
-    final magSq = gx * gx + gy * gy + gz * gz;
-    if (magSq < 0.25 || magSq > 3.24) return null; // 0.5g..1.8g
+    final gravityOk = gx.isFinite &&
+        gy.isFinite &&
+        gz.isFinite &&
+        gx.abs() <= fullScaleG &&
+        gy.abs() <= fullScaleG &&
+        gz.abs() <= fullScaleG;
+    final dynOk = dynAccel.isFinite && dynAccel >= 0 && dynAccel <= fullScaleG;
 
     return Gen5HistorySample(
       histVersion: hdr.version,
@@ -526,8 +537,8 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       heartRateAlt: inner[29],
       rrPacked: v.getUint16(30, Endian.little),
       cardiacStatusRaw: inner[32],
-      dynamicAccelerationG: dynAccel,
-      gravityG: [gx, gy, gz],
+      dynamicAccelerationG: dynOk ? dynAccel : null,
+      gravityG: gravityOk ? [gx, gy, gz] : const [],
       stepMotionCounter: v.getUint16(49, Endian.little),
       stepCadence: inner[51],
       activityClass: inner[55],
@@ -541,7 +552,8 @@ class Gen5V18Decoder implements Gen5RecordDecoder {
       spo2CandidateRaw: inner[74],
       opticalBaseline: v.getUint16(98, Endian.big),
       opticalAmp: v.getUint16(100, Endian.big),
-      signalQualityLogVariance: _round(v.getFloat32(105, Endian.little), 4),
+      signalQualityLogVariance:
+          _finiteOrNull(_round(v.getFloat32(105, Endian.little), 4)),
     );
   }
 }

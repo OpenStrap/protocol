@@ -358,8 +358,11 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
 /// STRAP_DRIVEN_ALARM_SET (56) event and its firing via
 /// STRAP_DRIVEN_ALARM_EXECUTED (57) / HAPTICS_FIRED (60).
 ///
-/// [index] is the alarm slot, 1..6 — NOT 0, which RUN_ALARM/DISABLE_ALARM
-/// reject, leaving the alarm un-runnable and un-cancellable.
+/// [index] is the alarm slot, and the usable range is per-generation (see
+/// [_checkAlarmId]): gen4 is 0..6 and DEFAULTS to 0, the slot a real WHOOP 4
+/// was verified to fire from; gen5 is 1..6, because there RUN_ALARM and
+/// DISABLE_ALARM reject 0 and an alarm in slot 0 is un-runnable and
+/// un-cancellable. Omit [index] to get the right default for the profile.
 ///
 /// GENERATION DIFFERENCE — the haptic block length:
 ///   • gen4 reads 12 bytes (payload 20). Hardware-verified; unchanged.
@@ -578,9 +581,12 @@ Uint8List cmdBuzzGen5Maverick(int seq, {int overallLoop = 1}) {
 // Opcode-identical to gen4's SET_FF_VALUE, but gen5's R22 deep buffers
 // (v20 optical / v21 IMU / v26 PPG — see gen5_records.dart) are OFF by
 // default even in the official WHOOP app; a strap will only ever emit v18
-// unless this 16-flag sequence is sent first. Byte-verified body shape (a
-// real `enable_r22_packets` capture): 40-byte body = ASCII key name
-// NUL-padded to 32 bytes, + 1 value byte @ offset 32, + 7 zero bytes.
+// unless this 16-flag sequence is sent first. Body shape: 65 bytes =
+// `[0x01 revision][name:32B NUL-padded ASCII][value:32B NUL-padded ASCII]`.
+// (An older note here described a 40-byte, revision-less body with the name at
+// offset 0 — that is the form the strap REJECTED, reading the name's first byte
+// as the revision. Opcode 120 is a persistent NVM write, so build it with the
+// builders below, not from a remembered capture.)
 
 /// A 32-byte NUL-padded ASCII key/value field — the unit both SET_CONFIG (120)
 /// and SET_DEVICE_CONFIG_VALUE (119) are built from. [max] leaves room for the
