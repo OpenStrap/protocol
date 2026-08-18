@@ -1070,8 +1070,16 @@ Decoded _decodeDataRecord(Uint8List inner,
   if (recType == Record.r10) {
     final r = parseR10Lite(inner);
     if (r != null && r.hr > 0) {
-      return Decoded(
-          'realtime_hr', {'rec_type': recType, 'hr': r.hr, 'wearing': true});
+      // rr_ms too: parseR10Lite already accepted these beats, and the short
+      // realtime-HR branch above emits them — dropping them here silently
+      // halved the beat supply of anything reading live R10 through
+      // decodeFrame rather than live.dart.
+      return Decoded('realtime_hr', {
+        'rec_type': recType,
+        'hr': r.hr,
+        'rr_ms': r.rrIntervalsMs,
+        'wearing': true,
+      });
     }
   }
   // R24: delegate to the native Dart full-record decoder (Source 1).

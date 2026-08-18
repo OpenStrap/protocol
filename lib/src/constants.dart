@@ -177,9 +177,13 @@ class Cmd {
   static const int runHapticPatternMaverick = 0x13; // 19
   // SET_DEVICE_CONFIG_VALUE — smaller/older sibling of SET_FF_VALUE (120).
   static const int setDeviceConfigValue = 119;
-  // SET_FF_VALUE / SET_CONFIG — 40-byte name+value body. Shared opcode
-  // number across generations; this is how the gen5 R22 deep-buffer enable
-  // sequence is sent (see commands.dart's buildR22EnableSequence). NOTE: this
+  // SET_FF_VALUE / SET_CONFIG. Shared opcode number across generations; the
+  // only body shape this package builds is gen5's 65 bytes —
+  // `[0x01 revision][name:32B NUL-padded ASCII][value:32B NUL-padded ASCII]`,
+  // see cmdSetConfigGen5. (An earlier note here said 40 bytes: that is the
+  // revision-less form the strap REJECTED.) This is how the gen5 R22
+  // deep-buffer enable sequence is sent (see commands.dart's
+  // buildR22EnableSequence). NOTE: this
   // opcode is ALSO in [OpcodeSafety.forbidden] — see that class's doc for why
   // that is not a contradiction.
   static const int setFfValue = 120;
