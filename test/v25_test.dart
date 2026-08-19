@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 
@@ -13,7 +11,7 @@ void main() {
       'aa50000c2f1900026800007fff2a6a38390900729103003608a2fd0104850d4f1bd21aa60f080d850edb116b0f160b7d063f06ab04d5041704a4045f04f003f5ffd7ff7efe73ffa8b2333e9003010000fa54e5e9',
     ];
 
-    test('parseR24 auto-routes v25 and decodes unix + gravity', () {
+    test('parseR24 auto-routes v25 and decodes the unix second only', () {
       final parsed = [
         for (final hex in records) parseR24(hexToBytes(_innerHex(hex)))
       ];
@@ -28,13 +26,21 @@ void main() {
         expect(r.rrIntervalsMs, isEmpty);
         expect(r.spo2RedRaw, 0);
         expect(r.spo2IrRaw, 0);
-        final mag = math.sqrt(
-          r.accelG[0] * r.accelG[0] +
-              r.accelG[1] * r.accelG[1] +
-              r.accelG[2] * r.accelG[2],
-        );
-        expect(mag, inInclusiveRange(0.8, 1.2));
+        // No accel on v25. The old inner[69/71/73] read looked like a ~1 g
+        // vector on exactly these records, which is why it survived so long:
+        // across the real corpus its "z" has three distinct values, its "x" is
+        // half an f32, and it correlates 0.16/0.22/0.06 with the v24 gravity
+        // for the same second. Absent, NOT (0,0,0) — a zero vector is a still
+        // wrist to every motion consumer.
+        expect(r.accelG, isEmpty);
       }
+    });
+
+    test('the waveform payload and its timestamp are untouched', () {
+      final r = parseR24(hexToBytes(_innerHex(records[0])))!;
+      // rawTail is inner[13:], i.e. the PPG burst itself.
+      expect(r.rawTail, isNotEmpty);
+      expect(_innerHex(records[0]), endsWith(r.rawTail));
     });
 
     test('decodeRecord surfaces v25 timestamps', () {
