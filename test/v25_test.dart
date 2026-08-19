@@ -38,9 +38,11 @@ void main() {
 
     test('the waveform payload and its timestamp are untouched', () {
       final r = parseR24(hexToBytes(_innerHex(records[0])))!;
-      // rawTail is inner[13:], i.e. the PPG burst itself.
+      // rawTail is inner[13:], i.e. the PPG burst itself. Compare the WHOLE
+      // slice, not `endsWith` — that also passes if the decoder silently drops
+      // leading waveform bytes, which is the failure worth catching.
       expect(r.rawTail, isNotEmpty);
-      expect(_innerHex(records[0]), endsWith(r.rawTail));
+      expect(r.rawTail, _innerHex(records[0]).substring(13 * 2));
     });
 
     test('decodeRecord surfaces v25 timestamps', () {
