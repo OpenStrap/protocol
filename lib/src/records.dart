@@ -61,6 +61,9 @@ class R24 {
   /// do NOT apply a correction factor here: a scale derived from one corpus
   /// would be a fabricated calibration, and it would silently move every value
   /// downstream code has already stored.
+  ///
+  /// EMPTY on v25 — that layout has no accelerometer field we can read (see
+  /// [_parseV25]). Empty means absent; it does not mean a still wrist.
   final List<double> accelG;
 
   /// The u8 at inner[51] (frame[55]).
@@ -231,7 +234,8 @@ const int kMinRrMs = 200;
 const int kMaxRrMs = 2500;
 
 /// The historical-record layout versions this package has a field map for.
-/// v25 has its own dedicated layout ([_parseV25]); the rest share the v24 field
+/// v25 has its own dedicated layout ([_parseV25], timestamp only); the rest
+/// share the v24 field
 /// map with a per-version HR offset ([_hrOffsetByVersion]). Used by live.dart's
 /// `decodeRecord` so every version [parseR24] can decode is actually routed to
 /// it (v12 in particular is real firmware and used to fall through to null,
@@ -250,37 +254,35 @@ double _pow10(int n) {
 ByteData _view(Uint8List b) =>
     b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
 
-double _gravI16(Uint8List inner, int offset) {
-  final v = _view(inner).getInt16(offset, Endian.little);
-  return _round(v / 16384.0, 4);
-}
-
-/// Decode a v25 (PPG-derived) historical record. Unlike v24, the v25 field map
-/// comes purely from our own device captures — it has no independent
-/// cross-reference, so it is LOWER-CONFIDENCE: we decode timing + gravity and
-/// deliberately leave HR at 0 (v25 carries no honest 1 Hz beat). It is gated on
-/// a gravity-magnitude sanity check to avoid emitting garbage.
+/// Decode a v25 historical record. v25 is NOT a 1 Hz biometric record: it is a
+/// raw ~24 Hz PPG waveform, sent in 13–27 s bursts roughly every 20 minutes.
+/// The only field solved in it is the unix second at inner[7:11]; the waveform
+/// itself is left whole in [R24.rawTail].
+///
+/// So everything else comes back absent, and that is deliberate:
+///
+///   - HR stays 0 — v25 carries no beat. Running a peak/autocorrelation pass
+///     over concatenated bursts manufactures a ~60 bpm peak out of the burst
+///     cadence itself.
+///   - accelG is EMPTY, not (0,0,0). We used to read a "gravity" vector at
+///     inner[69/71/73] as i16/16384 and gate it on |g| ≈ 1. It is not gravity.
+///     Measured over the real v25 corpus: the "z" axis takes THREE distinct
+///     values in the whole sample, the "x" is the upper half of an f32 that
+///     starts two bytes earlier, and per-axis correlation against the v24
+///     gravity vector for the SAME second is 0.16 / 0.22 / 0.06. A vector that
+///     near-constant reads downstream as a perfectly still wrist, so emitting
+///     it fabricated immobility — for hours a day, every day. Do not put it
+///     back, and do not go looking for a different accel offset here.
+///   - the optical fields stay 0 — no red/IR scalar offset is solved, and no
+///     true SpO2% decode exists.
+///
+/// Respiratory rate, HRV, SpO2 and perfusion index were each tested against
+/// this waveform and each failed. Nothing derived belongs in this function.
 R24? _parseV25(Uint8List inner) {
+  // Only inner[3:11] is read below, but a real v25 burst record is ~76 bytes;
+  // anything shorter is a truncated frame, and this floor keeps them out.
   if (inner.length < 75) return null;
   final view = _view(inner);
-  // The documented v25 layout uses frame-absolute offsets. Our decoder
-  // receives the inner record starting at packet type 0x2f, so subtract the
-  // 4-byte transport prefix: unix 11->7 and gravity 73/75/77->69/71/73.
-  //
-  // What is KNOWN for v25:
-  //   - unix is stable at inner[7:11]
-  //   - gravity is stable at inner[69/71/73] as i16/16384
-  // What is NOT solved here:
-  //   - exact red/IR scalar offsets inside the v25 optical region
-  //   - any true SpO2% decode
-  //
-  // So v25 intentionally surfaces motion + time only and leaves the optical
-  // fields zero rather than inventing a bogus decode.
-  final gx = _gravI16(inner, 69);
-  final gy = _gravI16(inner, 71);
-  final gz = _gravI16(inner, 73);
-  final mag = (gx * gx + gy * gy + gz * gz);
-  if (mag < 0.25 || mag > 2.25) return null; // ~0.5g..1.5g
   return R24(
     histVersion: 25,
     tsEpoch: view.getUint32(7, Endian.little),
@@ -291,7 +293,7 @@ R24? _parseV25(Uint8List inner) {
     rrIntervalsMs: const [],
     ppgGreen: 0,
     ppgRedIr: 0,
-    accelG: [gx, gy, gz],
+    accelG: const [],
     skinContact: 0,
     spo2RedRaw: 0,
     spo2IrRaw: 0,
@@ -335,7 +337,8 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 /// packet-type byte.
 ///
 /// Routing:
-///   - v25 → the PPG-derived layout ([_parseV25]).
+///   - v25 → the 24 Hz PPG-waveform layout ([_parseV25]): timestamp only, with
+///     HR 0 and accelG empty.
 ///   - v24 / v12 → our hardware-validated field map, returned as-is.
 ///   - v18 / v9 / v7 → the SAME field map but with the HR byte read at that
 ///     version's offset (only the HR offset is independently confirmed for
