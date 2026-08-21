@@ -49,10 +49,21 @@ Uint8List buildHistoryResultOk(int seq, List<int> token,
 }
 
 /// The strap's negative historical-burst result (cmd 0x17).
-/// Payload is a single FAILURE result byte (the band only needs the code).
+///
+/// On gen5 the failure payload is exactly TWO zero bytes `00 00`, versus the
+/// 9-byte `01 + markerA + markerB` success payload from
+/// [buildHistoryResultOk]; a one-byte body leaves the strap parsing a
+/// truncated result. The gen4 form keeps its established single failure byte
+/// until a gen4 capture says otherwise — the two-byte evidence is
+/// gen5-scoped.
 Uint8List buildHistoryResultFail(int seq,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.historicalDataResult, const [0x00], profile);
+    buildCommand(
+      seq,
+      Cmd.historicalDataResult,
+      profile.isGen5 ? const [0x00, 0x00] : const [0x00],
+      profile,
+    );
 
 /// Legacy alias used by the app transport.
 Uint8List buildBatchAck(int seq, List<int> token,
@@ -83,7 +94,17 @@ Uint8List cmdAbortHistorical(int seq) =>
     buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00]);
 Uint8List cmdSendHistorical(int seq) =>
     buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
-Uint8List cmdGetClock(int seq) => buildCommand(seq, Cmd.getClock, const []);
+/// Read the strap RTC (GET_CLOCK = 0x0B = 11) with an EMPTY body.
+///
+/// Shared across generations — hardware-verified on WHOOP 5: opcode 11 with
+/// an empty body reads a usable time from a real gen5 strap. The reply body
+/// is the gen4 shape, `[u32 sec][u32 subsec]` starting at body offset 0.
+///
+/// On gen5 this is only the FALLBACK path: the normal bootstrap takes its
+/// timestamp from the hello response and never sends GET_CLOCK unless hello
+/// supplied none.
+Uint8List cmdGetClock(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getClock, const [], profile);
 
 /// Set the strap RTC (SET_CLOCK = 0x0A) — WHOOP-EXACT 8-byte payload,
 /// hardware-verified by the edge app (`ble_engine.dart setClock()`).
@@ -101,8 +122,15 @@ Uint8List cmdGetClock(int seq) => buildCommand(seq, Cmd.getClock, const []);
 /// hardware. After sending, read the clock back (GET_CLOCK,
 /// [cmdGetClock]) to confirm it latched.
 ///
+/// SHARED ACROSS GENERATIONS — this is the correct builder for WHOOP 5 too:
+/// gen5 takes `SET_CLOCK(10)` carrying
+/// `<whole_seconds:u32le><subseconds:u32le>`, and a real gen5 strap answers
+/// `SUCCESS` for exactly this 8-byte form. Prefer this over
+/// [cmdSetClockGen5], whose opcode 146 is not an established WHOOP opcode.
+///
 /// [now] defaults to `DateTime.now()`; pass a fixed instant for tests.
-Uint8List cmdSetClock(int seq, {DateTime? now}) {
+Uint8List cmdSetClock(int seq,
+    {DateTime? now, BandProfile profile = BandProfile.gen4}) {
   final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
   final sec = ms ~/ 1000;
   final subsec = ((ms % 1000) * 32768) ~/ 1000; // 0..32767, 1/32768 s units
@@ -116,7 +144,7 @@ Uint8List cmdSetClock(int seq, {DateTime? now}) {
     0,
     0,
   ];
-  return buildCommand(seq, Cmd.setClock, payload);
+  return buildCommand(seq, Cmd.setClock, payload, profile);
 }
 
 Uint8List cmdGetDataRange(int seq) =>
@@ -364,16 +392,26 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
 /// DISABLE_ALARM reject 0 and an alarm in slot 0 is un-runnable and
 /// un-cancellable. Omit [index] to get the right default for the profile.
 ///
-/// GENERATION DIFFERENCE — the haptic block length:
-///   • gen4 reads 12 bytes (payload 20). Hardware-verified; unchanged.
-///   • gen5 reads 13 bytes (payload 21), the 13th being [crescendo], which
-///     must be exactly 0 or 1 — any other value is rejected. [hapticPattern]
-///     stays 12 bytes on both; the crescendo byte is appended for gen5.
+/// GENERATION DIFFERENCE — the trailing byte:
+///   • gen4 reads 12 haptic bytes (payload 20). Hardware-verified; unchanged.
+///   • gen5 reads one MORE byte (payload 21). The Gen5 revision-4 body ends
+///     with **alarm type `00`**, and 0 is the only value ever sent for it.
+///     Mind the serializer trap: the body must be 21 bytes, never 20 — the
+///     zero-initialised alarm-type byte IS on the wire.
+///
+///     This package's [crescendo] parameter IS that byte. The name came from a
+///     third-party source and is not what the layout calls it; it is kept for
+///     source compatibility and still validated as 0/1, but passing 1 means
+///     "alarm type 1", an unestablished type — NOT a gentler ramp. Leave it
+///     at the default 0.
 Uint8List cmdSetAlarm(
   int seq,
   DateTime when, {
   int? index,
   List<int>? hapticPattern,
+  /// gen5's trailing body byte — the **alarm type**, always `0` in practice.
+  /// See the GENERATION DIFFERENCE note above for why this parameter keeps
+  /// its third-party name.
   int crescendo = 0,
   BandProfile profile = BandProfile.gen4,
 }) {
@@ -511,15 +549,24 @@ Uint8List cmdSendHistoricalGen5(int seq) =>
 // strap end to end: the bytes are right, but nothing here has watched an RTC
 // actually latch.
 
-/// gen5 SET_CLOCK_MAVERICK (146).
+/// gen5 SET_CLOCK_MAVERICK (146) — **UNVERIFIED; prefer [cmdSetClock] (10).**
 ///
-/// Body is `[0x01][u32 epoch][u16 subsec]` — the leading byte is the command
-/// revision, exactly like GET_HELLO's. Without it the strap reads the epoch's
-/// low byte as the revision, rejects the command, and the RTC silently never
-/// latches; records then carry a 1970s timestamp.
+/// Body is `[0x01][u32 epoch][u16 subsec]`.
 ///
-/// Legacy [cmdSetClock] (0x0A) also still works on gen5 and takes no revision
-/// byte, so either is valid — but they are NOT interchangeable body shapes.
+/// Opcode **146 is not an established WHOOP opcode**, and no "Maverick clock"
+/// command is known to exist. What IS established for gen5: `SET_CLOCK(10)`
+/// with `<u32 sec><u32 subsec>`, for which a real gen5 strap answers
+/// `SUCCESS` while `GET_CLOCK(11)` reads the time back.
+///
+/// So this builder sends a guess where a confirmed command exists. That is
+/// especially dangerous for the clock: a rejected or no-op'd set is silent —
+/// the RTC simply never latches, and every absolute timestamp afterwards
+/// (alarms above all) is armed against a clock that was never set.
+///
+/// Kept only for source compatibility. Do NOT send it to "find out what it
+/// does": a clock write is a mutation, not a read.
+@Deprecated('opcode 146 is not an established opcode; gen5 '
+    'uses SET_CLOCK(10) — use cmdSetClock(seq, profile: BandProfile.gen5)')
 Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
   final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
   final sec = ms ~/ 1000;
@@ -538,8 +585,14 @@ Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
   return buildCommand(seq, Cmd.setClockMaverick, payload, BandProfile.gen5);
 }
 
-/// gen5 GET_CLOCK_GEN5 (147). Takes the same `[0x01]` revision body — an empty
-/// body is rejected as revision 0.
+/// gen5 GET_CLOCK_GEN5 (147) — **UNVERIFIED; prefer [cmdGetClock] (11).**
+///
+/// Takes a `[0x01]` revision body. Same problem as [cmdSetClockGen5]: opcode
+/// 147 is not an established WHOOP opcode, while `GET_CLOCK(11)` with an
+/// EMPTY body is hardware-confirmed to answer on a real gen5 strap. Kept for
+/// source compatibility only.
+@Deprecated('opcode 147 is not an established opcode; gen5 '
+    'uses GET_CLOCK(11) — use cmdGetClock(seq, profile: BandProfile.gen5)')
 Uint8List cmdGetClockGen5(int seq) =>
     buildCommand(seq, Cmd.getClockGen5, const [revision1], BandProfile.gen5);
 
@@ -636,10 +689,13 @@ Uint8List cmdSetDeviceConfigValueGen5(int seq, String name, String value) {
   return buildCommand(seq, Cmd.setDeviceConfigValue, payload, BandProfile.gen5);
 }
 
-// ⚠ THE THREE ACCEPTED CONFIG VALUES, and nothing else:
-//     '0' — restore the firmware default
+// ⚠ THE OFFICIAL BOOLEAN WRITE VALUES, and nothing else:
 //     '1' — enable
 //     '2' — DISABLE
+// ASCII '0' is NOT a value the boolean writer ever emits: a key
+// READING 0 is a raw/unset record, and writing '0' back is not a proven
+// restoration of that state — which is exactly why raw-zero keys are skipped
+// rather than "restored".
 // These are PERSISTENT (NVM) writes: a wrong value survives reboot and
 // reconnect, and only writing '0' (or the opposite value) undoes it. Sending
 // '2' to a flag named `enable_*` force-DISABLES that feature — which is what
@@ -653,6 +709,7 @@ Uint8List cmdSetDeviceConfigValueGen5(int seq, String name, String value) {
 /// not gate a deep buffer are deliberately absent, because every entry here is
 /// a persistent write to a real user-visible setting.
 ///
+/// This is the FULL set with hardware evidence of producing deep buffers.
 /// Order is irrelevant — the strap looks each setting up BY NAME, so this list
 /// can be reordered or trimmed freely.
 ///
@@ -670,18 +727,63 @@ const List<(String, String)> kGen5R22EnableFlags = [
   ('disable_pip_r26_packets', '2'),
 ];
 
+/// Entries of [kGen5R22EnableFlags] a caller can choose NOT to write
+/// (`buildR22EnableSequence(omitContestedFlags: true)`):
+///
+///  * `enable_r22_v4_packets` reads raw `0` before any write, and raw zero
+///    has no proven restoration value (the boolean writer emits only '1' and
+///    '2') — so writing it is a ONE-WAY change to the user's device.
+///  * `enable_r22_v8_packets` has no active consumer in firmware 50.40.1.0
+///    (the R22 selector runs v6..v2, then variant 1), so writing it persists
+///    a setting to no effect. Its observed pre-value is '2', so it IS
+///    restorable, unlike v4.
+///
+/// The DEFAULT still writes both: the full set is the one with hardware
+/// evidence of producing deep buffers, and the trimmed variant has none yet.
+const Set<String> kGen5R22ContestedFlagNames = {
+  'enable_r22_v4_packets',
+  'enable_r22_v8_packets',
+};
+
 /// Build the R22 enable sequence (one SET_CONFIG per [kGen5R22EnableFlags],
 /// sequential `seq` starting at [startSeq]). This is a hard prerequisite for
 /// ever receiving v20 (optical)/v21 (IMU)/v26 (PPG) deep buffers from a real
 /// gen5 strap — the official WHOOP app never sends it, so a fresh connection
 /// without this sequence will only ever yield v18.
-List<Uint8List> buildR22EnableSequence({int startSeq = 1}) =>
-    _configSequence(kGen5R22EnableFlags, startSeq);
+///
+/// PERSISTENT AND PARTLY IRREVERSIBLE. These are NVM writes that survive
+/// reboots, and `enable_r22_v4_packets` cannot be restored once written (see
+/// [kGen5R22ContestedFlagNames]). Treat sending this as a one-way change to
+/// the user's device and get explicit consent first;
+/// [omitContestedFlags] skips the irreversible/dormant pair at the cost of
+/// diverging from the hardware-proven sequence.
+List<Uint8List> buildR22EnableSequence({
+  int startSeq = 1,
+  bool omitContestedFlags = false,
+}) =>
+    _configSequence(
+      omitContestedFlags
+          ? [
+              for (final f in kGen5R22EnableFlags)
+                if (!kGen5R22ContestedFlagNames.contains(f.$1)) f
+            ]
+          : kGen5R22EnableFlags,
+      startSeq,
+    );
 
-/// Undo [buildR22EnableSequence]: writes '0' (restore firmware default) to
-/// every name it touched. These settings persist across reboots, so this is
-/// the only way back — turning the deep buffers off is NOT a matter of
-/// disconnecting.
+/// UNSAFE — do not use as a restore, and not exported from the package.
+///
+/// Writes raw '0' to every flag [buildR22EnableSequence] touched. But '0' is
+/// NOT a valid boolean write value: the writer emits only '1' (enabled) or
+/// '2' (disabled), and a returned '0' is an unset/unknown state, never a
+/// real "off". It is also not the observed pre-value — straps read '2' on
+/// most of these before any write, and observed values are not uniform
+/// factory defaults. Restoring therefore requires a per-flag snapshot
+/// (enumerate + GET each value BEFORE the enable sequence, then write each
+/// recorded value back with readback), not a blanket '0'. Kept only so the
+/// asymmetry is visible; retire once a snapshot-based restore exists.
+@Deprecated('writes raw 0, which is not a valid write value or the observed '
+    'pre-value; use a snapshot-based restore instead. Not a correct undo.')
 List<Uint8List> buildR22RestoreDefaultsSequence({int startSeq = 1}) =>
     _configSequence(
       [for (final f in kGen5R22EnableFlags) (f.$1, '0')],
@@ -810,24 +912,129 @@ Uint8List cmdGetAfeParams(int seq, {BandProfile profile = BandProfile.gen4}) =>
 Uint8List cmdStopHaptics(int seq, {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(seq, Cmd.stopHaptics, const [revision1], profile);
 
-/// Arm / disarm an ECG reading (ECG main control, 0x7C) — `[0x01][0|1]`.
-/// Select the wrist first with [cmdSelectWrist] (0x7B).
-Uint8List cmdEcgControl(int seq, bool on,
+// ── Filtered reading ("Labrador", record revision 17) ──────────────────────
+//
+// Three toggles, each body `[revision 01][operation]`:
+//
+//   124 TOGGLE_LABRADOR_DATA_GENERATION  01=stop  02=start  03=restart
+//   125 TOGGLE_LABRADOR_RAW_SAVE         00=disable  01=enable
+//   139 TOGGLE_LABRADOR_FILTERED         00=disable  01=enable
+//
+// The old `cmdEcg*` builders below modelled 124 as a boolean arm/disarm. That
+// is wrong at the byte level, not just in naming: `01 01` — what the old
+// builder sent to "arm" — is the STOP operation, and `01 00` is not an
+// operation the strap defines at all.
+
+/// The operation byte of TOGGLE_LABRADOR_DATA_GENERATION (124) — the
+/// filtered-reading (R17) lifecycle. It is an operation selector, not a
+/// boolean: there is no `00`.
+enum LabradorOperation {
+  /// `01` — stop generation. The first command of the stop sequence.
+  stop(0x01),
+
+  /// `02` — start generation. Sent after an abort (20), and only once the
+  /// prepare step's 139 ON / 125 ON both came back successful.
+  start(0x02),
+
+  /// `03` — restart generation. What a retry of the start step sends; there
+  /// is no plain resend of [start].
+  restart(0x03);
+
+  const LabradorOperation(this.value);
+  final int value;
+}
+
+/// Drive filtered-reading data generation (TOGGLE_LABRADOR_DATA_GENERATION,
+/// 124) — `[0x01][op]`, i.e. `01 01` stop / `01 02` start / `01 03` restart.
+///
+/// **The full lifecycle** — this builder is only the 124 step of it:
+///
+/// ```text
+/// prepare:  20 (abort)  ->  123 (select wrist)  ->  139 ON  ->  125 ON
+/// start:    20 (abort)  ->  124 start        (retry uses 124 restart)
+/// stop:     124 stop    ->  139 OFF          ->  125 OFF
+/// ```
+///
+/// i.e. [cmdAbortHistorical] (20), [cmdSelectWrist] (123/0x7B),
+/// [cmdLabradorFiltered] (139) and [cmdLabradorRawSave] (125), then this.
+///
+/// Each command carries the standard five-second timeout, and the aggregate
+/// must be REJECTED if any single response is missing or unsuccessful.
+///
+/// **Failure characteristics — the caller owns them.** There is no retry loop
+/// and no automatic compensating rollback anywhere in this surface: a partial
+/// startup leaves components enabled on the strap. Carry a durable recovery
+/// guard (one that survives an app restart, because the strap's state does)
+/// and always attempt all three OFF commands on cleanup — stop, 139 OFF,
+/// 125 OFF — even when an earlier one failed.
+///
+/// **Some WHOOP 5 units reject the feature outright:** 20 and 123 succeed
+/// while BOTH 139 ON and 125 ON answer `FAILURE`. That correctly prevents the
+/// 124 start, and it is a normal path to handle — not a transport error and
+/// not something a retry fixes.
+Uint8List cmdLabradorDataGeneration(int seq, LabradorOperation op,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.toggleLabradorDataGeneration,
+        [revision1, op.value], profile);
+
+/// Enable/disable the filtered-reading RAW save (TOGGLE_LABRADOR_RAW_SAVE,
+/// 125) — `[0x01][0|1]`. Part of the prepare step (ON) and of the stop step
+/// (OFF); see [cmdLabradorDataGeneration] for the sequence.
+Uint8List cmdLabradorRawSave(int seq, bool on,
         {BandProfile profile = BandProfile.gen4}) =>
     buildCommand(
-        seq, Cmd.ecgMainControl, [revision1, on ? 0x01 : 0x00], profile);
+        seq, Cmd.toggleLabradorRawSave, [revision1, on ? 0x01 : 0x00], profile);
 
-/// Start/stop the raw ECG trace (0x7E) — `[0x01][on]`. The second byte is a
-/// real selector, not padding: the strap reads both bytes as one word and
-/// rejects anything above 1. Arrives as record version 16.
+/// Enable/disable the filtered trace (TOGGLE_LABRADOR_FILTERED, 139) —
+/// `[0x01][0|1]`. Part of the prepare step (ON) and of the stop step (OFF);
+/// see [cmdLabradorDataGeneration] for the sequence. Arrives as record
+/// revision 17.
+Uint8List cmdLabradorFiltered(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.toggleLabradorFiltered, [revision1, on ? 0x01 : 0x00],
+        profile);
+
+/// Arm / disarm an ECG reading (ECG main control, 0x7C) — `[0x01][0|1]`.
+///
+/// **Wrong bytes, kept only for source compatibility.** Opcode 124 is
+/// TOGGLE_LABRADOR_DATA_GENERATION and its second byte is an operation, not a
+/// flag: `cmdEcgControl(seq,
+/// true)` emits `01 01`, which is the **STOP** operation, and
+/// `cmdEcgControl(seq, false)` emits `01 00`, which is not a defined
+/// operation at all. Use [cmdLabradorDataGeneration].
+@Deprecated('opcode 124 takes an OPERATION byte, not a bool: this builder\'s '
+    '`true` sends 01 01 = the STOP operation, and `false` sends the undefined '
+    '01 00 — use cmdLabradorDataGeneration(seq, LabradorOperation.start)')
+Uint8List cmdEcgControl(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.toggleLabradorDataGeneration,
+        [revision1, on ? 0x01 : 0x00], profile);
+
+/// Start/stop the raw ECG trace (0x7E) — `[0x01][on]`.
+///
+/// **Wrong opcode, kept only for source compatibility.** 0x7E (126) is not
+/// an established WHOOP 5 opcode — origin unknown, most likely gen4 or
+/// third-party lore. The raw save of a filtered
+/// reading is TOGGLE_LABRADOR_RAW_SAVE (125): use [cmdLabradorRawSave], which
+/// emits the identical `01 00` / `01 01` body on the opcode the strap
+/// actually implements.
+@Deprecated('opcode 126 (0x7E) is not an established WHOOP 5 opcode '
+    '— the raw save is TOGGLE_LABRADOR_RAW_SAVE (125): use '
+    'cmdLabradorRawSave(seq, on)')
 Uint8List cmdEcgSendRaw(int seq, bool on,
         {BandProfile profile = BandProfile.gen4}) =>
+    // ignore: deprecated_member_use_from_same_package
     buildCommand(
         seq, Cmd.ecgSendRawData, [revision1, on ? 0x01 : 0x00], profile);
 
-/// Start/stop the filtered ECG trace (0x8B) — `[0x01][on]`, same two-byte
-/// selector as [cmdEcgSendRaw]. Arrives as record version 17.
+/// Start/stop the filtered ECG trace (0x8B) — `[0x01][on]`.
+///
+/// Body-correct: this is TOGGLE_LABRADOR_FILTERED (139) under its old name,
+/// and the bytes are unchanged. Renamed only, so [cmdLabradorFiltered] is a
+/// drop-in replacement.
+@Deprecated('renamed: opcode 139 is TOGGLE_LABRADOR_FILTERED and the trace is '
+    'a filtered reading, not an ECG — use cmdLabradorFiltered(seq, on) '
+    '(identical bytes)')
 Uint8List cmdEcgSendFiltered(int seq, bool on,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(
-        seq, Cmd.ecgSendFilteredData, [revision1, on ? 0x01 : 0x00], profile);
+    cmdLabradorFiltered(seq, on, profile: profile);

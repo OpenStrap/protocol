@@ -9,6 +9,12 @@ const int hapticShortPulse = 2;
 class PacketType {
   static const int command = 0x23;
   static const int commandResponse = 0x24;
+  // Battery-pack ("puffin") command/response. Type 37 has no known incoming
+  // body shape, while type 38 does carry a battery-pack-command-specific
+  // response — a future decode target.
+  // Named here so neither is misread as 'other'.
+  static const int puffinCommand = 0x25; // 37
+  static const int puffinCommandResponse = 0x26; // 38
   static const int realtimeData = 0x28;
   static const int realtimeRawData = 0x2B;
   static const int historicalData = 0x2F;
@@ -17,6 +23,17 @@ class PacketType {
   static const int consoleLogs = 0x32;
   static const int realtimeImuStream = 0x33;
   static const int historicalImuStream = 0x34;
+  // Battery-pack event/log wrappers riding the generic event envelope.
+  // 53/54/55 are MEMBERS of the Sensor-HPS history count: each complete
+  // frame counts once and must be retained. 56 is battery-pack metadata
+  // (start/end/complete), not a count member.
+  //
+  // 53 additionally carries a state-of-charge specialization that this
+  // package does not decode yet.
+  static const int relativePuffinEvents = 0x35; // 53
+  static const int puffinEventsFromStrap = 0x36; // 54
+  static const int relativeBatteryPackConsoleLogs = 0x37; // 55
+  static const int puffinMetadata = 0x38; // 56
 }
 
 /// Command opcodes (inside a 0x23 COMMAND) —. Subset we use.
@@ -130,14 +147,45 @@ class Cmd {
   // RUN_HAPTIC_PATTERN_MAVERICK (0x13) instead.
   static const int runHapticsPattern = 0x4F;
   static const int stopHaptics = 0x7A; // safe: cancels an in-progress buzz
-  // Wrist selection — also the wrist selector for an ECG reading. Safe.
+  // Wrist selection — also the wrist selector for a filtered-reading (R17)
+  // session, whose prepare step sends it right after the abort. Safe.
   static const int selectWrist = 0x7B;
-  // ECG. Main control arms/disarms a reading; the save/send pairs cover the
-  // raw and the filtered trace. Safe, but a reading is a battery cost.
+  // Filtered reading — WHOOP's internal name is "Labrador"; the trace arrives
+  // as record revision 17. Three toggles; every body is
+  // `[revision 01][operation]`:
+  //   124 TOGGLE_LABRADOR_DATA_GENERATION — 01=stop, 02=start, 03=restart.
+  //       An OPERATION byte, NOT a boolean: `01 01` is the STOP operation.
+  //   125 TOGGLE_LABRADOR_RAW_SAVE       — 00=disable, 01=enable.
+  //   139 TOGGLE_LABRADOR_FILTERED       — 00=disable, 01=enable.
+  // Safe, but a reading is a battery cost, and there is no auto-rollback: a
+  // partial startup leaves components enabled until the caller sends the OFFs.
+  // See commands.dart's cmdLabradorDataGeneration for the full sequence.
+  static const int toggleLabradorDataGeneration = 0x7C; // 124
+  static const int toggleLabradorRawSave = 0x7D; // 125
+  static const int toggleLabradorFiltered = 0x8B; // 139
+  // ── Deprecated "ECG" spellings of the three above ─────────────────────────
+  // The feature was previously modelled as an ECG arm/save/send matrix. The
+  // opcode NUMBERS 124/125/139 are right; the names and the arm/disarm mental
+  // model are not (see the operation table above).
+  @Deprecated('this is TOGGLE_LABRADOR_DATA_GENERATION (124): its body is an '
+      'operation byte (01=stop, 02=start, 03=restart), not an on/off flag — '
+      'use Cmd.toggleLabradorDataGeneration')
   static const int ecgMainControl = 0x7C;
+  @Deprecated('this is TOGGLE_LABRADOR_RAW_SAVE (125), 01 00 / 01 01 — '
+      'use Cmd.toggleLabradorRawSave')
   static const int ecgSaveRawData = 0x7D;
+  @Deprecated('opcode 126 (0x7E) is NOT an established WHOOP 5 opcode '
+      '— origin unknown, most likely gen4 '
+      'or third-party lore. The raw trace is TOGGLE_LABRADOR_RAW_SAVE (125): '
+      'use Cmd.toggleLabradorRawSave')
   static const int ecgSendRawData = 0x7E;
+  @Deprecated('opcode 127 (0x7F) is NOT an established WHOOP 5 opcode '
+      '— origin unknown, most likely gen4 '
+      'or third-party lore. The filtered trace is TOGGLE_LABRADOR_FILTERED '
+      '(139): use Cmd.toggleLabradorFiltered')
   static const int ecgSaveFilteredData = 0x7F;
+  @Deprecated('this is TOGGLE_LABRADOR_FILTERED (139), 01 00 / 01 01 — '
+      'use Cmd.toggleLabradorFiltered')
   static const int ecgSendFilteredData = 0x8B;
   // Signal-processing configuration. Advanced/diagnostic: it retunes the
   // on-strap algorithms, so it can change what the strap itself reports.
@@ -347,6 +395,13 @@ class EventId {
   static const int trimAllData = 26;
   static const int trimAllDataEnded = 27;
   static const int flashInitComplete = 28;
+
+  /// Live strap-condition telemetry the band volunteers: how far the host is
+  /// behind flash, plus charge/wear condition.
+  /// The page backlog it reports is the same quantity as GET_DATA_RANGE's
+  /// `pages_behind` — a modular PAGE span (~15 records/page nominal),
+  /// never a packet count.
+  static const int strapConditionReport = 29;
   // Optical / accel front-end saturation warnings.
   //
   // ⚠ NEVER EMITTED. 40/41/42 are defined ids but nothing on the strap raises
@@ -377,6 +432,20 @@ class EventId {
   static const int highFreqSyncPrompt = 96;
   static const int highFreqSyncEnabled = 97;
   static const int highFreqSyncDisabled = 98;
+
+  /// A running haptics pattern stopped, and WHY:
+  /// it expired, it errored, or the wearer double-tapped it away. This is the
+  /// only way to learn an alarm was dismissed rather than timing out.
+  static const int hapticsTerminated = 100;
+
+  /// The battery pack (puck) describing itself — address, name, charge,
+  /// colourway, hardware family. Same content as
+  /// the GET_BATTERY_PACK_INFO(151) reply, volunteered as an event.
+  static const int batteryPackInfo = 109;
+
+  /// Firmware-internal event wrapper carrying its own u16 sub-id
+  /// (see [FirmwareEventId]).
+  static const int genericFirmwareEvent = 123;
 
   static String name(int id) {
     switch (id) {
@@ -416,6 +485,8 @@ class EventId {
         return 'TRIM_ALL_DATA_ENDED';
       case flashInitComplete:
         return 'FLASH_INIT_COMPLETE';
+      case strapConditionReport:
+        return 'STRAP_CONDITION_REPORT';
       case ch1Saturation:
         return 'CH1_SATURATION_DETECTED';
       case ch2Saturation:
@@ -444,8 +515,113 @@ class EventId {
         return 'HIGH_FREQ_SYNC_ENABLED';
       case highFreqSyncDisabled:
         return 'HIGH_FREQ_SYNC_DISABLED';
+      case hapticsTerminated:
+        return 'HAPTICS_TERMINATED';
+      case batteryPackInfo:
+        return 'BATTERY_PACK_INFO';
+      case genericFirmwareEvent:
+        return 'GENERIC_FIRMWARE_EVENT';
       default:
         return 'EVENT_$id';
     }
   }
+}
+
+/// Why a running haptics pattern stopped — body[1] of an
+/// [EventId.hapticsTerminated] event.
+///
+/// The three causes are distinct and must not be collapsed: an alarm that ran
+/// its full duration, one the firmware aborted, and one the WEARER dismissed
+/// with a double tap.
+class HapticsTermination {
+  static const int expired = 0;
+  static const int error = 1;
+  static const int userDoubleTap = 2;
+
+  static String name(int code) {
+    switch (code) {
+      case expired:
+        return 'expired';
+      case error:
+        return 'error';
+      case userDoubleTap:
+        return 'user_double_tap';
+      default:
+        return 'code_$code';
+    }
+  }
+}
+
+/// The haptics/alarm status byte carried by the SET_ALARM_TIME(66) and
+/// RUN_ALARM(68) responses at response-body offset 1.
+///
+/// This is **in addition to** the ordinary outer command result — a caller
+/// must check both. A response can carry SUCCESS as its outer result and still
+/// report here that the alarm was refused, which is the whole reason the byte
+/// exists: it is the only place the strap says *why*.
+class AlarmStatus {
+  static const int unknown = 0;
+  static const int validInputPattern = 1;
+  static const int invalidWaveformEffect = 2;
+  static const int invalidLoopCount = 3;
+  static const int invalidDuration = 4;
+  static const int playedSuccessfully = 5;
+  static const int hapticsFailure = 6;
+  static const int hapticsTimeout = 7;
+  static const int hapticsBusy = 8;
+  static const int hapticsStopped = 9;
+  static const int invalidAlarmTime = 10;
+  static const int invalidAlarmId = 11;
+
+  /// The input-validation family: the strap examined what we sent and refused
+  /// it. Separated from the run-time outcomes (6..9), which say a pattern that
+  /// WAS accepted then failed, timed out, was busy or was stopped — a host
+  /// must not treat "haptics busy" as "your alarm is not armed".
+  static bool isInputRejection(int code) =>
+      code == invalidWaveformEffect ||
+      code == invalidLoopCount ||
+      code == invalidDuration ||
+      code == invalidAlarmTime ||
+      code == invalidAlarmId;
+
+  static String name(int code) {
+    switch (code) {
+      case unknown:
+        return 'unknown';
+      case validInputPattern:
+        return 'valid_input_pattern';
+      case invalidWaveformEffect:
+        return 'invalid_waveform_effect';
+      case invalidLoopCount:
+        return 'invalid_loop_count';
+      case invalidDuration:
+        return 'invalid_duration';
+      case playedSuccessfully:
+        return 'played_successfully';
+      case hapticsFailure:
+        return 'haptics_failure';
+      case hapticsTimeout:
+        return 'haptics_timeout';
+      case hapticsBusy:
+        return 'haptics_busy';
+      case hapticsStopped:
+        return 'haptics_stopped';
+      case invalidAlarmTime:
+        return 'invalid_alarm_time';
+      case invalidAlarmId:
+        return 'invalid_alarm_id';
+      default:
+        return 'code_$code';
+    }
+  }
+}
+
+/// Sub-ids carried by an [EventId.genericFirmwareEvent] (u16 LE at body[1]).
+/// Only one is named in the reference tables (doc 99); everything else stays
+/// numeric rather than being guessed at.
+class FirmwareEventId {
+  static const int dorsetDetected = 6;
+
+  static String name(int id) =>
+      id == dorsetDetected ? 'DORSET_DETECTED' : 'FIRMWARE_EVENT_$id';
 }

@@ -20,7 +20,7 @@ export 'src/records.dart'
         // caller routes on the real set instead of keeping its own copy, which
         // silently rots the day this one grows.
         kKnownRecordVersions;
-// gen5 historical-record decoders (v18/v20/v21/v26) — see gen5_records.dart
+// gen5 historical-record decoders (v18/v20/v21/v22/v26) — see gen5_records.dart
 // for why these replace the old, wrong parseGen5Record/{9,12,24} set.
 export 'src/gen5_records.dart'
     show
@@ -30,14 +30,20 @@ export 'src/gen5_records.dart'
         Gen5OpticalBlock,
         Gen5OpticalBuffer,
         Gen5ImuBuffer,
+        Gen5PpgReconstruction,
         Gen5PpgWaveform,
         Gen5RecordDecoder,
+        Gen5ResearchOpticalWindow,
+        Gen5ResearchRecord,
         Gen5SleepState,
         Gen5V18Decoder,
         Gen5V20Decoder,
         Gen5V21Decoder,
+        Gen5V22Decoder,
         Gen5V26Decoder,
         kGen5HistoricalDecoders,
+        kGen5V22KnownTags,
+        kGen5V22InnerLen,
         // The exact lengths are the live names; the *MinInnerLen* aliases below
         // are deprecated and exported only so existing callers still resolve.
         kGen5V18InnerLen,
@@ -51,7 +57,8 @@ export 'src/gen5_records.dart'
         kGen5GyroScaleDps,
         isGen5ImuBuffer,
         parseGen5ImuBuffer,
-        parseGen5Historical;
+        parseGen5Historical,
+        reconstructSaturatedDeltaWindow;
 export 'src/live.dart'
     show
         DecodedSample,
@@ -80,6 +87,7 @@ export 'src/commands.dart'
         buildBatchAck,
         initPackets,
         WristSelection,
+        LabradorOperation,
         cmdLinkValid,
         cmdGetBattery,
         cmdGetHello,
@@ -114,7 +122,43 @@ export 'src/commands.dart'
         cmdSetConfigGen5,
         cmdSetDeviceConfigValueGen5,
         kGen5R22EnableFlags,
-        buildR22EnableSequence;
+        kGen5R22ContestedFlagNames,
+        buildR22EnableSequence,
+        // Previously built + unit-tested but unreachable from this entry point.
+        // Every opcode below is an established WHOOP opcode, so a caller
+        // is reaching for something the band is known to implement.
+        //
+        // NOT exported, deliberately:
+        //  • buildR22RestoreDefaultsSequence — writes raw '0' to every flag,
+        //    which is not a valid boolean write value ('1'/'2' only; raw 0
+        //    = unset) and not the observed pre-value, so it is not a
+        //    correct restore. A correct restore is snapshot-based (GET each
+        //    flag first, write back the recorded value with readback).
+        //  • cmdGyroEnable (150) / cmdGyroStatus (152) / cmdSetEventPackets
+        //    (48) — these opcode NUMBERS are not established WHOOP opcodes.
+        //    They came from third-party sources, the same origin as the
+        //    unverified 146/147 "Maverick clock" opcodes.
+        //    They stay built and tested but unexported
+        //    until a trace or a hardware capture backs them; shipping them as
+        //    public API would present a guess as a capability.
+        cmdGetAlarmTime, // 67
+        cmdRawDataStart, // 81
+        cmdRawDataStop, // 82
+        cmdStopHaptics, // 122
+        // Filtered reading ("Labrador", R17). The wrong-bodied cmdEcgControl
+        // (124 as a bool) and the opcode-126 cmdEcgSendRaw stay deprecated
+        // and unexported.
+        cmdLabradorDataGeneration, // 124 — R17 lifecycle
+        cmdLabradorRawSave, // 125 — R17 lifecycle
+        cmdLabradorFiltered, // 139 — R17 lifecycle
+        cmdGetCustomAdvertisingName, // 141
+        cmdSetCustomAdvertisingName, // 140 — PERSISTENT write
+        cmdGetConfigKeyCount, // 115
+        cmdGetConfigKeyName, // 116
+        cmdGetFlagKeyCount, // 117
+        cmdGetFlagKeyName, // 118
+        cmdGetConfigValue, // 121 (read-only)
+        cmdGetFlagValue; // 128 (read-only)
 
 // Control-plane parsers (HELLO / EVENT / METADATA / COMMAND_RESPONSE / dispatch).
 export 'src/control.dart'
@@ -133,6 +177,7 @@ export 'src/control.dart'
         parseRealtimeHrV2,
         HelloInfo,
         parseHello,
+        Gen5HelloInfo,
         EventInfo,
         parseEvent,
         CmdResponse,
