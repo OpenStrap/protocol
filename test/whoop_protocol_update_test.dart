@@ -29,10 +29,19 @@ void main() {
       );
     });
 
-    test('history result failure uses cmd 0x17 + failure byte', () {
-      final frame = parseFrame(buildHistoryResultFail(0x22))!;
-      expect(frame.valid, isTrue);
-      expect(frame.inner, [0x23, 0x22, 0x17, 0x00]);
+    test('history result failure: gen5 sends 00 00, gen4 keeps one byte', () {
+      // The two-byte failure payload is pinned on gen5 only; the gen4 form
+      // keeps its established single failure byte until a gen4 capture says
+      // otherwise. Trailing bytes are 4-byte inner alignment padding.
+      final g5 = parseFrame(
+          buildHistoryResultFail(0x22, profile: BandProfile.gen5),
+          profile: BandProfile.gen5)!;
+      expect(g5.valid, isTrue);
+      expect(g5.inner.sublist(0, 5), [0x23, 0x22, 0x17, 0x00, 0x00]);
+
+      final g4 = parseFrame(buildHistoryResultFail(0x22))!;
+      expect(g4.valid, isTrue);
+      expect(g4.inner.sublist(0, 4), [0x23, 0x22, 0x17, 0x00]);
     });
 
     test('enter high-frequency sync uses revision 2 + little-endian u16s', () {

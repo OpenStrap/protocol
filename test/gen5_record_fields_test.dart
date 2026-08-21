@@ -106,30 +106,74 @@ void main() {
     });
   });
 
-  group('v18 optical fields are two big-endian u16s', () {
-    test('the real fixture pairs as 0x656F / 0x1E1E', () {
+  group('v18 optical bytes: two u8 PD means + two i8 pSNR values', () {
+    test('the real fixture decodes as independent bytes', () {
       final inner = innerOf(_v18Frame);
       final s = parseGen5Historical(inner) as Gen5HistorySample;
+      // body 85/86: quantized selected-source PD means (B then A).
+      expect(s.pdMeanB, inner[98]); // 0x65
+      expect(s.pdMeanA, inner[99]); // 0x6F
+      // body 87/88: SIGNED i8 pSNR in dB (B then A); fixture is 0x1E = +30 dB.
+      expect(s.psnrB, 0x1E);
+      expect(s.psnrA, 0x1E);
+      expect(s.psnrBAvailable, isTrue);
+      expect(s.psnrAAvailable, isTrue);
+      // Compat: the deprecated u16 views reconstruct the old values exactly.
+      // ignore: deprecated_member_use_from_same_package
       expect(s.opticalBaseline, 0x656F);
+      // ignore: deprecated_member_use_from_same_package
       expect(s.opticalAmp, 0x1E1E);
-      // Big-endian: the FIRST byte on the wire is the high half.
-
-      expect(s.opticalAmp >> 8, inner[100]);
-      expect(s.opticalAmp & 0xFF, inner[101]);
     });
 
-    test('the sentinel is the single value 0x8080', () {
+    test('0x80 is the per-detector -128 unavailable sentinel, not a value', () {
       final inner = innerOf(_v18Frame);
       inner[100] = 0x80;
       inner[101] = 0x80;
       final s = parseGen5Historical(inner) as Gen5HistorySample;
-      expect(s.opticalAmp, 0x8080);
+      // BOTH detectors unavailable — the case previously misread as one
+      // u16 "0x8080 sentinel" — a large share of real records read it.
+      expect(s.psnrB, -128);
+      expect(s.psnrA, -128);
+      expect(s.psnrBAvailable, isFalse);
+      expect(s.psnrAAvailable, isFalse);
       expect(s.isOpticalAmpSentinel, isTrue);
 
-      inner[101] = 0x7F; // one half alone is a real reading, not the sentinel
+      inner[101] = 0x7F; // PD-A has a real reading (+127 dB edge value)
       final s2 = parseGen5Historical(inner) as Gen5HistorySample;
-      expect(s2.opticalAmp, 0x807F);
+      expect(s2.psnrB, -128);
+      expect(s2.psnrBAvailable, isFalse);
+      expect(s2.psnrA, 127);
+      expect(s2.psnrAAvailable, isTrue);
       expect(s2.isOpticalAmpSentinel, isFalse);
+    });
+
+    test('negative pSNR values decode as signed dB', () {
+      final inner = innerOf(_v18Frame);
+      inner[100] = 0xF6; // -10 dB
+      inner[101] = 0x05; // +5 dB
+      final s = parseGen5Historical(inner) as Gen5HistorySample;
+      expect(s.psnrB, -10);
+      expect(s.psnrA, 5);
+      expect(s.psnrBAvailable, isTrue);
+    });
+  });
+
+  group('v18 skin-temp sentinel', () {
+    test('-5000 raw (= -50.00 °C) reads as unavailable, not a temperature', () {
+      final inner = innerOf(_v18Frame);
+      final bd = ByteData.sublistView(inner);
+      bd.setInt16(65, -5000, Endian.little);
+      final s = parseGen5Historical(inner) as Gen5HistorySample;
+      expect(s.skinTempC, -50.0);
+      expect(s.skinTempAvailable, isFalse);
+      expect(s.skinTempCOrNull, isNull);
+    });
+
+    test('a real reading passes through the honest accessor', () {
+      final inner = innerOf(_v18Frame);
+      final s = parseGen5Historical(inner) as Gen5HistorySample;
+      expect(s.skinTempAvailable, isTrue);
+      expect(s.skinTempCOrNull, s.skinTempC);
     });
   });
 
@@ -194,7 +238,9 @@ void main() {
     // Synthetic — no real v20 capture is available — but it exercises the
     // stated geometry (body @ 18, stride 422, slots at +21 / +221) and the
     // metadata field boundaries.
-    Uint8List buildV20() {
+    // [ch0Offset]/[ch1Offset] are written as the raw 16-bit wire words at the
+    // descriptor's TIA 1 / TIA 2 offset-current fields.
+    Uint8List buildV20({int ch0Offset = 512, int ch1Offset = 1024}) {
       final inner = Uint8List(kGen5V20InnerLen);
       inner[0] = 0x2f;
       inner[1] = 20;
@@ -212,14 +258,14 @@ void main() {
         v.setUint16(start + 2, 2500, Endian.little); // 25.00 mA
         inner[start + 4] = 2;
         v.setUint16(start + 5, 40, Endian.little); // 400 µA
-        // photodiode 0: [source][u32 adc range][u16 adc offset]
+        // TIA 1: [physical-PD source][u32 adc range µA][i16 offset current]
         inner[start + 7] = 3;
         v.setUint32(start + 8, 100000, Endian.little);
-        v.setUint16(start + 12, 512, Endian.little);
-        // photodiode 1
+        v.setUint16(start + 12, ch0Offset, Endian.little);
+        // TIA 2
         inner[start + 14] = 4;
         v.setUint32(start + 15, 200000, Endian.little);
-        v.setUint16(start + 19, 1024, Endian.little);
+        v.setUint16(start + 19, ch1Offset, Endian.little);
       }
       return inner;
     }
@@ -245,14 +291,34 @@ void main() {
         expect(blk.ledBCurrentMicroamps, 400);
         expect(blk.channel0Source, 3);
         expect(blk.channel0AdcRange, 100000);
-        expect(blk.channel0AdcOffset, 512);
+        expect(blk.tia1OffsetCurrentRaw, 512);
         expect(blk.channel1Source, 4);
         expect(blk.channel1AdcRange, 200000);
-        expect(blk.channel1AdcOffset, 1024);
+        expect(blk.tia2OffsetCurrentRaw, 1024);
         // The raw blobs stay available and still cover the same bytes.
         expect(blk.sharedMetaRaw, hasLength(6));
         expect(blk.channel0MetaRaw, hasLength(7));
         expect(blk.channel1MetaRaw, hasLength(7));
+      }
+    });
+
+    test('TIA offset current is a signed i16 in 10 nA/LSB', () {
+      // TIA 1: bytes 0x18 0xFC = 0xFC18 = 64536 unsigned = -1000 signed,
+      // i.e. -10,000 nA. TIA 2: 2400 = one of the quantized settings
+      // (0/800/1600/2400 on the wire = 0/8/16/24 µA) = +24,000 nA.
+      final buf =
+          parseGen5Historical(buildV20(ch0Offset: 0xFC18, ch1Offset: 2400))
+              as Gen5OpticalBuffer;
+      for (final blk in buf.blocks) {
+        expect(blk.tia1OffsetCurrentRaw, -1000);
+        expect(blk.tia1OffsetCurrentNanoamps, -10000);
+        expect(blk.tia2OffsetCurrentRaw, 2400);
+        expect(blk.tia2OffsetCurrentNanoamps, 24000); // 24 µA
+        // The deprecated getters keep their old unsigned-u16 behaviour.
+        // ignore: deprecated_member_use_from_same_package
+        expect(blk.channel0AdcOffset, 64536);
+        // ignore: deprecated_member_use_from_same_package
+        expect(blk.channel1AdcOffset, 2400);
       }
     });
   });
