@@ -182,6 +182,112 @@ void main() {
     });
   });
 
+  // The alarm/haptics status byte: the SET and RUN
+  // alarm replies both carry a haptics/alarm status at response-body offset 1,
+  // i.e. payload[3]. It is "in addition to" the outer command result — the two
+  // answer different questions and both have to be read.
+  group('alarm replies carry a status byte of their own', () {
+    Map<String, dynamic> setReply(int status, {int outer = 1, int rev = 3}) =>
+        parseCommandResponse(
+                cmdResponse(Cmd.setAlarmTime, [rev, status], status: outer))!
+            .decoded;
+
+    Map<String, dynamic> runReply(int status, {int outer = 1}) =>
+        parseCommandResponse(
+                cmdResponse(Cmd.runAlarm, [2, status], status: outer))!
+            .decoded;
+
+    test('SET_ALARM_TIME(66) reads body byte 1, past the revision byte', () {
+      final ok = setReply(AlarmStatus.validInputPattern);
+      expect(ok['alarm_status'], 1);
+      expect(ok['alarm_status_name'], 'valid_input_pattern');
+
+      final played = setReply(AlarmStatus.playedSuccessfully);
+      expect(played['alarm_status'], 5);
+      expect(played['alarm_status_name'], 'played_successfully');
+    });
+
+    test('a rejected alarm time is reported even under a SUCCESS outer result',
+        () {
+      // The case the whole branch exists for: the outer result says the
+      // command was handled, and the strap still refused the alarm.
+      final r = setReply(AlarmStatus.invalidAlarmTime);
+      expect(r['cmd_status'], 1);
+      expect(r['alarm_status'], 10);
+      expect(r['alarm_status_name'], 'invalid_alarm_time');
+      expect(AlarmStatus.isInputRejection(10), isTrue);
+    });
+
+    test('a FAILURE reply still yields its status — that is the diagnostic',
+        () {
+      final r = setReply(AlarmStatus.invalidAlarmId, outer: 0);
+      expect(r['cmd_status'], 0);
+      expect(r['alarm_status'], 11);
+      expect(r['alarm_status_name'], 'invalid_alarm_id');
+    });
+
+    test('an unrecognised response revision does not suppress the status', () {
+      // The SET reply's revision byte reads 3, but it is not a gate: a strap
+      // answering with another revision still put the status where it goes.
+      expect(setReply(AlarmStatus.hapticsBusy, rev: 9)['alarm_status'], 8);
+    });
+
+    test('RUN_ALARM(68) decodes the same table from its [02, status] body', () {
+      expect(runReply(AlarmStatus.playedSuccessfully)['alarm_status_name'],
+          'played_successfully');
+      expect(runReply(AlarmStatus.hapticsFailure)['alarm_status'], 6);
+      // Run-time outcomes are NOT input rejections — a busy strap is not a
+      // strap that refused the request.
+      expect(AlarmStatus.isInputRejection(AlarmStatus.hapticsBusy), isFalse);
+      expect(AlarmStatus.isInputRejection(AlarmStatus.hapticsStopped), isFalse);
+    });
+
+    test('an undocumented code stays numeric rather than being guessed at', () {
+      expect(runReply(200)['alarm_status_name'], 'code_200');
+      expect(AlarmStatus.isInputRejection(200), isFalse);
+    });
+
+    test('a body too short to hold the status emits nothing at all', () {
+      // Header + revision byte only: there is no status byte to read.
+      final short =
+          parseCommandResponse(cmdResponse(Cmd.setAlarmTime, [3]))!.decoded;
+      expect(short.containsKey('alarm_status'), isFalse);
+      expect(short.containsKey('alarm_status_name'), isFalse);
+      expect(short['cmd_status'], 1, reason: 'the outer result still decodes');
+
+      final empty =
+          parseCommandResponse(cmdResponse(Cmd.runAlarm, const []))!.decoded;
+      expect(empty.containsKey('alarm_status'), isFalse);
+    });
+
+    test('GET_ALARM_TIME rev-4 reports active only when the flag is exactly 1',
+        () {
+      Map<String, dynamic> get4(int activeFlag) => parseCommandResponse(
+            cmdResponse(Cmd.getAlarmTime,
+                [0x04, activeFlag, ...le32(1786000000), ...le16(0)]),
+          )!.decoded;
+      expect(get4(1)['alarm_active'], isTrue);
+      expect(get4(1)['alarm_epoch'], 1786000000);
+      expect(get4(0)['alarm_active'], isFalse);
+      // Anything other than exactly 1 is not an armed alarm.
+      expect(get4(2)['alarm_active'], isFalse);
+    });
+
+    test('gen5 GET_CUSTOM_ADVERTISING_NAME (0x8D) decodes like gen4 0x4C', () {
+      // Reply body: revision, status, length, then the ASCII name — the same
+      // shape at the same offsets on both generations.
+      const name = 'Band-7';
+      final body = [0x01, 0x00, name.length, ...name.codeUnits];
+      final g5 = parseCommandResponse(
+          cmdResponse(Cmd.getCustomAdvertisingName, body),
+          profile: BandProfile.gen5)!;
+      final g4 = parseCommandResponse(
+          cmdResponse(Cmd.getAdvertisingNameHarvard, body))!;
+      expect(g5.decoded['strap_name'], name);
+      expect(g4.decoded['strap_name'], name);
+    });
+  });
+
   group('EVENT (0x30) body is bounded by the declared length', () {
     test('frame padding past the length field is not part of the body', () {
       final e = parseEvent(envelopePacket(0x30, EventId.setRtc, [0xAA, 0xBB],
@@ -214,6 +320,161 @@ void main() {
       final off = parseEvent(
           envelopePacket(0x30, EventId.batteryLevel, batteryBody(0)))!;
       expect(off.decoded['charging'], isFalse);
+    });
+  });
+
+  // Field-level bodies exist for four event ids the
+  // decoder used to hand back raw. All offsets below are BODY-relative (the
+  // envelope body starts at inner[12]).
+  group('volunteered EVENT bodies are decoded (gen5)', () {
+    List<int> conditionBody({
+      int pagesBehind = 1234,
+      int backlogTenths = 456,
+      int socTenths = 872,
+      int flash = 3,
+      int charging = 1,
+      int wrist = 2,
+    }) =>
+        [
+          ...le32(pagesBehind),
+          ...le16(backlogTenths),
+          ...le16(socTenths),
+          flash,
+          charging,
+          wrist,
+        ];
+
+    test('STRAP_CONDITION_REPORT(29) reports backlog, charge and wear', () {
+      final e = parseEvent(
+          envelopePacket(0x30, EventId.strapConditionReport, conditionBody()),
+          profile: BandProfile.gen5)!;
+      expect(e.name, 'STRAP_CONDITION_REPORT');
+      expect(e.decoded['condition_pages_behind'], 1234);
+      expect(e.decoded['condition_backlog'], closeTo(45.6, 1e-9));
+      expect(e.decoded['condition_soc_pct'], closeTo(87.2, 1e-9));
+      expect(e.decoded['condition_flash'], 3);
+      expect(e.decoded['condition_charging'], isTrue);
+      // Tri-state, kept raw — the doc names no mapping, and wear truth is not
+      // taken from here.
+      expect(e.decoded['condition_wrist_state'], 2);
+      expect(e.decoded.containsKey('on_wrist'), isFalse);
+    });
+
+    test('a state of charge outside 0..100 is not reported at all', () {
+      final e = parseEvent(
+          envelopePacket(0x30, EventId.strapConditionReport,
+              conditionBody(socTenths: 0xFFFF)),
+          profile: BandProfile.gen5)!;
+      expect(e.decoded.containsKey('condition_soc_pct'), isFalse);
+      // The fields around it still decode.
+      expect(e.decoded['condition_pages_behind'], 1234);
+      expect(e.decoded['condition_charging'], isTrue);
+    });
+
+    test('a short STRAP_CONDITION_REPORT body degrades to its prefix', () {
+      final e = parseEvent(
+          envelopePacket(0x30, EventId.strapConditionReport,
+              conditionBody().sublist(0, 6)),
+          profile: BandProfile.gen5)!;
+      expect(e.decoded['condition_pages_behind'], 1234);
+      expect(e.decoded['condition_backlog'], closeTo(45.6, 1e-9));
+      expect(e.decoded.containsKey('condition_soc_pct'), isFalse);
+      expect(e.decoded.containsKey('condition_charging'), isFalse);
+    });
+
+    test('HAPTICS_TERMINATED(100) separates expiry, error and dismissal', () {
+      Map<String, dynamic> terminated(int code) => parseEvent(
+              envelopePacket(0x30, EventId.hapticsTerminated, [1, code]),
+              profile: BandProfile.gen5)!
+          .decoded;
+
+      expect(terminated(0)['haptics_termination'], 'expired');
+      expect(terminated(1)['haptics_termination'], 'error');
+      // The one the wearer causes: a double tap on a running alarm.
+      final tap = terminated(2);
+      expect(tap['haptics_revision'], 1);
+      expect(tap['haptics_termination_code'], HapticsTermination.userDoubleTap);
+      expect(tap['haptics_termination'], 'user_double_tap');
+      // An undocumented code stays numeric rather than being folded into one
+      // of the three known causes.
+      expect(terminated(9)['haptics_termination'], 'code_9');
+    });
+
+    test('BATTERY_PACK_INFO(109) decodes address, name and hardware', () {
+      final body = <int>[
+        4, // [0] revision
+        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // [1..6] BT address
+        ...'PACK-7'.codeUnits, // [7..] name, NUL padded to 22
+        ...List<int>.filled(16 - 'PACK-7'.length, 0),
+        ...le16(742), // [23..24] battery-level structure
+        5, // [25] colorway
+        2, // [26] hardware family
+      ];
+      final e = parseEvent(envelopePacket(0x30, EventId.batteryPackInfo, body),
+          profile: BandProfile.gen5)!;
+      expect(e.name, 'BATTERY_PACK_INFO');
+      expect(e.decoded['pack_revision'], 4);
+      expect(e.decoded['pack_address'], 'aa:bb:cc:dd:ee:ff');
+      expect(e.decoded['pack_name'], 'PACK-7');
+      expect(e.decoded['pack_battery_raw'], 742);
+      expect(e.decoded['pack_colorway'], 5);
+      expect(e.decoded['pack_hardware_family'], 2);
+    });
+
+    test('a truncated BATTERY_PACK_INFO body decodes nothing, never garbage',
+        () {
+      final e = parseEvent(
+          envelopePacket(
+              0x30, EventId.batteryPackInfo, List<int>.filled(20, 0x41)),
+          profile: BandProfile.gen5)!;
+      expect(e.decoded, isEmpty);
+      expect(e.body, hasLength(20)); // still retained raw
+    });
+
+    test('GENERIC_FIRMWARE_EVENT(123) names sub-id 6 and numbers the rest', () {
+      final dorset = parseEvent(
+          envelopePacket(0x30, EventId.genericFirmwareEvent, [1, ...le16(6)]),
+          profile: BandProfile.gen5)!;
+      expect(dorset.decoded['fw_event_revision'], 1);
+      expect(dorset.decoded['fw_event_id'], FirmwareEventId.dorsetDetected);
+      expect(dorset.decoded['fw_event'], 'DORSET_DETECTED');
+
+      final other = parseEvent(
+          envelopePacket(0x30, EventId.genericFirmwareEvent, [1, ...le16(300)]),
+          profile: BandProfile.gen5)!;
+      expect(other.decoded['fw_event_id'], 300);
+      expect(other.decoded['fw_event'], 'FIRMWARE_EVENT_300');
+    });
+
+    test('the gen5-scoped ids stay numeric and un-decoded on a gen4 parse', () {
+      // A gen4 event 29 is not a known vocabulary entry — decoding it with
+      // the gen5 body map would turn an unknown byte into a confident wrong
+      // number (a fabricated state of charge, above all).
+      final e = parseEvent(
+          envelopePacket(0x30, EventId.strapConditionReport, conditionBody()))!;
+      expect(e.name, 'EVENT_${EventId.strapConditionReport}');
+      expect(e.decoded, isEmpty);
+      final h = parseEvent(
+          envelopePacket(0x30, EventId.hapticsTerminated, [1, 2]))!;
+      expect(h.name, 'EVENT_${EventId.hapticsTerminated}');
+      expect(h.decoded, isEmpty);
+    });
+
+    test('an event id outside the vocabulary still flows through as an event',
+        () {
+      // Unlisted event ids: 110 and 124 arrive with no vocabulary entry.
+      // They must stay retainable burst members, not become `event_unparsed`.
+      final e = parseEvent(
+          envelopePacket(0x30, 110, [0x01, 0x01, 0, 0, 0, 0, 0, 0]))!;
+      expect(e.eventId, 110);
+      expect(e.name, 'EVENT_110');
+      expect(e.decoded, isEmpty);
+      expect(e.body, hasLength(8));
+
+      final d = decodeFrame(Frame(
+          envelopePacket(0x30, 124, [0x01, 0x01, 0x01, 0x03]), true, true));
+      expect(d.kind, 'event');
+      expect(d.fields['retain_raw'], isTrue);
     });
   });
 

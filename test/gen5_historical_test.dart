@@ -13,6 +13,35 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
+/// The 24 saturated i16 deltas carried by the real v26 fixture used below
+/// (inner[19:67], body 6).
+const List<int> _v26Deltas = [
+  -1432,
+  -1332,
+  -1139,
+  -954,
+  -629,
+  -436,
+  -326,
+  -294,
+  -147,
+  -170,
+  -43,
+  -5,
+  -201,
+  -918,
+  -1563,
+  -1833,
+  -1313,
+  -930,
+  -616,
+  -293,
+  -422,
+  -380,
+  -235,
+  -164,
+];
+
 Uint8List hex(String s) {
   final clean = s.replaceAll(' ', '');
   final out = Uint8List(clean.length ~/ 2);
@@ -58,12 +87,15 @@ void main() {
       expect(sample.rrIntervalsMs, [602, 613]);
     });
 
-    test('quality flags + alt HR', () {
+    test('quality flags stay raw; alt-HR is gated, never substituted', () {
       expect(sample.hrQualityFlags, 0x8D);
-      expect(sample.hrRrValidThisSecond, isTrue); // bit7 set
       expect(sample.hrQualityCounter, 0x0D); // low 4 bits, separate field
+      // inner[29] rides along raw; bit7 gates the corroborated read only.
       expect(sample.heartRateAlt, 101);
+      expect(sample.hrRrValidThisSecond, isTrue);
       expect(sample.trustedHeartRateAlt, 101);
+      // bit7 is NOT "HR valid": heartRate stands on its own range check and
+      // is present on plenty of records with bit7 clear.
     });
 
     test('frame-abs 36/37 is NOT one fixed-point HR', () {
@@ -100,11 +132,19 @@ void main() {
       expect(sample.skinTempC, closeTo(30.57, 1e-6));
     });
 
-    test('optical front-end', () {
-      // Two BIG-ENDIAN u16s, not four bytes: inner[98:100] and inner[100:102].
+    test('optical front-end: four independent bytes, not two u16s', () {
+      // Body 85..88: two u8 quantized PD means, then two SIGNED i8
+      // per-detector pSNR values in dB (-128 = unavailable).
+      expect(sample.pdMeanB, 0x65);
+      expect(sample.pdMeanA, 0x6F);
+      expect(sample.psnrB, 0x1E); // +30 dB
+      expect(sample.psnrA, 0x1E);
+      expect(sample.psnrBAvailable, isTrue);
+      expect(sample.psnrAAvailable, isTrue);
+      expect(sample.isOpticalAmpSentinel, isFalse); // not both-unavailable
+      // One compat assertion so the deprecated u16 view stays wired correctly.
+      // ignore: deprecated_member_use_from_same_package
       expect(sample.opticalBaseline, 0x656F);
-      expect(sample.opticalAmp, 0x1E1E);
-      expect(sample.isOpticalAmpSentinel, isFalse); // not the 0x8080 sentinel
     });
 
     test('experimental fields exposed raw, not fabricated', () {
@@ -195,34 +235,13 @@ void main() {
       // a separate field.
       expect(wf.recordIndex, 25444781);
       expect(wf.unix, 1780917232);
+      // ignore: deprecated_member_use_from_same_package
       expect(wf.rawByte19, 174);
-      expect(wf.burstIndex, 1);
-      expect(wf.ppgWaveform, [
-        -1432,
-        -1332,
-        -1139,
-        -954,
-        -629,
-        -436,
-        -326,
-        -294,
-        -147,
-        -170,
-        -43,
-        -5,
-        -201,
-        -918,
-        -1563,
-        -1833,
-        -1313,
-        -930,
-        -616,
-        -293,
-        -422,
-        -380,
-        -235,
-        -164,
-      ]);
+      expect(wf.pipStateCounter, 1);
+      // These 24 i16s are DELTAS over a 25-sample window (body 6), not
+      // samples — see `reconstructs a 25-sample window` below for the
+      // absolute codes they step through.
+      expect(wf.opticalDeltas, _v26Deltas);
     });
 
     test('record_index is one consecutive u32 across real consecutive frames',
@@ -288,28 +307,153 @@ void main() {
       expect((56 * 32768) ~/ 100, wf.segmentId);
     });
 
-    test('sub-channel, gain and the trailing metadata block decode', () {
+    test('the PIP body decodes per the revision-26 field map', () {
       final wf = decode(frame);
-      expect(wf.subChannel, 5);
-      expect(wf.subChannelKnown, 5); // inside 0..7
-      expect(wf.burstIndex, 1); // distinct from subChannel
-      expect(wf.frontEndMetaRaw, 50627);
-      expect(wf.signalMetric, closeTo(0.0219, 1e-4));
-      expect(wf.gainSetting, 80);
-      expect(wf.gainIndex, 8);
-      expect(wf.flagA, 1);
-      expect(wf.flagB, 1);
+      // body 0 / inner[13:15] — PIP state/segment counter, a u16.
+      expect(wf.pipStateCounter, 1);
+      // body 2 / inner[15:19] — the window's first optical ADC code, i32 LE
+      // (bytes c3 c5 05 00). Inside the front end's signed 20-bit range.
+      expect(wf.firstSampleAdc, 378307);
+      expect(wf.firstSampleAdcInRange, isTrue);
+      expect(wf.firstSampleAdcOrNull, 378307);
+      // body 54 / inner[67:71] — max adjacent accel-magnitude delta in g. The
+      // SAME f32 as R18's dynamicAccelerationG (verified byte-for-byte on
+      // every paired record).
+      expect(wf.accelDeltaG, closeTo(0.0219, 1e-4));
+      // body 58 / inner[71:73] — packed channel-0 processing-state word, one
+      // u16 (== R18 statusWord on every paired record).
+      expect(wf.channelStateWord, 2128);
+      // body 60 / inner[73] — primary-flags bit-8 snapshot.
+      expect(wf.primaryFlagsByte, 1);
+      expect(wf.primaryFlagsBit8Raw, 1);
+      // body 61 / inner[74] — binary waveform-morphology acceptance result.
+      expect(wf.morphologyByte, 1);
+      expect(wf.morphologyPass, isTrue);
+      // body 62 / inner[75] — aligned tail, outside the copied ring record.
+      expect(wf.alignedTailByte, 0);
     });
 
-    test('sub-channel outside 0..7 is not fabricated into a channel', () {
+    test('a morphology byte other than 1 is not a pass', () {
       final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
-      for (final bad in [0xFD, 0xFE, 0xFF]) {
+      for (final b in [0x00, 0x02, 0xFF]) {
         final inner = Uint8List.fromList(parsed.inner);
-        inner[17] = bad;
+        inner[74] = b;
         final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
-        expect(wf.subChannel, bad); // raw byte preserved
-        expect(wf.subChannelKnown, isNull); // but not offered as a channel
+        expect(wf.morphologyByte, b); // raw byte preserved
+        expect(wf.morphologyPass, isFalse);
       }
+    });
+
+    test('the first sample is a signed i32, not four independent bytes', () {
+      final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
+      // A negative first sample sign-extends into inner[17]/inner[18]. The old
+      // decoder read inner[17] as a 0..7 "sub-channel" and called 0xFD..0xFF
+      // (~0.2% of records) outliers; they are simply negative codes.
+      final inner = Uint8List.fromList(parsed.inner);
+      inner.setRange(15, 19, [0x0A, 0xBB, 0xFD, 0xFF]); // -148726
+      final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
+      expect(wf.firstSampleAdc, -148726);
+      expect(wf.firstSampleAdcInRange, isTrue);
+      // ignore: deprecated_member_use_from_same_package
+      expect(wf.subChannel, 0xFD); // the "outlier" the old reading saw
+    });
+
+    test('an impossible first sample is exposed raw, not fabricated', () {
+      final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
+      final inner = Uint8List.fromList(parsed.inner);
+      inner.setRange(15, 19, [0x00, 0x00, 0x40, 0x00]); // 4194304 > 2^19-1
+      final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
+      // The record still decodes — the raw value stays visible as itself.
+      expect(wf.firstSampleAdc, 4194304);
+      // But it is not offered as a code the front end could have produced.
+      expect(wf.firstSampleAdcInRange, isFalse);
+      expect(wf.firstSampleAdcOrNull, isNull);
+      // And the reconstruction reports it rather than silently summing on.
+      expect(wf.reconstructWindow().outOfRangeSampleIndices, contains(0));
+      expect(wf.reconstructWindow().divergenceProven, isTrue);
+    });
+
+    test('reconstructs a 25-sample window from first sample + 24 deltas', () {
+      final wf = decode(frame);
+      final r = wf.reconstructWindow();
+      expect(r.samples.length, 25);
+      expect(r.samples.first, wf.firstSampleAdc);
+      // Cumulative sum: sample i+1 == sample i + delta i.
+      for (var i = 0; i < _v26Deltas.length; i++) {
+        expect(r.samples[i + 1], r.samples[i] + _v26Deltas[i]);
+      }
+      expect(r.samples.last, 362532);
+      // This real record is clean: no saturated delta, nothing impossible.
+      expect(r.hasSaturatedDelta, isFalse);
+      expect(r.firstAmbiguousSampleIndex, isNull);
+      expect(r.outOfRangeSampleIndices, isEmpty);
+      expect(r.divergenceProven, isFalse);
+      expect(r.trustedSampleCount, 25);
+      expect(r.trustedSamples, r.samples);
+    });
+
+    test('a -32768 delta marks its sample and everything after it ambiguous',
+        () {
+      // Delta reconstruction is lossy: the saturating clamp destroys its
+      // operand, and the wire carries no signal that it happened.
+      final parsed = parseFrame(frame, profile: BandProfile.gen5)!;
+      final inner = Uint8List.fromList(parsed.inner);
+      // Delta 3 lives at inner[19 + 2*3] = inner[25:27].
+      inner[25] = 0x00;
+      inner[26] = 0x80; // -32768 LE
+      final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
+      expect(wf.opticalDeltas[3], -32768);
+      final r = wf.reconstructWindow();
+      expect(r.hasSaturatedDelta, isTrue);
+      // Delta 3 produces sample 4, so samples 0..3 survive and 4..24 do not.
+      expect(r.firstAmbiguousSampleIndex, 4);
+      expect(r.trustedSampleCount, 4);
+      expect(r.trustedSamples, r.samples.sublist(0, 4));
+      // The window still reconstructs — it is approximate, not withheld.
+      expect(r.samples.length, 25);
+    });
+
+    test('+32767 is a rail too — the positive clamp is just as ambiguous', () {
+      // A delta of exactly +32767 is the positive i16 saturation rail: real
+      // windows hit it exactly, with nothing anywhere near it below, so it is
+      // a clamp, not a large step. Treating only -32768 as saturation handed
+      // over a fabricated ramp as `trustedSampleCount == 25`.
+      final r = reconstructSaturatedDeltaWindow(1000, [10, 32767, 10]);
+      expect(r.hasSaturatedDelta, isTrue);
+      expect(r.firstAmbiguousSampleIndex, 2);
+      expect(r.trustedSampleCount, 2);
+      // One rail off is still an ordinary delta.
+      final near = reconstructSaturatedDeltaWindow(1000, [10, 32766, -10]);
+      expect(near.hasSaturatedDelta, isFalse);
+      expect(near.trustedSampleCount, 4);
+    });
+
+    test('an out-of-range reconstructed sample proves the inversion diverged',
+        () {
+      // A correct inversion cannot land outside signed 20 bits, so a window
+      // that does is provably wrong.
+      final r = reconstructSaturatedDeltaWindow(524000, [200, 300, -100]);
+      expect(r.samples, [524000, 524200, 524500, 524400]);
+      expect(r.outOfRangeSampleIndices, [2, 3]); // 524500/524400 > 524287
+      expect(r.divergenceProven, isTrue);
+      expect(r.hasSaturatedDelta, isFalse); // independent of the clamp
+    });
+
+    test('the deprecated members map onto the real fields they misread', () {
+      // Every name below is deprecated; the package's analysis_options mutes
+      // deprecated_member_use_from_same_package precisely so these stay
+      // testable. See the class for what each byte really is.
+      final wf = decode(frame);
+      expect(wf.burstIndex, wf.pipStateCounter & 0xFF);
+      expect(wf.frontEndMetaRaw, wf.firstSampleAdc & 0xFFFF); // 50627
+      expect(wf.subChannel, (wf.firstSampleAdc >> 16) & 0xFF); // 5
+      expect(wf.subChannelKnown, 5); // "inside 0..7" only ever meant positive
+      expect(wf.signalMetric, wf.accelDeltaG);
+      expect(wf.gainSetting, wf.channelStateWord & 0xFF); // 80
+      expect(wf.gainIndex, (wf.channelStateWord >> 8) & 0xFF); // 8
+      expect(wf.flagA, wf.primaryFlagsByte);
+      expect(wf.flagB, wf.morphologyByte);
+      expect(wf.ppgWaveform, wf.opticalDeltas); // deltas, never samples
     });
 
     test('a record short of the exact 76-byte length is rejected outright', () {
@@ -553,39 +697,130 @@ void main() {
       expect(r4.decoded['battery_pct'], 1.0);
     });
 
-    test('gen5 GET_HELLO (0x91) decodes device_name + gated fw_version', () {
-      final inner = Uint8List(120);
-      inner[0] = PacketType.commandResponse;
-      inner[1] = 0;
-      inner[2] = Cmd.getHello;
-      inner[3] = 7; // echoed request seq
-      inner[4] = 1; // status: ok
-      final payload = Uint8List.sublistView(inner, 3);
-      // device_name @ pay[51] — a 30-byte field in the reply body
-      final name = 'MyStrap';
-      for (int i = 0; i < name.length; i++) {
-        payload[51 + i] = name.codeUnitAt(i);
+    // Build a gen5 GET_HELLO reply body per the revision-1 fixed map, with
+    // synthetic identity values. Returns the 104-byte body (offsets are
+    // body-relative).
+    Uint8List gen5HelloBody() {
+      final body = Uint8List(Gen5HelloInfo.semanticBodyLen);
+      final bd = ByteData.sublistView(body);
+      body[0] = 1; // hello revision
+      bd.setUint32(1, 901, Endian.little); // battery raw 901 → 90
+      body[5] = 0; // not charging
+      bd.setUint32(6, 1780000000, Endian.little); // ts seconds
+      bd.setUint32(10, 28835, Endian.little); // ts subseconds
+      for (var i = 0; i < '5AG0000001'.length; i++) {
+        body[14 + i] = '5AG0000001'.codeUnitAt(i); // serial (NUL-padded)
       }
-      // fw_version @ pay[93:97], gated on pay[93]==50
-      payload[93] = 50;
-      payload[94] = 38;
-      payload[95] = 1;
-      payload[96] = 0;
-      final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
-      expect(r.decoded['device_name'], 'MyStrap');
-      expect(r.decoded['fw_version'], Uint8List.fromList([50, 38, 1, 0]));
+      // commit (24B) / cpu (30B): fill with recognizable bytes.
+      for (var i = 25; i < 49; i++) {
+        body[i] = 0xAB;
+      }
+      for (var i = 49; i < 79; i++) {
+        body[i] = 0xCD;
+      }
+      bd.setUint32(79, 13, Endian.little); // hardware family
+      bd.setUint32(83, 0, Endian.little); // pcba revision
+      bd.setUint32(87, 82, Endian.little); // optical discriminator → WHOOP 5
+      body[91] = 50; // fw major
+      body[92] = 40; // fw minor
+      body[93] = 1; // fw build
+      bd.setUint32(94, 0, Endian.little); // fw unreleased
+      body[98] = 11; // sigproc major
+      body[99] = 1; // sigproc minor
+      body[100] = 0; // sigproc patch
+      body[101] = 0; // hr broadcast
+      body[102] = 1; // on-body
+      body[103] = 0; // error byte
+      return body;
+    }
+
+    test('Gen5HelloInfo.parse decodes the revision-1 body map', () {
+      final h = Gen5HelloInfo.parse(gen5HelloBody())!;
+      expect(h.helloRevision, 1);
+      expect(h.batteryPct, 90); // 901 ~/ 10
+      expect(h.charging, isFalse);
+      expect(h.tsSeconds, 1780000000);
+      expect(h.tsSubseconds, 28835);
+      expect(h.serial, '5AG0000001');
+      expect(h.hardwareFamily, 13);
+      expect(h.opticalDiscriminator, 82);
+      expect(h.isWhoop5, isTrue);
+      expect(h.firmwareVersion, '50.40.1.0');
+      expect(h.signalProcessorVersion, '11.1.0');
+      expect(h.wristOn, isTrue);
+      expect(h.commitHex.length, 48); // 24 bytes → 48 hex chars
+      expect(h.cpuHex.length, 60); // 30 bytes → 60 hex chars
     });
 
-    test('gen5 GET_HELLO omits fw_version when the gate byte does not match',
+    test('gen5 GET_HELLO surfaces Gen5HelloInfo through the full inner packet',
         () {
-      final inner = Uint8List(120);
+      // Integration vector: a COMPLETE command-response inner packet, not just
+      // a body — proves parseCommandResponse hands the branch the body at the
+      // right offset (past the 5-byte header). An off-by-two here would fail.
+      final body = gen5HelloBody();
+      final inner = Uint8List(5 + body.length);
+      inner[0] = PacketType.commandResponse;
+      inner[1] = 9; // response packet seq
+      inner[2] = Cmd.getHello; // echoed opcode
+      inner[3] = 7; // echoed request seq
+      inner[4] = 1; // status: SUCCESS
+      inner.setRange(5, 5 + body.length, body);
+      final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      expect(r.decoded['req_seq'], 7);
+      expect(r.decoded['cmd_status'], 1);
+      final h = r.decoded['gen5_hello'] as Gen5HelloInfo;
+      expect(h.serial, '5AG0000001');
+      expect(h.firmwareVersion, '50.40.1.0');
+      expect(h.wristOn, isTrue);
+      // `device_name` is gone for good: it read the CPU/signature field, so it
+      // was a wrong value, not a moved one.
+      expect(r.decoded.containsKey('device_name'), isFalse);
+      // `fw_version` is KEPT as a compat alias for one release — the old decode
+      // happened to read the true major/minor/build bytes, so silently
+      // returning null to existing callers would break a working field.
+      expect(r.decoded['fw_version'], Uint8List.fromList([50, 40, 1, 0]));
+    });
+
+    test('a non-SUCCESS reply publishes no hello (stale-body guard)', () {
+      // Hello answers PENDING first, and FAILURE/UNSUPPORTED are real
+      // terminal cases. A non-success body is not populated, so parsing it
+      // would mint a serial/battery/firmware out of whatever the buffer held.
+      for (final status in [0, 2, 3]) {
+        final body = gen5HelloBody();
+        final inner = Uint8List(5 + body.length);
+        inner[0] = PacketType.commandResponse;
+        inner[2] = Cmd.getHello;
+        inner[3] = 7;
+        inner[4] = status;
+        inner.setRange(5, 5 + body.length, body);
+        final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('gen5_hello'), isFalse,
+            reason: 'status $status must not publish a hello');
+      }
+    });
+
+    test('an unknown hello revision is refused, not read at rev-1 offsets', () {
+      final body = gen5HelloBody();
+      body[0] = 2; // some future revision
+      expect(Gen5HelloInfo.parse(body), isNull);
+    });
+
+    test('an out-of-range battery is omitted, never clamped', () {
+      final body = gen5HelloBody();
+      ByteData.sublistView(body).setUint32(1, 99999, Endian.little); // 9999%
+      final h = Gen5HelloInfo.parse(body)!;
+      expect(h.batteryPct, isNull);
+      expect(h.serial, '5AG0000001'); // the rest of the record still decodes
+    });
+
+    test('gen5 GET_HELLO omits the hello when the body is too short', () {
+      final inner = Uint8List(5 + 80); // < 104-byte semantic body
       inner[0] = PacketType.commandResponse;
       inner[2] = Cmd.getHello;
-      inner[3] = 7; // echoed request seq
-      inner[4] = 1; // status: ok
-      inner[3 + 93] = 99; // not 50
+      inner[3] = 7;
+      inner[4] = 1;
       final r = parseCommandResponse(inner, profile: BandProfile.gen5)!;
-      expect(r.decoded.containsKey('fw_version'), isFalse);
+      expect(r.decoded.containsKey('gen5_hello'), isFalse);
     });
   });
 
@@ -656,5 +891,42 @@ void main() {
       expect(d.fields['hist_version'], 18);
       expect(d.fields['ts_epoch'], 1780916150);
     });
+
+    // Battery-pack ("puffin") wrapper types must decode to a NAMED kind, never
+    // 'other' — 53/54/55 are history-count members a client has to
+    // count and retain; 37/38/56 are named so nothing silently drops them.
+    Uint8List wrapperFrame(int packetType) {
+      // A minimal aligned inner packet whose first byte is the packet type.
+      final inner = Uint8List.fromList([packetType, 0x01, 0x00, 0x00]);
+      return buildFrame(inner, profile: BandProfile.gen5);
+    }
+
+    for (final t in [
+      PacketType.relativePuffinEvents,
+      PacketType.puffinEventsFromStrap,
+      PacketType.relativeBatteryPackConsoleLogs,
+    ]) {
+      test('battery-pack wrapper type $t decodes to puffin_event (count member)',
+          () {
+        final parsed = parseFrame(wrapperFrame(t), profile: BandProfile.gen5)!;
+        final d = decodeFrame(parsed, profile: BandProfile.gen5);
+        expect(d.kind, 'puffin_event');
+        expect(d.fields['packet_type'], t);
+        expect(d.fields['retain_raw'], isTrue);
+      });
+    }
+
+    for (final t in [
+      PacketType.puffinCommand,
+      PacketType.puffinCommandResponse,
+      PacketType.puffinMetadata,
+    ]) {
+      test('battery-pack type $t decodes to a named kind, not other', () {
+        final parsed = parseFrame(wrapperFrame(t), profile: BandProfile.gen5)!;
+        final d = decodeFrame(parsed, profile: BandProfile.gen5);
+        expect(d.kind, 'puffin');
+        expect(d.fields['packet_type'], t);
+      });
+    }
   });
 }

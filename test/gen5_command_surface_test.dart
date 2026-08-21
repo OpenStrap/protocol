@@ -98,7 +98,8 @@ void main() {
       }
     });
 
-    test('the r22 packet flags are all present and enabled', () {
+    test('the firmware-selected r22 packet flags (v6..v2 + master) are enabled',
+        () {
       final enabled = {
         for (final (n, v) in kGen5R22EnableFlags)
           if (v == '1') n
@@ -109,11 +110,37 @@ void main() {
             'enable_r22_packets',
             'enable_r22_v2_packets',
             'enable_r22_v3_packets',
-            'enable_r22_v4_packets',
             'enable_r22_v5_packets',
             'enable_r22_v6_packets',
-            'enable_r22_v8_packets',
           ]));
+    });
+
+    test('the default sequence stays the full hardware-proven set', () {
+      // The full set is the one with deep-buffer evidence behind it; trimming
+      // it is the caller's explicit choice, never a silent change.
+      final names = kGen5R22EnableFlags.map((f) => f.$1).toList();
+      expect(names, contains('enable_r22_v4_packets'));
+      expect(names, contains('enable_r22_v8_packets'));
+    });
+
+    test('the contested pair is named, and omitContestedFlags skips exactly it',
+        () {
+      // v4 reads raw 0 pre-write (no proven restoration — one-way); v8 has no
+      // active firmware consumer. Both stay in the default; a caller that
+      // refuses the irreversible/dormant writes opts out explicitly.
+      expect(kGen5R22ContestedFlagNames,
+          {'enable_r22_v4_packets', 'enable_r22_v8_packets'});
+      final frames =
+          buildR22EnableSequence(startSeq: 3, omitContestedFlags: true);
+      expect(frames.length, kGen5R22EnableFlags.length - 2);
+      final written = frames.map((fr) {
+        final inner = parseFrame(fr, profile: gen5)!.inner;
+        return String.fromCharCodes(
+            inner.sublist(4, 36).takeWhile((b) => b != 0));
+      }).toSet();
+      expect(written.intersection(kGen5R22ContestedFlagNames), isEmpty);
+      expect(written, contains('enable_r22_packets'));
+      expect(written, contains('disable_pip_r26_packets'));
     });
 
     test('the pip suppressor is disabled so v26 packets flow', () {
@@ -147,7 +174,14 @@ void main() {
       }
     });
 
-    test('restore-defaults writes "0" to every name the enable touched', () {
+    test('the deprecated restore builder writes raw "0" — which is NOT a valid '
+        'restore, and is why it is unexported', () {
+      // Pinned as a HAZARD, not as correct behaviour. The boolean writer
+      // emits only ASCII '1' (enabled) or '2' (disabled); a returned raw 0
+      // means unset/unknown and is never a valid write value. So
+      // this builder cannot restore anything — a correct restore reads each
+      // flag first and writes the recorded value back.
+      // ignore: deprecated_member_use_from_same_package
       final restore = buildR22RestoreDefaultsSequence(startSeq: 1);
       expect(restore.length, kGen5R22EnableFlags.length);
       for (var i = 0; i < restore.length; i++) {
@@ -155,9 +189,11 @@ void main() {
         final name =
             String.fromCharCodes(inner.sublist(4, 36).takeWhile((b) => b != 0));
         expect(name, kGen5R22EnableFlags[i].$1);
-        expect(inner[36], '0'.codeUnitAt(0), reason: 'restore default');
+        expect(inner[36], '0'.codeUnitAt(0),
+            reason: 'documents the unsafe raw-0 write this builder emits');
       }
     });
+
   });
 
   group('alarms', () {
@@ -372,24 +408,80 @@ void main() {
       }
     });
 
-    test('ECG select-wrist / control / send raw / send filtered', () {
+    // Filtered reading ("Labrador", R17) — the three lifecycle toggles.
+    // Every body is [revision 01][operation]; 124's operation is
+    // NOT a boolean.
+    test('filtered reading: wrist select + the three toggle bodies', () {
       final wrist = parseFrame(
           cmdSelectWrist(1, WristSelection.left, profile: gen5),
           profile: gen5)!;
       expect(wrist.opcode, 0x7B);
       expect(wrist.inner.sublist(3, 5), [0x01, WristSelection.left.value]);
-      final ctl =
-          parseFrame(cmdEcgControl(1, true, profile: gen5), profile: gen5)!;
-      expect(ctl.opcode, 0x7C);
-      expect(ctl.inner.sublist(3, 5), [0x01, 0x01]);
-      for (final (opcode, frame) in [
-        (0x7E, cmdEcgSendRaw(1, true, profile: gen5)),
-        (0x8B, cmdEcgSendFiltered(1, true, profile: gen5)),
+
+      // 124: 01 01 stop / 01 02 start / 01 03 restart.
+      for (final (op, expected) in [
+        (LabradorOperation.stop, [0x01, 0x01]),
+        (LabradorOperation.start, [0x01, 0x02]),
+        (LabradorOperation.restart, [0x01, 0x03]),
       ]) {
-        final f = parseFrame(frame, profile: gen5)!;
-        expect(f.opcode, opcode);
-        expect(f.inner[3], 0x01);
+        final f = parseFrame(cmdLabradorDataGeneration(1, op, profile: gen5),
+            profile: gen5)!;
+        expect(f.opcode, 0x7C, reason: 'TOGGLE_LABRADOR_DATA_GENERATION = 124');
+        expect(f.inner.sublist(3, 5), expected, reason: '$op');
       }
+
+      // 125 and 139: 01 00 disable / 01 01 enable.
+      for (final (opcode, off, on) in [
+        (
+          0x7D,
+          cmdLabradorRawSave(1, false, profile: gen5),
+          cmdLabradorRawSave(1, true, profile: gen5)
+        ),
+        (
+          0x8B,
+          cmdLabradorFiltered(1, false, profile: gen5),
+          cmdLabradorFiltered(1, true, profile: gen5)
+        ),
+      ]) {
+        final disabled = parseFrame(off, profile: gen5)!;
+        expect(disabled.opcode, opcode);
+        expect(disabled.inner.sublist(3, 5), [0x01, 0x00]);
+        final enabled = parseFrame(on, profile: gen5)!;
+        expect(enabled.opcode, opcode);
+        expect(enabled.inner.sublist(3, 5), [0x01, 0x01]);
+      }
+    });
+
+    // The deprecated builders keep their exact old bytes: existing callers are
+    // flagged, not silently re-pointed. Two of the three are wrong on the wire
+    // — that is what the deprecation says, and this pins it.
+    test('deprecated ECG builders still emit their old (wrong) bytes', () {
+      // ignore: deprecated_member_use_from_same_package
+      final armed = parseFrame(cmdEcgControl(1, true, profile: gen5),
+          profile: gen5)!;
+      expect(armed.opcode, 0x7C);
+      expect(armed.inner.sublist(3, 5), [0x01, 0x01],
+          reason: 'the old "arm" is the STOP operation');
+      // ignore: deprecated_member_use_from_same_package
+      final disarmed = parseFrame(cmdEcgControl(1, false, profile: gen5),
+          profile: gen5)!;
+      expect(disarmed.inner.sublist(3, 5), [0x01, 0x00],
+          reason: 'the old "disarm" is an undefined operation byte');
+
+      // ignore: deprecated_member_use_from_same_package
+      final raw =
+          parseFrame(cmdEcgSendRaw(1, true, profile: gen5), profile: gen5)!;
+      expect(raw.opcode, 0x7E,
+          reason: '126 is not an established WHOOP opcode');
+      expect(raw.inner.sublist(3, 5), [0x01, 0x01]);
+
+      // 139 was only misnamed — same bytes as the replacement.
+      // ignore: deprecated_member_use_from_same_package
+      final filtered = cmdEcgSendFiltered(1, true, profile: gen5);
+      expect(filtered, cmdLabradorFiltered(1, true, profile: gen5));
+      final f = parseFrame(filtered, profile: gen5)!;
+      expect(f.opcode, 0x8B);
+      expect(f.inner.sublist(3, 5), [0x01, 0x01]);
     });
   });
 

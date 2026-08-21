@@ -195,6 +195,12 @@ List<int> _r10Rr(Uint8List inner) {
 
 /// RR slots the compact 0x28 form can hold: [10] [12] [14] [16], stopping
 /// before the `wearing` byte at [18].
+///
+/// Naming note: these slots have also been described as a
+/// "candidate-estimate count, 0..4" plus "four candidate estimates as u16
+/// values" with an unstated physiological role — the identical field pair
+/// R18 carries (body 2 / body 3..10 = inner 15 / 16..23). The data settles
+/// it: the values ARE R-R intervals in milliseconds. Evidence below.
 const int _maxRealtimeRr = 4;
 
 class RealtimeHr {
@@ -212,6 +218,36 @@ class RealtimeHr {
 // against the ts parity oracle, and lines up like this instead:
 // ts@2 (u32), hr@8 (u8, not u16/256), rr_count@9, rr1@10, rr2@12, wearing@18.
 // so this now just takes the whole inner frame, not a pre-sliced body.
+//
+// Why these slots are read as R-R and not as unnamed "candidate estimates":
+//
+//  - the value domain is exactly 333..2400 ms, i.e. 60000/180.2 ..
+//    60000/25.0 bpm, and nearly every integer in that range occurs. A field
+//    clamped to the reciprocal of a physiological HR range at 1 ms
+//    resolution is an interval. type-40 shares the same 2400 ms ceiling —
+//    one field in two packets.
+//  - slot / (60000/HR) sits at a median of ~1.0, with the bulk of slots
+//    within a few tens of percent of the co-reported HR's period.
+//  - every alternative unit is dead: essentially no slot reads as bpm, as
+//    bpm<<8 or as centi-bpm. The "candidate HR estimate" reading is
+//    arithmetically impossible.
+//  - they are not the HR byte restated: slots rarely equal round(60000/HR)
+//    exactly, so they carry beat-level information the smoothed HR byte
+//    does not.
+//  - the median per-slot value falls as the count rises — more beats in a
+//    second means shorter intervals. Repeated estimates of one quantity
+//    would not behave like that.
+//
+// The COUNT byte is NOT "beats in this second": it anti-correlates with HR,
+// falling toward zero as HR rises. It is a detector-confidence count — most
+// records declare zero, and every slot the band does declare is a valid
+// interval (no zeros, none outside kMinRrMs..kMaxRrMs, no non-zero bytes
+// past the declared count, so the gate below currently drops nothing).
+//
+// Consequence for anything computing HRV from these: the series is GAPPED,
+// not contiguous. Slots from non-adjacent seconds are not successive beats,
+// and a naive RMSSD across them computes far outside the human resting
+// range. Window on real adjacency.
 RealtimeHr? parseRealtimeHr(Uint8List inner) {
   if (inner.length < 9) return null;
   final ts = u32(inner, 2);
@@ -280,6 +316,151 @@ class HelloInfo {
     this.wristOn,
     this.rawHex = '',
   });
+}
+
+/// The WHOOP 5 (gen5) `GET_HELLO(0x91)` response body — a DIFFERENT opcode and
+/// a DIFFERENT layout from gen4's `GET_HELLO_HARVARD(0x23)`/[HelloInfo], so it
+/// gets its own type. Unlike gen4 (whose field offsets drift, so it scans by
+/// content), the gen5 revision-1 body is a FIXED map read by absolute offset:
+/// the on-band producer fills a fixed 104-byte map, and readers consume
+/// offsets through byte 103. Offsets below are BODY-relative — the body is the
+/// bytes after the 5-byte command-response header, i.e. `payload.sublist(2)`
+/// where `payload` is what [parseCommandResponse] hands the opcode branches
+/// (payload[0]=echoed req seq, payload[1]=status).
+///
+/// Revision-1 hello body: 104 semantic bytes at fixed offsets.
+class Gen5HelloInfo {
+  /// Exact semantic body length the fixed map spans. The three
+  /// trailing bytes of a real 107-byte reply are inner-packet alignment pad.
+  static const int semanticBodyLen = 104;
+
+  final int helloRevision; // body[0]
+
+  /// body[1..4] u32 LE, integer-divided by 10. **Null when the raw value is
+  /// outside 0..100** — a percentage is 0..100 by definition, so anything else
+  /// is a mis-read field, and this package's rule is to omit it rather than
+  /// report or clamp a number the bytes do not support.
+  final int? batteryPct;
+  final bool charging; // body[5] bit0
+  final int tsSeconds; // body[6..9] u32 LE — whole seconds
+  final int tsSubseconds; // body[10..13] u32 LE — 32768 units/s
+  final String serial; // body[14..24] NUL-terminated ASCII
+  final String commitHex; // body[25..48] → lowercase hex
+  final String cpuHex; // body[49..78] → lowercase hex (also the signature)
+  final int hardwareFamily; // body[79..82] u32 LE
+  final int pcbaRevision; // body[83..86] u32 LE
+  final int opticalDiscriminator; // body[87..90] u32 LE — 48..85 ⇒ WHOOP 5
+  final int fwMajor; // body[91]
+  final int fwMinor; // body[92]
+  final int fwBuild; // body[93]
+  final int fwUnreleased; // body[94..97] u32 LE
+  final int sigprocMajor; // body[98]
+  final int sigprocMinor; // body[99]
+  final int sigprocPatch; // body[100]
+  final bool hrBroadcast; // body[101] — parsed, not a readiness gate
+  final bool wristOn; // body[102] == 1
+  final int errorByte; // body[103] signed — logged, not a readiness gate
+  final String rawHex;
+
+  const Gen5HelloInfo({
+    required this.helloRevision,
+    required this.batteryPct,
+    required this.charging,
+    required this.tsSeconds,
+    required this.tsSubseconds,
+    required this.serial,
+    required this.commitHex,
+    required this.cpuHex,
+    required this.hardwareFamily,
+    required this.pcbaRevision,
+    required this.opticalDiscriminator,
+    required this.fwMajor,
+    required this.fwMinor,
+    required this.fwBuild,
+    required this.fwUnreleased,
+    required this.sigprocMajor,
+    required this.sigprocMinor,
+    required this.sigprocPatch,
+    required this.hrBroadcast,
+    required this.wristOn,
+    required this.errorByte,
+    this.rawHex = '',
+  });
+
+  /// The optical discriminator selects the WHOOP 5.0 family in the interval
+  /// `48 <= value < 86`.
+  bool get isWhoop5 => opticalDiscriminator >= 48 && opticalDiscriminator < 86;
+
+  /// [tsSeconds] gated to the plausible unix range, null otherwise.
+  ///
+  /// The band ships with its RTC unset, and an unset RTC reports a near-1970
+  /// epoch through this field as if it were fact. Hello is the primary gen5
+  /// clock source, so clock consumers must take THIS read — the raw
+  /// [tsSeconds] stays only as the wire truth.
+  int? get tsSecondsOrNull => _plausibleUnix(tsSeconds) ? tsSeconds : null;
+
+  /// `major.minor.build.unreleased`, e.g. `50.40.1.0`.
+  String get firmwareVersion => '$fwMajor.$fwMinor.$fwBuild.$fwUnreleased';
+
+  /// `major.minor.patch`, e.g. `11.1.0`.
+  String get signalProcessorVersion =>
+      '$sigprocMajor.$sigprocMinor.$sigprocPatch';
+
+  /// The all-zero serial is an EEPROM-failure signal, not a hard reject on its
+  /// own — a readiness gate should still accept it (it passes the
+  /// alphanumeric gate). Surfaced so a caller can decide.
+  bool get serialLooksEepromFailure =>
+      serial.isNotEmpty && serial.split('').every((c) => c == '0');
+
+  /// Parse EXACTLY the response body (no header). Returns null when the body is
+  /// shorter than the [semanticBodyLen] the fixed-offset parser needs — a short
+  /// body is a failed/foreign reply, never a partially-filled hello — or when
+  /// the body does not announce hello revision 1, since every offset below is
+  /// revision-1-specific and reading them out of an unknown revision would
+  /// invent an identity rather than decode one.
+  ///
+  /// Callers should additionally gate on the command-response STATUS byte; a
+  /// non-success reply leaves the body unpopulated (see [parseCommandResponse]).
+  static Gen5HelloInfo? parse(Uint8List body) {
+    if (body.length < semanticBodyLen) return null;
+    if (body[0] != 1) return null; // revision-1 map only
+    String cstr(int start, int end) {
+      final sb = StringBuffer();
+      for (int i = start; i < end && i < body.length; i++) {
+        final c = body[i];
+        if (c == 0) break;
+        if (c < 0x20 || c >= 0x7F) return '';
+        sb.writeCharCode(c);
+      }
+      return sb.toString();
+    }
+
+    final batteryRaw = u32(body, 1) ~/ 10;
+    return Gen5HelloInfo(
+      helloRevision: body[0],
+      batteryPct: (batteryRaw >= 0 && batteryRaw <= 100) ? batteryRaw : null,
+      charging: (body[5] & 0x01) != 0,
+      tsSeconds: u32(body, 6),
+      tsSubseconds: u32(body, 10),
+      serial: cstr(14, 25),
+      commitHex: _hex(Uint8List.sublistView(body, 25, 49)),
+      cpuHex: _hex(Uint8List.sublistView(body, 49, 79)),
+      hardwareFamily: u32(body, 79),
+      pcbaRevision: u32(body, 83),
+      opticalDiscriminator: u32(body, 87),
+      fwMajor: body[91],
+      fwMinor: body[92],
+      fwBuild: body[93],
+      fwUnreleased: u32(body, 94),
+      sigprocMajor: body[98],
+      sigprocMinor: body[99],
+      sigprocPatch: body[100],
+      hrBroadcast: body[101] != 0,
+      wristOn: body[102] == 1,
+      errorByte: body[103] >= 128 ? body[103] - 256 : body[103],
+      rawHex: _hex(body),
+    );
+  }
 }
 
 /// A battery percentage is 0..100. Anything else is a mis-read field, not a
@@ -428,10 +609,26 @@ Uint8List _envelopeBody(Uint8List inner) {
       inner, 12, end < inner.length ? end : inner.length);
 }
 
-EventInfo? parseEvent(Uint8List inner) {
+/// Event ids whose names and body decodes are pinned on gen5 hardware only.
+/// On a gen4 link the same id number may mean something else entirely (gen4's
+/// neighbouring 26/27/28 are known, 29 is not), so a gen4 parse keeps these
+/// numeric and un-decoded rather than confidently mislabeled.
+const Set<int> _kGen5ScopedEventIds = {
+  EventId.strapConditionReport,
+  EventId.hapticsTerminated,
+  EventId.batteryPackInfo,
+  EventId.genericFirmwareEvent,
+};
+
+EventInfo? parseEvent(
+  Uint8List inner, {
+  BandProfile profile = BandProfile.gen4,
+}) {
   if (inner.length < 4 || inner[0] != PacketType.event) return null;
   final eid = u16(inner, 2);
-  final name = EventId.name(eid);
+  final gen5ScopedOut =
+      _kGen5ScopedEventIds.contains(eid) && !profile.isGen5;
+  final name = gen5ScopedOut ? 'EVENT_$eid' : EventId.name(eid);
   // Timestamp: whole seconds u32 @ [4], sub-seconds u16 @ [8]; the event body
   // begins at [12]. All guarded by length so short frames degrade cleanly.
   final ts = inner.length >= 8 ? u32(inner, 4) : 0;
@@ -473,6 +670,78 @@ EventInfo? parseEvent(Uint8List inner) {
         }
         dec['battery_mv'] = u16(body, 5);
         dec['charging'] = body[9] != 0;
+      }
+      break;
+    case EventId.strapConditionReport:
+      if (gen5ScopedOut) break;
+      // Body: page backlog u32 @0; backlog tenths u16/10 @4; state-of-charge
+      // tenths u16/10 @6; then three single bytes — flash @8, charging @9,
+      // wrist tri-state @10.
+      //
+      // `condition_pages_behind` is the SAME quantity GET_DATA_RANGE reports
+      // as `pages_behind`: a modular PAGE span from trim to write (~15
+      // records/page nominal), never a packet or record count. This event
+      // volunteers it live, so a host can watch the backlog without polling.
+      //
+      // Every field is length-gated on its own so a short frame yields the
+      // prefix it really carried rather than nothing (or garbage).
+      if (body.length >= 4) dec['condition_pages_behind'] = u32(body, 0);
+      if (body.length >= 6) {
+        dec['condition_backlog'] = _round(u16(body, 4) / 10.0, 1);
+      }
+      if (body.length >= 8) {
+        // Same 0..100 gate as the BATTERY_LEVEL branch: an out-of-range value
+        // is not a state of charge, so emit nothing rather than a number a UI
+        // would render.
+        final soc = _round(u16(body, 6) / 10.0, 1);
+        if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
+          dec['condition_soc_pct'] = soc;
+        }
+      }
+      if (body.length >= 9) dec['condition_flash'] = body[8];
+      if (body.length >= 10) dec['condition_charging'] = body[9] != 0;
+      // Tri-state, and the doc names no mapping for the three values — kept
+      // raw rather than guessed into a bool. Deliberately NOT emitted as
+      // `on_wrist`: the wear truth comes from WRIST_ON/WRIST_OFF and hello.
+      if (body.length >= 11) dec['condition_wrist_state'] = body[10];
+      break;
+    case EventId.hapticsTerminated:
+      if (gen5ScopedOut) break;
+      // body[0] revision, body[1] cause. `user_double_tap` is how the wearer
+      // dismisses a running alarm — a dismissal and a timeout are different
+      // facts, so both the code and its name are surfaced.
+      if (body.length >= 2) {
+        dec['haptics_revision'] = body[0];
+        dec['haptics_termination_code'] = body[1];
+        dec['haptics_termination'] = HapticsTermination.name(body[1]);
+      }
+      break;
+    case EventId.batteryPackInfo:
+      if (gen5ScopedOut) break;
+      // revision @0, BT address 1..6, device name 7..22, battery-level
+      // structure 23..24, colourway 25, hardware family 26 — the
+      // GET_BATTERY_PACK_INFO(151) content volunteered as an event.
+      if (body.length >= 27) {
+        dec['pack_revision'] = body[0];
+        dec['pack_address'] = _macAddress(body, 1);
+        // Only a real printable name is surfaced; an all-NUL field yields
+        // nothing rather than an empty-string "name".
+        final packName = _printableRun(body, 7, 23);
+        if (packName.isNotEmpty) dec['pack_name'] = packName;
+        dec['pack_battery_raw'] = u16(body, 23);
+        dec['pack_colorway'] = body[25];
+        dec['pack_hardware_family'] = body[26];
+      }
+      break;
+    case EventId.genericFirmwareEvent:
+      if (gen5ScopedOut) break;
+      // body[0] revision, u16 LE sub-id at body[1]. Only sub-id 6
+      // (DORSET_DETECTED) has a known name; the rest stay numeric.
+      if (body.length >= 3) {
+        dec['fw_event_revision'] = body[0];
+        final subId = u16(body, 1);
+        dec['fw_event_id'] = subId;
+        dec['fw_event'] = FirmwareEventId.name(subId);
       }
       break;
     case EventId.highFreqSyncPrompt:
@@ -558,20 +827,36 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     dec['hello'] = h;
   } else if (op == Cmd.getHello) {
     // gen5's GET_HELLO (0x91) response — a DIFFERENT opcode from gen4's
-    // GET_HELLO_HARVARD (0x23), with its own byte-verified fields:
-    // device_name @ pay[51], fw_version (4 raw bytes) @ pay[93] gated on
-    // pay[93] == 50 (the fw major-version byte real captures show as 50 —
-    // e.g. "50.38.1.0" — NOT the ASCII character '5' (that would be 53);
-    // absent the gate, don't report a fw_version at all).
+    // GET_HELLO_HARVARD (0x23) and a DIFFERENT, FIXED layout
+    // ([Gen5HelloInfo]). The body is what follows the 5-byte command-response header,
+    // i.e. `payload.sublist(2)` (payload[0]=echoed req seq, payload[1]=status).
     //
-    // The name is a 30-byte field. pay[16] — where this used to read — is a
-    // binary field on gen5, not the name; that offset is gen4's serial slot.
-    if (payload.length >= 81) {
-      final name = _cstrAt(payload, 51);
-      if (name.isNotEmpty) dec['device_name'] = name;
-    }
-    if (payload.length >= 97 && payload[93] == 50) {
-      dec['fw_version'] = Uint8List.fromList(payload.sublist(93, 97));
+    // The previous decode read a "device_name" at pay[51] and a 4-byte
+    // "fw_version" at pay[93] — but pay[51] (body offset 49) is the 30-byte
+    // CPU/signature field, and the firmware version lives at body 91..94
+    // (pay[93]==body[91] is the fw MAJOR byte, which is only why the old
+    // ==50 gate happened to hold). Both are superseded by the full map.
+    //
+    // STATUS-GATED, like the battery and clock reads above/below: hello
+    // answers PENDING (2) before its terminal result, and FAILURE (0) /
+    // UNSUPPORTED (3) are real wire cases. A non-success reply does not
+    // populate the body, so its bytes are whatever the buffer held last —
+    // parsing them would mint a confident serial, battery and firmware version
+    // out of stale memory.
+    if (status == 1) {
+      final body =
+          payload.length >= 2 ? Uint8List.sublistView(payload, 2) : payload;
+      final h = Gen5HelloInfo.parse(body);
+      if (h != null) dec['gen5_hello'] = h;
+      // Compat: the firmware version this branch used to emit was ACCIDENTALLY
+      // correct (it read body[91..94], the true major/minor/build/unreleased),
+      // so keep the key alive for one release rather than silently returning
+      // null to existing callers. `device_name` is deliberately NOT restored —
+      // it was the CPU/signature field, i.e. a wrong value.
+      if (h != null) {
+        dec['fw_version'] = Uint8List.fromList(
+            [h.fwMajor, h.fwMinor, h.fwBuild, h.fwUnreleased & 0xFF]);
+      }
     }
   } else if (op == Cmd.getAlarmTime && payload.isNotEmpty) {
     // GET_ALARM_TIME echoes whichever alarm form the strap holds, and the
@@ -585,13 +870,51 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // alarm_epoch rather than guessing an offset.
     // The form byte is the first byte of the reply BODY, which starts at
     // payload[2] — payload[0] is the echoed request seq.
+    //
+    // The revision-4 GET response is pinned:
+    //   body[0] revision 04   body[1] ACTIVE flag (exactly 1 = active)
+    //   body[2:6] epoch u32 LE   body[6:8] subseconds u16 LE
+    // — which confirms the epoch offset used here, and adds the active flag.
+    // The response carries no alarm ID; the requested ID selects it.
     final form = payload.length >= 3 ? payload[2] : -1;
     if (form == 0x01 && payload.length >= 7) {
       dec['alarm_epoch'] = u32(payload, 3);
     } else if (form == 0x04 && payload.length >= 8) {
       dec['alarm_epoch'] = u32(payload, 4);
+      // "exactly 1 means active" — anything else is not an armed alarm, and is
+      // reported as inactive rather than guessed at.
+      dec['alarm_active'] = payload[3] == 1;
     }
-  } else if (op == Cmd.getAdvertisingNameHarvard) {
+  } else if (op == Cmd.setAlarmTime || op == Cmd.runAlarm) {
+    // Both replies carry a haptics/alarm STATUS at response-body offset 1 —
+    // the SET reply is `[revision][status]…` (remaining response bytes are
+    // ignored) and the RUN reply is exactly `[02, status]`. Same offset on
+    // both, so one branch.
+    // The body starts at payload[2], hence payload[3].
+    //
+    // Deliberately NOT status-gated, unlike the battery/clock/hello reads
+    // above: this status arrives in addition to the ordinary outer command
+    // result — check both. A FAILURE reply's status byte is the
+    // diagnostic — it is where `invalid alarm time` and `invalid alarm ID`
+    // actually appear — so dropping it on a non-success outer result would
+    // discard the only explanation the strap ever gives.
+    //
+    // The revision byte at body 0 is read but NOT gated on: it reads 3 for
+    // SET and 2 for RUN, and a strap answering with a revision we do not
+    // recognise still put a status byte where the status byte goes.
+    if (payload.length >= 4) {
+      final code = payload[3];
+      dec['alarm_status'] = code;
+      dec['alarm_status_name'] = AlarmStatus.name(code);
+    }
+  } else if (op == Cmd.getAdvertisingNameHarvard ||
+      op == Cmd.getCustomAdvertisingName) {
+    // gen4's 0x4C and gen5's 0x8D (=141) replies share the same shape at the
+    // same payload offsets: 141's reply is revision, status, length, name —
+    // i.e. length at body[2] (= payload[4]) and ASCII name from body[3]
+    // (= payload[5]), exactly where _decodeAdvName already reads them.
+    // Without this branch the gen5 bootstrap's final pre-READY read was sent
+    // but its reply never decoded.
     dec['strap_name'] = _decodeAdvName(payload);
   } else if (op == Cmd.getClock || op == Cmd.getClockGen5) {
     // Reply bodies (the body starts at payload[2]):
@@ -613,7 +936,12 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // battery read is not: the status byte is unconfirmed there, and a wrong
     // assumption means clock_epoch is never emitted at all, which fails
     // silently — no stall, no log, just an RTC that never correlates.
-    final statusOk = op != Cmd.getClockGen5 || status == 1;
+    //
+    // Keyed on the PROFILE, not the opcode: gen5 reads its clock with the
+    // shared GET_CLOCK(11) (physically confirmed — the unverified 147 is
+    // deprecated), so gating on `op == getClockGen5` would have quietly dropped
+    // this protection the moment the correct opcode started being used.
+    final statusOk = !profile.isGen5 || status == 1;
     if (statusOk && revOk && payload.length >= at + 4) {
       final v = u32(payload, at);
       // Emit nothing rather than a guess: a value outside the plausible
@@ -684,7 +1012,7 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     dec['battery_pack_info'] = BatteryPackInfoResponse(
       revision: payload[2],
       attached: payload[3] == 1,
-      identifier: _batteryPackId(payload),
+      identifier: _macAddress(payload, 4),
       name: _batteryPackName(payload),
       batteryPackTypeRaw: payload[28],
       statusRaw: payload[29],
@@ -698,10 +1026,13 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   return CmdResponse(op, dec);
 }
 
-String _batteryPackId(Uint8List payload) {
-  final bytes = payload.sublist(4, 10);
-  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
-}
+/// The six-byte BT address at [start], rendered `aa:bb:cc:dd:ee:ff`. Shared by
+/// the GET_BATTERY_PACK_INFO reply and the BATTERY_PACK_INFO(109) event, which
+/// carry the same field at different offsets.
+String _macAddress(Uint8List b, int start) => b
+    .sublist(start, start + 6)
+    .map((v) => v.toRadixString(16).padLeft(2, '0'))
+    .join(':');
 
 String _batteryPackName(Uint8List payload) {
   return _printableRun(payload, 10, 26);
@@ -990,16 +1321,28 @@ Decoded decodeFrame(Frame frame, {BandProfile profile = BandProfile.gen4}) {
         }
         break;
       case PacketType.event:
-        final e = parseEvent(inner);
+        final e = parseEvent(inner, profile: profile);
         if (e != null) {
+          // Spread FIRST so the frame-level keys stay authoritative — a
+          // future per-event key named `retain_raw` or `event_id` must not
+          // be able to clobber them (`retain_raw` decides whether a client
+          // keeps a burst-count member, so a collision would silently drop
+          // history records).
           return Decoded('event', {
+            ...e.decoded,
             'event': e.name,
             'event_id': e.eventId,
             'ts_epoch': e.tsEpoch,
-            ...e.decoded
+            'retain_raw': true, // history-count member
           });
         }
-        break;
+        // A type-48 frame whose body we cannot parse is STILL a burst count
+        // member and still has to be retained — falling through to 'other'
+        // would make a client drop it and undercount the burst.
+        return Decoded('event_unparsed', {
+          'packet_type': pt,
+          'retain_raw': true,
+        });
       case PacketType.metadata:
         final m = parseMetadata(inner);
         if (m != null) {
@@ -1013,13 +1356,34 @@ Decoded decodeFrame(Frame frame, {BandProfile profile = BandProfile.gen4}) {
             'record_index': c.recordIndex,
             'ts_epoch': c.unix,
             'text': c.text,
+            'retain_raw': true, // history-count member
           });
         }
-        break;
+        // Same reasoning as the type-48 fall-through above: a console frame we
+        // cannot read is still one burst count member.
+        return Decoded('console_unparsed', {
+          'packet_type': pt,
+          'retain_raw': true,
+        });
       case PacketType.historicalData:
       case PacketType.realtimeData:
       case PacketType.realtimeRawData:
         return _decodeDataRecord(inner, profile: profile);
+      case PacketType.relativePuffinEvents:
+      case PacketType.puffinEventsFromStrap:
+      case PacketType.relativeBatteryPackConsoleLogs:
+        // Battery-pack ("puffin") event/log wrappers. Their bodies are not
+        // decoded into fields here, but each complete frame IS a member of the
+        // Sensor-HPS history count and must be retained — so give them
+        // a named kind (never 'other', which a client would drop) and flag the
+        // frame for the client's raw archive + burst-count paths.
+        return Decoded('puffin_event', {'packet_type': pt, 'retain_raw': true});
+      case PacketType.puffinCommand:
+      case PacketType.puffinCommandResponse:
+      case PacketType.puffinMetadata:
+        // Battery-pack command/response/metadata. Named (not 'other') for the
+        // same reason; NOT history-count members.
+        return Decoded('puffin', {'packet_type': pt});
     }
   } catch (e) {
     return Decoded('decode_error', {'error': e.toString()});

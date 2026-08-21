@@ -184,9 +184,9 @@ void main() {
       final frames = buildR22EnableSequence(startSeq: 1);
       expect(frames.length, kGen5R22EnableFlags.length);
       // '1' = enable ('2' would force-DISABLE these). See
-      // gen5_command_surface_test.dart for the full value coverage.
+      // gen5_command_surface_test.dart for the full value coverage, including
+      // the omitContestedFlags opt-out.
       expect(kGen5R22EnableFlags[0], ('enable_r22_packets', '1'));
-      expect(kGen5R22EnableFlags[3], ('enable_r22_v4_packets', '1'));
       expect(kGen5R22EnableFlags.last, ('disable_pip_r26_packets', '2'));
       for (int i = 0; i < frames.length; i++) {
         final parsed = parseFrame(frames[i], profile: BandProfile.gen5)!;
@@ -209,15 +209,74 @@ void main() {
           [0x01, 47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
     });
 
+    test('gen5 uses the established clock opcodes 10/11, gen5-framed', () {
+      // gen5 SET_CLOCK(10) carries <u32 sec><u32 subsec>; GET_CLOCK(11) is
+      // the empty-body fallback. Hardware-confirmed on a real gen5 strap:
+      // 11 reads a usable time and 10 answers SUCCESS for the 8-byte form.
+      final now = DateTime.fromMillisecondsSinceEpoch(0x5F000000 * 1000 + 500,
+          isUtc: true);
+      final setParsed = parseFrame(
+        cmdSetClock(3, now: now, profile: BandProfile.gen5),
+        profile: BandProfile.gen5,
+      )!;
+      expect(setParsed.valid, isTrue, reason: 'must be gen5-framed (crc16)');
+      expect(setParsed.inner[2], Cmd.setClock);
+      expect(Cmd.setClock, 10);
+      // 8-byte body: u32 seconds then u32 subseconds (no revision byte).
+      expect(setParsed.inner.sublist(3, 11), [
+        0x00, 0x00, 0x00, 0x5F, // seconds LE
+        0x00, 0x40, 0x00, 0x00, // subsec = 500ms * 32768 / 1000 = 16384
+      ]);
+
+      final getParsed = parseFrame(
+        cmdGetClock(4, profile: BandProfile.gen5),
+        profile: BandProfile.gen5,
+      )!;
+      expect(getParsed.valid, isTrue);
+      expect(getParsed.inner[2], Cmd.getClock);
+      expect(Cmd.getClock, 11);
+      // EMPTY body — the shape the probe physically used on gen5.
+      expect(getParsed.inner.sublist(0, 3), [0x23, 4, Cmd.getClock]);
+    });
+
+    test('a gen5 GET_CLOCK(11) reply decodes its epoch, and a FAILURE reply '
+        'publishes nothing', () {
+      // Reply body is the gen4 shape [u32 sec][u32 subsec] at body offset 0
+      // (probe: whoopTimeMillis reads u32 @0 / u32 @4).
+      Uint8List reply(int status) {
+        final inner = Uint8List(5 + 8);
+        inner[0] = PacketType.commandResponse;
+        inner[2] = Cmd.getClock;
+        inner[3] = 4; // echoed req seq
+        inner[4] = status;
+        ByteData.sublistView(inner).setUint32(5, 1785483780, Endian.little);
+        return inner;
+      }
+
+      final ok = parseCommandResponse(reply(1), profile: BandProfile.gen5)!;
+      expect(ok.decoded['clock_epoch'], 1785483780);
+
+      // A non-success reply leaves the body unpopulated; an epoch guessed from
+      // stale bytes becomes the reference every alarm is armed against.
+      for (final bad in [0, 2, 3]) {
+        final r = parseCommandResponse(reply(bad), profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('clock_epoch'), isFalse,
+            reason: 'status $bad must not publish a clock');
+      }
+    });
+
     test(
-        'cmdSetClockGen5 / cmdGetClockGen5 use the gen5-exclusive opcode values',
+        'the deprecated Maverick clock builders still emit their documented '
+        'bytes (kept only for a guarded experiment)',
         () {
+      // ignore: deprecated_member_use_from_same_package
       final setFrame = cmdSetClockGen5(1, now: DateTime.utc(2026, 1, 1));
       final setParsed = parseFrame(setFrame, profile: BandProfile.gen5)!;
       expect(setParsed.valid, isTrue);
       expect(setParsed.inner[2], Cmd.setClockMaverick);
       expect(Cmd.setClockMaverick, 146);
 
+      // ignore: deprecated_member_use_from_same_package
       final getFrame = cmdGetClockGen5(1);
       final getParsed = parseFrame(getFrame, profile: BandProfile.gen5)!;
       expect(getParsed.valid, isTrue);
@@ -262,14 +321,18 @@ void main() {
       expect(EventId.bleRealtimeHrOff, 34);
     });
 
-    test(
-        'an unknown event id renders raw and never borrows a Cmd name for the same number',
-        () {
+    test('an event id never borrows a Cmd name for the same number', () {
       // 123 = Cmd.selectWrist (0x7B) as a COMMAND opcode — a real, documented
-      // numeric collision. EventId must never reuse that name for event 123.
+      // numeric collision. Event 123 is GENERIC_FIRMWARE_EVENT;
+      // the two namespaces are separate and must stay that way.
       expect(Cmd.selectWrist, 123);
-      expect(EventId.name(123), 'EVENT_123');
+      expect(EventId.name(123), 'GENERIC_FIRMWARE_EVENT');
       expect(EventId.name(123), isNot(contains('WRIST')));
+    });
+
+    test('an id outside the vocabulary still renders raw', () {
+      // Unlisted event id — 110 arrives and has no vocabulary entry.
+      expect(EventId.name(110), 'EVENT_110');
     });
   });
   group('gen5 live IMU (0x2B record 21)', () {
