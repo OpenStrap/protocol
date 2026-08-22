@@ -281,22 +281,23 @@ Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) {
 // The alarm has THREE known on-wire forms:
 //   • a 7-byte SHORT form ([cmdSetAlarmSimple]) — time only, no haptic-mode;
 //   • a 9-byte REV-1 form ([cmdSetAlarmRev1]) — time + a haptic-mode u16.
-//     This is what the official WHOOP app sends (btsnoop capture), and the
-//     only form observed to actually EXECUTE on a real WHOOP 4.0; and
+//     This is what the official WHOOP app sends (btsnoop capture); and
 //   • a 20-byte RICH form ([cmdSetAlarm]) — time + slot + a haptic waveform.
 //
-// ⚠ On gen4 the RICH form is a trap: the firmware stores it, echoes it back
-// from GET_ALARM_TIME, and confirms it with STRAP_DRIVEN_ALARM_SET (56) —
-// but its scheduler never executes it. Extended observation of a real 4.0
-// (months of sync logs, 8+ arms) showed zero STRAP_DRIVEN_ALARM_EXECUTED
-// (57) and no haptics at any armed target, while the same band armed with
-// the REV-1 form fired autonomously at the armed second (events 60 + 57 +
-// the one-shot auto-disable 59). Full evidence: issue #32. A GET_ALARM
-// readback match therefore proves only that a body was STORED, not that it
-// will fire. The SHORT form fails for the same reason it always did — it is
-// the REV-1 form minus the trailing haptic-mode u16.
+// ⚠ Which form a WHOOP 4 EXECUTES is firmware-dependent (evidence: issue
+// #32 + OpenStrap/edge#265). On fw 41.17.4 the RICH form latches — event 56
+// STRAP_DRIVEN_ALARM_SET, armed GET_ALARM readback — but the scheduler never
+// executes it (three controlled arms, zero event 57), while the REV-1 form
+// fired autonomously at the armed second (events 60 + 57 + the one-shot
+// auto-disable 59). At least one other 4.0 (fw not yet reported) DOES
+// execute the rich form. A latch confirmation therefore proves only that a
+// body was STORED, not that it will fire. The SHORT form is the REV-1 form
+// minus the trailing haptic-mode u16 — at haptic-mode 0 the two pad to
+// byte-identical frames, so there is no separate short-form behaviour on
+// the wire.
 //
-// For a gen4 wake alarm, use [cmdSetAlarmRev1].
+// For a gen4 wake alarm, use [cmdSetAlarmRev1] — the official app's form,
+// not observed to fail on any firmware.
 //
 // gen5: SET_ALARM_TIME(66)/DISABLE_ALARM(69) are opcode-identical across
 // generations (§1.4), so [cmdSetAlarm]/[cmdSetAlarmSimple]/[cmdDisableAlarm]/
@@ -333,8 +334,8 @@ int _alarmSubsec(DateTime when) =>
 ///
 /// gen4 is NOT the same and must not inherit that rule: 0 is the default slot
 /// the rich form encodes there, and the firmware accepts it. (Note the gen4
-/// form that verifiably FIRES — [cmdSetAlarmRev1] — carries no slot byte at
-/// all; slot ids only exist in the rich/gen5 encodings.)
+/// arm form — [cmdSetAlarmRev1] — carries no slot byte at all; slot ids only
+/// exist in the rich/gen5 encodings.)
 int _checkAlarmId(int id, String name, BandProfile profile) {
   final lo = profile.isGen5 ? 1 : 0;
   if (id < lo || id > 6) {
@@ -353,11 +354,11 @@ int _defaultAlarmId(BandProfile profile) => profile.isGen5 ? 1 : 0;
 ///   - epoch seconds — `when` as a unix epoch, u32 LE.
 ///   - sub-seconds — `(millis % 1000) * 32768 ~/ 1000`, u16 LE (1/32768 s units).
 ///
-/// ⚠ On real hardware the strap ACKs this form yet never buzzes. It is
-/// [cmdSetAlarmRev1] minus the trailing haptic-mode u16, and that missing
-/// field — not the missing waveform pattern — is why it arms silently. Use
-/// [cmdSetAlarmRev1] to arm a firing gen4 alarm; this is kept for parity /
-/// diagnostics only.
+/// It is [cmdSetAlarmRev1] minus the trailing haptic-mode u16 — and frames
+/// are zero-padded to a multiple of 4, so at haptic-mode 0 the two build
+/// byte-identical wire frames: there is no separate short-form behaviour to
+/// claim. Prefer [cmdSetAlarmRev1], which carries the field explicitly; this
+/// is kept for parity / diagnostics only.
 Uint8List cmdSetAlarmSimple(int seq, DateTime when,
     {BandProfile profile = BandProfile.gen4}) {
   final sec = _alarmEpochSec(when);
@@ -374,9 +375,9 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
   return buildCommand(seq, Cmd.setAlarmTime, p, profile);
 }
 
-/// REV-1 alarm form (SET_ALARM_TIME = 0x42) — the form a WHOOP 4.0 actually
-/// EXECUTES, and the one the official app sends (btsnoop-captured; the wire
-/// vector is pinned in the tests).
+/// REV-1 alarm form (SET_ALARM_TIME = 0x42) — the official app's arm form
+/// (btsnoop-captured; the wire vector is pinned in the tests), verified to
+/// fire on fw 41.17.4.
 ///
 /// Payload = 9 bytes:
 /// `[0x01][u32 epoch-seconds LE][u16 sub-seconds LE][u16 haptic-mode LE]`.
@@ -387,12 +388,13 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
 ///     modes are accepted on the wire but unexplored — keep the default unless
 ///     you are experimenting.
 ///
-/// Hardware-verified on a real 4.0: armed with this form the band fired
-/// autonomously at the armed second — HAPTICS_FIRED (60),
+/// Hardware-verified on a real 4.0 (fw 41.17.4): armed with this form the
+/// band fired autonomously at the armed second — HAPTICS_FIRED (60),
 /// STRAP_DRIVEN_ALARM_EXECUTED (57), then the one-shot auto-disable (59), all
-/// stamped at the target epoch — with no phone connected. The 20-byte rich
-/// form ([cmdSetAlarm]) latches and confirms identically but was never seen
-/// to execute there; see issue #32 for the full evidence.
+/// stamped at the target epoch — with no phone connected. On that firmware
+/// the 20-byte rich form ([cmdSetAlarm]) latches and confirms identically
+/// but never executed, while at least one other 4.0 does execute it; see
+/// issue #32 and OpenStrap/edge#265 for the evidence.
 ///
 /// Note the confirmation lifecycle: ALARM_SET (56) and the fired events
 /// arrive via the band's HISTORY stream on the next sync, not live, and 56
@@ -433,9 +435,10 @@ List<int> alarmRev1Payload(DateTime when, {int hapticMode = 0}) {
 
 /// RICH alarm form (SET_ALARM_TIME = 0x42).
 ///
-/// ⚠ gen4: this form is STORED but NEVER EXECUTED — the band echoes it from
-/// GET_ALARM_TIME and confirms it with event 56 exactly like a live arm, yet
-/// the scheduler never fires it (issue #32). For a gen4 wake alarm use
+/// ⚠ gen4: whether this form EXECUTES is firmware-dependent — on fw 41.17.4
+/// it is stored and confirmed (event 56) exactly like a live arm yet the
+/// scheduler never fires it, while at least one other 4.0 executes it
+/// (issue #32, OpenStrap/edge#265). For a gen4 wake alarm use
 /// [cmdSetAlarmRev1]. On gen5 this rich body (plus the crescendo byte) is the
 /// only known arm form, still hardware-unverified for actually waking.
 ///
@@ -458,9 +461,9 @@ List<int> alarmRev1Payload(DateTime when, {int hapticMode = 0}) {
 /// [hapticPattern] defaults to [kDefaultAlarmHaptics]; pass your own 12 bytes
 /// to customise. The strap confirms the alarm latched via the
 /// STRAP_DRIVEN_ALARM_SET (56) event and its firing via
-/// STRAP_DRIVEN_ALARM_EXECUTED (57) / HAPTICS_FIRED (60) — but on gen4 event
-/// 56 is emitted for this form even though it never fires (see above): only
-/// 57/60 prove execution.
+/// STRAP_DRIVEN_ALARM_EXECUTED (57) / HAPTICS_FIRED (60) — but event 56 is
+/// emitted at latch time whether or not the firmware will execute the form
+/// (see above): only 57/60 prove execution.
 ///
 /// [index] is the alarm slot, and the usable range is per-generation (see
 /// [_checkAlarmId]): gen4 is 0..6 and DEFAULTS to 0; gen5 is 1..6, because

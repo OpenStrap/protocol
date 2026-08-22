@@ -243,8 +243,8 @@ void main() {
 
     test('gen4 rich-form slots stay 0..6 with 0 the default', () {
       // gen5's 1..6 rule must not leak here — the gen4 firmware accepts and
-      // stores slot 0. (The form that verifiably FIRES on gen4 is the rev-1
-      // body below, which has no slot byte at all.)
+      // stores slot 0. (The gen4 arm form — the rev-1 body below — has no
+      // slot byte at all.)
       expect(_body(cmdSetAlarm(1, when, index: 0))[1], 0);
       expect(_body(cmdSetAlarm(1, when))[1], 0);
       expect(() => cmdSetAlarm(1, when, index: 7), throwsArgumentError);
@@ -265,7 +265,8 @@ void main() {
 
     test('rev-1 pins the official app\'s wire capture (issue #32)', () {
       // btsnoop of the official app arming a real WHOOP 4.0: epoch 1781912880
-      // (0x6A35D530), subsec 0, haptic-mode 0 — the form the band executes.
+      // (0x6A35D530), subsec 0, haptic-mode 0. The same shape fired on fw
+      // 41.17.4 (issue #32).
       final capture = DateTime.fromMillisecondsSinceEpoch(1781912880 * 1000);
       expect(_body(cmdSetAlarmRev1(1, capture)),
           [0x01, 0x30, 0xD5, 0x35, 0x6A, 0x00, 0x00, 0x00, 0x00]);
