@@ -109,6 +109,8 @@ export 'src/commands.dart'
         cmdEnableOptical,
         cmdBuzz,
         cmdSetAlarm,
+        cmdSetAlarmRev1,
+        alarmRev1Payload,
         cmdSetAlarmSimple,
         cmdRunAlarm,
         cmdDisableAlarm,

@@ -199,7 +199,7 @@ void main() {
   group('alarms', () {
     final when = DateTime.fromMillisecondsSinceEpoch(0x12345678 * 1000);
 
-    test('gen4 keeps the hardware-verified 12-byte haptic block (20-byte body)',
+    test('the gen4 rich body keeps its 12-byte haptic block (20-byte body)',
         () {
       final body = _body(cmdSetAlarm(1, when));
       // [0x04][index][u32 sec][u16 subsec][12 haptic] = 20, padded to 21.
@@ -241,12 +241,44 @@ void main() {
       expect(_body(cmdSetAlarm(1, when, profile: gen5), profile: gen5)[1], 1);
     });
 
-    test('gen4 keeps slot 0 — it is the slot a WHOOP 4 fires from', () {
-      // Verified on hardware. gen5's 1..6 rule must not be applied here: it
-      // would reject the only alarm path we have seen actually work.
+    test('gen4 rich-form slots stay 0..6 with 0 the default', () {
+      // gen5's 1..6 rule must not leak here — the gen4 firmware accepts and
+      // stores slot 0. (The gen4 arm form — the rev-1 body below — has no
+      // slot byte at all.)
       expect(_body(cmdSetAlarm(1, when, index: 0))[1], 0);
       expect(_body(cmdSetAlarm(1, when))[1], 0);
       expect(() => cmdSetAlarm(1, when, index: 7), throwsArgumentError);
+    });
+
+    test('the rev-1 body is 9 bytes: time + the haptic-mode u16', () {
+      // [0x01][u32 sec LE][u16 subsec][u16 haptic-mode]; inner is /4-aligned
+      // already, so no pad byte reaches the body.
+      final body = _body(cmdSetAlarmRev1(1, when));
+      expect(body, [0x01, 0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0]);
+      // The framed command carries exactly the exported bare payload — app
+      // layers with their own framing consume [alarmRev1Payload] directly.
+      expect(body, alarmRev1Payload(when));
+      // Sub-seconds are 1/32768ths, exactly like SET_CLOCK: 500 ms = 0x4000.
+      final half = when.add(const Duration(milliseconds: 500));
+      expect(_body(cmdSetAlarmRev1(1, half)).sublist(5, 7), [0x00, 0x40]);
+    });
+
+    test('rev-1 pins the official app\'s wire capture (issue #32)', () {
+      // btsnoop of the official app arming a real WHOOP 4.0: epoch 1781912880
+      // (0x6A35D530), subsec 0, haptic-mode 0. The same shape fired on fw
+      // 41.17.4 (issue #32).
+      final capture = DateTime.fromMillisecondsSinceEpoch(1781912880 * 1000);
+      expect(_body(cmdSetAlarmRev1(1, capture)),
+          [0x01, 0x30, 0xD5, 0x35, 0x6A, 0x00, 0x00, 0x00, 0x00]);
+    });
+
+    test('rev-1 haptic-mode is a u16 and encodes LE', () {
+      expect(() => cmdSetAlarmRev1(1, when, hapticMode: -1),
+          throwsArgumentError);
+      expect(() => cmdSetAlarmRev1(1, when, hapticMode: 0x10000),
+          throwsArgumentError);
+      expect(_body(cmdSetAlarmRev1(1, when, hapticMode: 0x0102)).sublist(7),
+          [0x02, 0x01]);
     });
 
     test('gen5 RUN_ALARM needs revision 2 plus an id', () {

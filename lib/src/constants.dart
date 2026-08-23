@@ -417,14 +417,14 @@ class EventId {
   static const int rawDataCollectionOff = 47;
   // Alarm lifecycle events — how the strap tells us the alarm latched and fired.
   // "strap-driven" = the strap's own scheduled alarm; "app-driven" = one we
-  // triggered over BLE. These 56–59 events are the confirmation that our
-  // SET_ALARM_TIME write actually took (the older short form never emitted them).
-  // Only 56 and 57 actually arrive.
+  // triggered over BLE. 56 confirms a SET_ALARM_TIME write latched (latch
+  // only — not that the body will execute, see cmdSetAlarm); 57 + 60 with
+  // the one-shot auto-disable 59 report a scheduled alarm firing, and 58
+  // follows an app-triggered RUN_ALARM — all observed on fw 41.17.4 (issue
+  // #32). They arrive via the history stream on the next sync, not live, so
+  // nothing may block waiting on any of them.
   static const int strapDrivenAlarmSet = 56;
   static const int strapDrivenAlarmExecuted = 57;
-  // ⚠ NEVER EMITTED (58/59). An app-triggered alarm run and an alarm being
-  // disabled are not reported as events — confirm those from the command
-  // response instead. Nothing may block waiting on either of these.
   static const int appDrivenAlarmExecuted = 58;
   static const int strapDrivenAlarmDisabled = 59;
   static const int hapticsFired = 60;
