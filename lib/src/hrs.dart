@@ -59,11 +59,21 @@ HrsSample? parseHeartRateMeasurement(List<int> value) {
   final contactBits = (flags >> 1) & 0x03;
   final contact = contactBits < 2 ? null : contactBits == 3;
 
-  if ((flags & 0x08) != 0) i += 2; // energy expended — present, not used
+  // Energy Expended is a fixed 2-byte field ONCE the flag says it is present
+  // — a notification that sets the bit but doesn't carry both bytes is
+  // truncated, not "the field happens to be shorter here", so it is refused
+  // outright rather than silently walked past.
+  if ((flags & 0x08) != 0) {
+    if (i + 2 > value.length) return null;
+    i += 2; // energy expended — present, not used
+  }
   final rr = <int>[];
   if ((flags & 0x10) != 0) {
-    // Trailing RR intervals, uint16 LE, 1/1024 s each. A trailing odd byte is a
-    // malformed value: stop rather than reading past it.
+    // Trailing RR intervals, uint16 LE, 1/1024 s each. An ODD remainder means
+    // the buffer ends mid-field — every earlier field's offset is only as
+    // trustworthy as the notification's own declared length, so a short tail
+    // refuses the whole notification instead of quietly keeping what parsed.
+    if ((value.length - i).isOdd) return null;
     while (i + 1 < value.length) {
       final ticks = value[i] | (value[i + 1] << 8);
       i += 2;

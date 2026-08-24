@@ -83,8 +83,18 @@ void main() {
     expect(parseHeartRateMeasurement([0x01, 0x48]), isNull); // uint16, 1 byte
   });
 
-  test('a trailing odd byte does not read past the buffer', () {
-    final s = parseHeartRateMeasurement([0x10, 60, 0x00, 0x04, 0x7F])!;
-    expect(s.rrMs, [1000]);
+  test('a trailing odd byte refuses the notification, never reads past it',
+      () {
+    // The RR field is a run of uint16 LE ticks; an odd-length remainder means
+    // the buffer ends mid-field, which puts every earlier offset in doubt
+    // too. Refuse the whole notification rather than silently keep what
+    // parsed before the truncation.
+    expect(parseHeartRateMeasurement([0x10, 60, 0x00, 0x04, 0x7F]), isNull);
+  });
+
+  test('a truncated Energy Expended field refuses the notification', () {
+    // Flag bit 3 set (energy present) but only one byte follows HR — the
+    // field is declared 2 bytes wide unconditionally once the bit is set.
+    expect(parseHeartRateMeasurement([0x08, 60, 0x01]), isNull);
   });
 }

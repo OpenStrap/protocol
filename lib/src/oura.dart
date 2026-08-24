@@ -324,8 +324,18 @@ int? ouraSetAuthKeyResult(OuraFrame f) =>
 List<int> ouraCmdAuthNonce() => const <int>[0x2f, 0x01, 0x2b];
 
 /// Answer the challenge. [cipher] is the encrypted nonce, one AES block.
-List<int> ouraCmdAuthenticate(List<int> cipher) =>
-    <int>[0x2f, 0x01 + cipher.length, 0x2d, ...cipher];
+///
+/// Refuses anything but exactly 16 bytes, the same guard [ouraCmdSetAuthKey]
+/// applies to the key: the length byte here is `0x01 + cipher.length`, so a
+/// wrong-size cipher either emits a malformed frame or — at 255 bytes and
+/// above — overflows the length byte outright rather than throwing where the
+/// mistake actually is.
+List<int> ouraCmdAuthenticate(List<int> cipher) {
+  if (cipher.length != 16) {
+    throw ArgumentError('the Oura auth proof is exactly one 16-byte AES block');
+  }
+  return <int>[0x2f, 0x01 + cipher.length, 0x2d, ...cipher];
+}
 
 /// Turn the ring's asynchronous notifications on. `0x3f` is all six flags.
 List<int> ouraCmdSetNotifyFlags(int flags) => <int>[0x1c, 0x01, flags & 0xff];
@@ -338,7 +348,15 @@ List<int> ouraCmdSetNotifyFlags(int flags) => <int>[0x1c, 0x01, flags & 0xff];
 /// this write is not housekeeping, it is what makes the timestamps meaningful.
 List<int> ouraCmdSyncTime(int unixSeconds, {int tzHalfHours = 0}) {
   final b = Uint8List(9);
-  b.buffer.asByteData().setUint64(0, unixSeconds, Endian.little);
+  final d = b.buffer.asByteData();
+  // Two 32-bit halves, not `setUint64`: Dart's web (dart2js) ByteData throws
+  // UnsupportedError on the 64-bit accessors — JS numbers have no native
+  // 64-bit integer, and the SDK does not emulate one here. A Unix second
+  // fits in the low word alone until the year 2106; the high word is written
+  // for correctness at the wire's own field width, not because this app
+  // expects it to ever be nonzero.
+  d.setUint32(0, unixSeconds & 0xffffffff, Endian.little);
+  d.setUint32(4, (unixSeconds >> 32) & 0xffffffff, Endian.little);
   b[8] = tzHalfHours & 0xff;
   return <int>[0x12, 0x09, ...b];
 }

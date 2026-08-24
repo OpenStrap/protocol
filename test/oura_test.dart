@@ -265,6 +265,14 @@ void main() {
       expect(ouraCmdSyncTime(1782043215).sublist(2, 10),
           _hex('4fd2376a00000000'));
     });
+
+    test('a value past the low 32 bits still encodes correctly', () {
+      // 0x1_00000001 = 4294967297. Low word 0x00000001, high word 0x00000001
+      // — proves the two-setUint32 split actually carries the high half,
+      // not just that the common (high-word-zero) case happens to work.
+      expect(ouraCmdSyncTime(0x100000001).sublist(2, 10),
+          _hex('0100000001000000'));
+    });
   });
 
   group('authentication (non-cryptographic half)', () {

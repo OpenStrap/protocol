@@ -201,11 +201,11 @@ void main() {
 
     test('a real captured frame decodes under the same field layout', () {
       // `11 08 08 00 9e0e0000 0300`: received=8, progress=0 (discarded),
-      // bytesLeft = 0x00000e9e = 3742, trailing `0300` unused. Hand-built via
-      // the same helper above rather than re-typed as a literal, so this test
-      // and `oura_test.dart`'s real-capture assertion are two different
-      // constructions of the identical claim.
-      final s = parseBatchSummary(batchFrame(8, 0, 3742))!;
+      // bytesLeft = 0x00000e9e = 3742, trailing `0300` unused. Parsed from
+      // the literal captured bytes — not built via [batchFrame] above, which
+      // encodes with the exact layout under test and so cannot catch a
+      // field-offset error here.
+      final s = parseBatchSummary(parseOuraFrame(_hex('110808009e0e00000300'))!)!;
       expect(s.received, 8);
       expect(s.bytesLeft, 3742);
     });
