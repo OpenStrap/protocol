@@ -414,16 +414,15 @@ class Gen5HelloInfo {
 
   /// Parse EXACTLY the response body (no header). Returns null when the body is
   /// shorter than the [semanticBodyLen] the fixed-offset parser needs — a short
-  /// body is a failed/foreign reply, never a partially-filled hello — or when
-  /// the body does not announce hello revision 1, since every offset below is
-  /// revision-1-specific and reading them out of an unknown revision would
-  /// invent an identity rather than decode one.
+  /// body is a failed/foreign reply, never a partially-filled hello. The
+  /// revision byte is recorded in [helloRevision] but is not a gate: the
+  /// official parser reads the fixed revision-1 offsets regardless of its
+  /// value.
   ///
   /// Callers should additionally gate on the command-response STATUS byte; a
   /// non-success reply leaves the body unpopulated (see [parseCommandResponse]).
   static Gen5HelloInfo? parse(Uint8List body) {
     if (body.length < semanticBodyLen) return null;
-    if (body[0] != 1) return null; // revision-1 map only
     String cstr(int start, int end) {
       final sb = StringBuffer();
       for (int i = start; i < end && i < body.length; i++) {
