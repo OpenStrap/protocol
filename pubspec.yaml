@@ -1,5 +1,5 @@
 name: openstrap_protocol
-description: Pure-Dart WHOOP 4.0 protocol library — bytes <-> records/frames/commands. 1:1 port of the TS record decoders + edge framing/CRC/commands.
+description: Pure-Dart, multi-band BLE protocol library — bytes <-> records/frames/commands for WHOOP 4/5, plus the Oura ring and generic Bluetooth HR sensors.
 version: 1.0.0
 publish_to: none
 

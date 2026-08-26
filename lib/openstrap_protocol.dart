@@ -1,13 +1,23 @@
-/// openstrap_protocol — pure-Dart WHOOP 4.0 protocol library.
+/// openstrap_protocol — pure-Dart, multi-band BLE protocol library.
 ///
 /// Combines the TS record decoders (parse_r24 / live decoders) with the edge
 /// framing / CRC / command / control-plane code into one bytes <-> records
-/// library. No runtime dependencies; dart:typed_data / dart:convert / dart:math
-/// only.
+/// library, plus the wire format for every other band this project speaks to.
+/// No runtime dependencies; dart:typed_data / dart:convert / dart:math only —
+/// a band whose wire format needs a crypto primitive (Oura's AES-128/ECB auth
+/// response) keeps that one piece with the session that drives it, one layer
+/// up, rather than adding a dependency here.
 library openstrap_protocol;
 
 // Source 0 — multi-band wire-format profile (gen4 / gen5).
 export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
+
+// Source 0b — other bands' wire formats. Function names are prefixed
+// (`parseOuraFrame`, not `parseFrame`) precisely because this library already
+// has a `parseFrame`/`parseEvent` for WHOOP's framed envelope — two bands
+// sharing one barrel must not share a bare verb.
+export 'src/oura.dart';
+export 'src/hrs.dart';
 
 // Source 1 — record decoders.
 export 'src/records.dart'
