@@ -799,10 +799,17 @@ void main() {
       }
     });
 
-    test('an unknown hello revision is refused, not read at rev-1 offsets', () {
+    test('a non-1 hello revision still parses at the fixed offsets', () {
+      // The revision byte is recorded, not a gate — the official parser reads
+      // the fixed offsets regardless of its value.
       final body = gen5HelloBody();
       body[0] = 2; // some future revision
-      expect(Gen5HelloInfo.parse(body), isNull);
+      final h = Gen5HelloInfo.parse(body)!;
+      expect(h.helloRevision, 2);
+      expect(h.batteryPct, 90);
+      expect(h.serial, '5AG0000001');
+      expect(h.firmwareVersion, '50.40.1.0');
+      expect(h.wristOn, isTrue);
     });
 
     test('an out-of-range battery is omitted, never clamped', () {
