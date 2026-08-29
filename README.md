@@ -7,7 +7,8 @@
 
 Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
 band, it hands you back a record with named fields, or a decoded command/event. That's
-the whole job.
+the whole job. Covers WHOOP 4 (gen4) and WHOOP 5 (gen5), a generic Bluetooth Heart Rate
+Service (0x180D) sensor, and the Oura ring's wire format.
 
 This isn't backend-side anymore — the app ([edge](https://github.com/OpenStrap/edge))
 depends on this package directly and calls it on-device. There's no cloud, no upload, no
@@ -30,6 +31,13 @@ server that ever sees your raw bytes.
   etc.) and the control-plane decoders (HELLO, events, command responses, metadata/sync
   markers).
 - `constants.dart` — the GATT UUIDs, opcode tables, event IDs.
+- `band.dart` — the multi-generation ("multi-band") wire-format profile: WHOOP 5 (gen5 /
+  "fd4b") is WHOOP 4 (gen4 / "Harvard") in a different envelope, and this is what lets
+  framing/records/edge stay band-agnostic instead of forking per generation.
+- `gen5_records.dart` — WHOOP 5 (gen5) historical record decoders: v18/v20/v21/v22/v26.
+- `hrs.dart` — the Bluetooth SIG's generic Heart Rate Service (0x180D) as a pure
+  function, for any standard chest strap or optical armband, not one vendor's device.
+- `oura.dart` — the Oura ring's wire format, as pure functions.
 
 ## The one record that matters most
 
@@ -140,7 +148,7 @@ Pure Dart, no Flutter dependency:
 
 ```bash
 dart pub get
-dart test          # 71 tests, incl. the 2934-case TS-parity suite
+dart test          # full suite, incl. the 2934-case TS-parity suite
 ```
 
 Run tests from the repo root — the parity fixture (`decode_parity_cases.json`) is
@@ -155,7 +163,10 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against `_external/noop/`  `bWanShiTong/reverse-engineering-whoop-post/`  for facts/techniques is fine; copying its code is not.
+Cross-checking against other WHOOP reverse-engineering write-ups (e.g. the `noop`
+project, or bWanShiTong's `reverse-engineering-whoop-post`) for facts/techniques is
+fine; copying their code is not. These are external projects, not paths inside this
+repo — go find and clone them separately if you want to compare.
 
 ## Contributing
 

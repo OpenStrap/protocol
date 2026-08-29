@@ -14,6 +14,17 @@ enum WristSelection {
   final int value;
 }
 
+/// LE-encode a WHOOP (whole-seconds, subseconds) timestamp pair as the 6 bytes
+/// `[sec:u32le][subsec:u16le]` shared by SET_CLOCK and every SET_ALARM form.
+List<int> _leTimestamp(int sec, int subsec) => [
+      sec & 0xff,
+      (sec >> 8) & 0xff,
+      (sec >> 16) & 0xff,
+      (sec >> 24) & 0xff,
+      subsec & 0xff,
+      (subsec >> 8) & 0xff,
+    ];
+
 /// Build a framed command packet: [type][seq][opcode][payload].
 /// [profile] selects the generation's frame envelope (default gen4 = WHOOP 4).
 /// The inner bytes are identical across generations — command opcodes are
@@ -135,12 +146,7 @@ Uint8List cmdSetClock(int seq,
   final sec = ms ~/ 1000;
   final subsec = ((ms % 1000) * 32768) ~/ 1000; // 0..32767, 1/32768 s units
   final payload = <int>[
-    sec & 0xff,
-    (sec >> 8) & 0xff,
-    (sec >> 16) & 0xff,
-    (sec >> 24) & 0xff,
-    subsec & 0xff,
-    (subsec >> 8) & 0xff,
+    ..._leTimestamp(sec, subsec),
     0,
     0,
   ];
@@ -365,12 +371,7 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
   final subsec = _alarmSubsec(when);
   final p = <int>[
     0x01,
-    sec & 0xff,
-    (sec >> 8) & 0xff,
-    (sec >> 16) & 0xff,
-    (sec >> 24) & 0xff,
-    subsec & 0xff,
-    (subsec >> 8) & 0xff,
+    ..._leTimestamp(sec, subsec),
   ];
   return buildCommand(seq, Cmd.setAlarmTime, p, profile);
 }
@@ -422,12 +423,7 @@ List<int> alarmRev1Payload(DateTime when, {int hapticMode = 0}) {
   final subsec = _alarmSubsec(when);
   return <int>[
     0x01,
-    sec & 0xff,
-    (sec >> 8) & 0xff,
-    (sec >> 16) & 0xff,
-    (sec >> 24) & 0xff,
-    subsec & 0xff,
-    (subsec >> 8) & 0xff,
+    ..._leTimestamp(sec, subsec),
     hapticMode & 0xff,
     (hapticMode >> 8) & 0xff,
   ];
@@ -509,12 +505,7 @@ Uint8List cmdSetAlarm(
   final p = <int>[
     0x04,
     slot & 0xff,
-    sec & 0xff,
-    (sec >> 8) & 0xff,
-    (sec >> 16) & 0xff,
-    (sec >> 24) & 0xff,
-    subsec & 0xff,
-    (subsec >> 8) & 0xff,
+    ..._leTimestamp(sec, subsec),
     ...pattern.map((b) => b & 0xff),
     if (profile.isGen5) crescendo,
   ];
@@ -652,12 +643,7 @@ Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
   final subsec = ((ms % 1000) * 32768) ~/ 1000;
   final payload = <int>[
     revision1,
-    sec & 0xff,
-    (sec >> 8) & 0xff,
-    (sec >> 16) & 0xff,
-    (sec >> 24) & 0xff,
-    subsec & 0xff,
-    (subsec >> 8) & 0xff,
+    ..._leTimestamp(sec, subsec),
     0,
     0,
   ];
