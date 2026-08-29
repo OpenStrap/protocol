@@ -539,6 +539,52 @@ R10Imu? decodeR10Imu(String hex) {
   );
 }
 
+/// Raw payload of one live R11 record (inner packet `0x2B`, record type
+/// `0x0B`). The signal's MEANING IS UNCONFIRMED — do not read `channelA`/
+/// `channelB` as accel, gyro, or PPG. What is established (issue #25, and its
+/// self-correction in the same thread): the live region at frame-abs
+/// `[36:436]` is 100 plain int32-LE samples, split into two 50-sample
+/// channels back to back (not one 100-sample stream, and not the
+/// word-swapped-int32 reading first proposed — that reading put a spurious
+/// ~56,700 discontinuity at sample 49 that a plain LE read does not have).
+/// Both accelerometer and cardiac interpretations were checked and ruled out
+/// on real captures; an optical baseline or ambient-light channel remain
+/// plausible but unconfirmed. Effective sample rate is "near 50 Hz per
+/// channel", not confirmed to be exactly 50 Hz.
+class R11Raw {
+  final int ts; // unix seconds (device clock)
+  final List<int> channelA; // 50 raw int32 samples, meaning unconfirmed
+  final List<int> channelB; // 50 raw int32 samples, meaning unconfirmed
+  R11Raw({required this.ts, required this.channelA, required this.channelB});
+}
+
+/// Decode a live R11 record's raw two-channel int32 samples. See [R11Raw] for
+/// what is and is not established about this frame. Returns null if `hex` is
+/// not a long-enough R11 frame.
+R11Raw? decodeR11Raw(String hex) {
+  Uint8List b;
+  try {
+    b = hexToBytes(hex);
+  } catch (_) {
+    return null;
+  }
+  if (b.length < 436 || b[0] != 0x2b || b[1] != 0x0b) return null;
+  final view = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
+  List<int> channel(int off) {
+    final out = <int>[];
+    for (int i = 0; i < 50; i++) {
+      out.add(view.getInt32(off + 4 * i, Endian.little));
+    }
+    return out;
+  }
+
+  return R11Raw(
+    ts: view.getUint32(7, Endian.little),
+    channelA: channel(36),
+    channelB: channel(236),
+  );
+}
+
 /// Decode a batch of hex records, returning all surfaceable samples.
 List<DecodedSample> decodeBatch(List<String> records) {
   final out = <DecodedSample>[];

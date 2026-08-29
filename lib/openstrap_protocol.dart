@@ -75,12 +75,14 @@ export 'src/live.dart'
         ImuFrame,
         RealtimeRrResult,
         R10Imu,
+        R11Raw,
         hexToBytes,
         frameAccel,
         frameAccelGen5Live,
         frameAccelForBand,
         realtimeRr,
         decodeR10Imu,
+        decodeR11Raw,
         decodeRecord,
         decodeBatch;
 
