@@ -4,6 +4,7 @@
 // NOT duplicated here: decodeFrame delegates the R24 branch to the now-native
 // Dart parseR24 (records.dart, Source 1). PURE Dart.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'band.dart';
 import 'constants.dart';
@@ -20,16 +21,8 @@ double f32(Uint8List b, int o) => _bd(b).getFloat32(o, Endian.little);
 
 double _round(double v, int decimals) {
   if (v.isNaN || v.isInfinite) return 0.0;
-  final p = _pow10(decimals);
+  final p = math.pow(10, decimals).toDouble();
   return (v * p).roundToDouble() / p;
-}
-
-double _pow10(int n) {
-  double p = 1;
-  for (int i = 0; i < n; i++) {
-    p *= 10;
-  }
-  return p;
 }
 
 String _hex(Uint8List b) {
@@ -1456,6 +1449,7 @@ Decoded _decodeDataRecord(Uint8List inner,
       // state for every wrist-off period.
       return Decoded('realtime_hr', {
         'rec_type': recType,
+        'ts_epoch': r.tsEpoch,
         'hr': r.hr,
         'rr_ms': r.rrIntervalsMs,
         'wearing': r.hr > 0,

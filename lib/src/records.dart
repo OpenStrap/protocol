@@ -3,6 +3,7 @@
 // PURE Dart — dart:typed_data plus constants.dart (itself dependency-free),
 // so the packet-type values are not a second copy of the same magic numbers.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'constants.dart';
@@ -210,7 +211,7 @@ double _jsRound(double v) {
 /// Non-finite input is returned unchanged — see [_jsRound].
 double _round(double v, int decimals) {
   if (!v.isFinite) return v;
-  final p = _pow10(decimals);
+  final p = math.pow(10, decimals).toDouble();
   return _jsRound(v * p) / p;
 }
 
@@ -242,14 +243,6 @@ const int kMaxRrMs = 2500;
 /// which cost callers the record's own timestamp).
 final Set<int> kKnownRecordVersions =
     Set.unmodifiable({..._hrOffsetByVersion.keys, 25});
-
-double _pow10(int n) {
-  double p = 1;
-  for (int i = 0; i < n; i++) {
-    p *= 10;
-  }
-  return p;
-}
 
 ByteData _view(Uint8List b) =>
     b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);

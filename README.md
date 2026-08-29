@@ -148,7 +148,7 @@ Pure Dart, no Flutter dependency:
 
 ```bash
 dart pub get
-dart test          # 71 tests, incl. the 2934-case TS-parity suite
+dart test          # full suite, incl. the 2934-case TS-parity suite
 ```
 
 Run tests from the repo root — the parity fixture (`decode_parity_cases.json`) is
