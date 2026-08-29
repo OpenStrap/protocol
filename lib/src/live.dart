@@ -547,10 +547,13 @@ R10Imu? decodeR10Imu(String hex) {
 /// channels back to back (not one 100-sample stream, and not the
 /// word-swapped-int32 reading first proposed — that reading put a spurious
 /// ~56,700 discontinuity at sample 49 that a plain LE read does not have).
-/// Both accelerometer and cardiac interpretations were checked and ruled out
-/// on real captures; an optical baseline or ambient-light channel remain
-/// plausible but unconfirmed. Effective sample rate is "near 50 Hz per
-/// channel", not confirmed to be exactly 50 Hz.
+/// Accelerometer is ruled out on real captures. A cardiac interpretation is
+/// NOT ruled out: an earlier "not cardiac" call from the same misread was
+/// itself withdrawn once corrected, and a corrected re-check found suggestive
+/// but inconclusive agreement with reference heart rate. Optical baseline or
+/// ambient-light channel remain plausible too. This decoder deliberately
+/// makes no signal-meaning determination. Effective sample rate is "near
+/// 50 Hz per channel", not confirmed to be exactly 50 Hz.
 class R11Raw {
   final int ts; // unix seconds (device clock)
   final List<int> channelA; // 50 raw int32 samples, meaning unconfirmed
