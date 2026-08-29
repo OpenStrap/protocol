@@ -719,14 +719,14 @@ class Gen5OpticalBlock {
 
   /// LED A drive current in units of 10 µA. @ sharedMeta[1:3] u16.
   /// [ledACurrentMicroamps] is the same number in µA.
-  int get ledACurrentRaw => _u16(sharedMetaRaw, 1);
+  int get ledACurrentRaw => _view(sharedMetaRaw).getUint16(1, Endian.little);
   int get ledACurrentMicroamps => ledACurrentRaw * 10;
 
   /// Which driver output LED B is wired to. @ sharedMeta[3].
   int get ledBDriverConnection => sharedMetaRaw[3];
 
   /// LED B drive current in units of 10 µA. @ sharedMeta[4:6] u16.
-  int get ledBCurrentRaw => _u16(sharedMetaRaw, 4);
+  int get ledBCurrentRaw => _view(sharedMetaRaw).getUint16(4, Endian.little);
   int get ledBCurrentMicroamps => ledBCurrentRaw * 10;
 
   /// Which PHYSICAL photodiode (1..4) is routed into the TIA 1 path for this
@@ -736,7 +736,8 @@ class Gen5OpticalBlock {
 
   /// TIA 1's ADC full-scale range, in µA. @ channel0Meta[1:5] u32
   /// (descriptor relative 7).
-  int get channel0AdcRange => _u32(channel0MetaRaw, 1);
+  int get channel0AdcRange =>
+      _view(channel0MetaRaw).getUint32(1, Endian.little);
 
   /// TIA 1's offset-current setting, raw wire value: **signed i16, 10 nA/LSB
   /// (0.01 µA/LSB)**. @ channel0Meta[5:7] = descriptor relative 11.
@@ -747,7 +748,8 @@ class Gen5OpticalBlock {
   /// labels the unscaled nA value with a "µA" suffix — that is a logging bug,
   /// not an alternative unit. [tia1OffsetCurrentNanoamps] is the same number
   /// in nA.
-  int get tia1OffsetCurrentRaw => _i16(channel0MetaRaw, 5);
+  int get tia1OffsetCurrentRaw =>
+      _view(channel0MetaRaw).getInt16(5, Endian.little);
   int get tia1OffsetCurrentNanoamps => tia1OffsetCurrentRaw * 10;
 
   @Deprecated(
@@ -760,11 +762,13 @@ class Gen5OpticalBlock {
   /// TIA 2's, same three fields at the same relative offsets (descriptor
   /// relative 13/14/18).
   int get channel1Source => channel1MetaRaw[0];
-  int get channel1AdcRange => _u32(channel1MetaRaw, 1);
+  int get channel1AdcRange =>
+      _view(channel1MetaRaw).getUint32(1, Endian.little);
 
   /// TIA 2's offset-current setting — see [tia1OffsetCurrentRaw] for the unit
   /// and the quantization; @ channel1Meta[5:7] = descriptor relative 18.
-  int get tia2OffsetCurrentRaw => _i16(channel1MetaRaw, 5);
+  int get tia2OffsetCurrentRaw =>
+      _view(channel1MetaRaw).getInt16(5, Endian.little);
   int get tia2OffsetCurrentNanoamps => tia2OffsetCurrentRaw * 10;
 
   @Deprecated(
@@ -774,15 +778,6 @@ class Gen5OpticalBlock {
   )
   int get channel1AdcOffset => tia2OffsetCurrentRaw & 0xFFFF;
 }
-
-int _u16(Uint8List b, int i) => b[i] | (b[i + 1] << 8);
-int _i16(Uint8List b, int i) {
-  final v = _u16(b, i);
-  return v >= 0x8000 ? v - 0x10000 : v;
-}
-
-int _u32(Uint8List b, int i) =>
-    b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24);
 
 /// The raw optical deep buffer. Layout is confirmed: the body starts at inner
 /// 18, then 5 blocks of 422 bytes each; every block holds 50 sample-pair slots,
