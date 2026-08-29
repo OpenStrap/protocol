@@ -1416,6 +1416,18 @@ Decoded _decodeDataRecord(Uint8List inner,
   final recType = inner.length > 1 ? inner[1] : -1;
   // Compact realtime stream (small packet).
   if (inner.length < 64) {
+    if (recType == 2) {
+      final v2 = parseRealtimeHrV2(inner);
+      if (v2 != null) {
+        return Decoded('realtime_hr', {
+          'rec_type': recType,
+          'ts_epoch': v2.tsEpoch,
+          'hr': v2.hrBpm,
+          'wearing': !v2.isOffBody,
+          'location': v2.locationRaw,
+        });
+      }
+    }
     final hr = parseRealtimeHr(inner);
     if (hr != null) {
       return Decoded('realtime_hr', {
@@ -1432,16 +1444,21 @@ Decoded _decodeDataRecord(Uint8List inner,
   // Live R10 (HR + IMU) — surface HR for the live display.
   if (recType == Record.r10) {
     final r = parseR10Lite(inner);
-    if (r != null && r.hr > 0) {
+    if (r != null) {
       // rr_ms too: parseR10Lite already accepted these beats, and the short
       // realtime-HR branch above emits them — dropping them here silently
       // halved the beat supply of anything reading live R10 through
       // decodeFrame rather than live.dart.
+      //
+      // Emit even when hr==0 — that's a legitimate off-wrist reading (see
+      // live.dart's `wristOn = hr > 0`), not an undecoded record. Falling
+      // through to 'data_record' below dropped the timestamp and wearing
+      // state for every wrist-off period.
       return Decoded('realtime_hr', {
         'rec_type': recType,
         'hr': r.hr,
         'rr_ms': r.rrIntervalsMs,
-        'wearing': true,
+        'wearing': r.hr > 0,
       });
     }
   }

@@ -62,9 +62,13 @@ dart test
 Two things guard every change:
 
 - **`decode_parity_cases.json`** — 2934 cases checked against the frozen
-  TypeScript oracle in `ts/`. If you change a decoder and parity breaks, either
-  your change is wrong or the oracle needs regenerating — work out which, and
-  say so in the PR.
+  oracle. This file *is* the oracle now — it was generated from a TypeScript
+  reference implementation (`ts/`) that was later deleted once parity was
+  locked in (still recoverable from git history if you need to regenerate
+  cases from scratch), but nothing in `dart test` spawns node/tsc against it
+  any more. If you change a decoder and parity breaks, either your change is
+  wrong or the fixture needs regenerating — work out which, and say so in the
+  PR.
 - **`dart_header.json`** — 550 hand-checked R24 header cases.
 
 Both are tracked in-repo and run in CI. A third set replays
