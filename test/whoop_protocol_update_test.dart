@@ -581,4 +581,24 @@ void main() {
       expect(decoded.fields['rr_ms'], isEmpty);
     });
   });
+
+  group('short R10 frames are not swallowed by the compact dispatch', () {
+    // A real R10 (0x2B) live frame is normally ~1920 bytes, but parseR10Lite
+    // only requires 18 — a short one still under the compact branch's 64-byte
+    // cutoff used to get routed there first and never reach the R10 branch.
+    test('a short R10 frame with hr==0 (off-wrist) still decodes as R10', () {
+      final b = Uint8List(20);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x2b;
+      b[1] = Record.r10;
+      bd.setUint32(7, 1780840486, Endian.little); // ts
+      b[17] = 0; // hr — off-wrist, not "undecoded"
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      expect(decoded.fields['ts_epoch'], 1780840486);
+      expect(decoded.fields['hr'], 0);
+      expect(decoded.fields['wearing'], isFalse);
+    });
+  });
 }

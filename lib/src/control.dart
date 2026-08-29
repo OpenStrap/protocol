@@ -1407,6 +1407,32 @@ Decoded _decodeDataRecord(Uint8List inner,
     return Decoded('data_record', {'rec_type': inner.length > 1 ? inner[1] : -1});
   }
   final recType = inner.length > 1 ? inner[1] : -1;
+  // Live R10 (HR + IMU) — surface HR for the live display. Checked before the
+  // generic small-packet branch below: a short/lite R10 record (parseR10Lite
+  // only requires 18 bytes) is still under that branch's 64-byte cutoff and
+  // would otherwise be swallowed there first, misread by the wrong offsets,
+  // and never reach this branch at all.
+  if (recType == Record.r10) {
+    final r = parseR10Lite(inner);
+    if (r != null) {
+      // rr_ms too: parseR10Lite already accepted these beats, and the short
+      // realtime-HR branch above emits them — dropping them here silently
+      // halved the beat supply of anything reading live R10 through
+      // decodeFrame rather than live.dart.
+      //
+      // Emit even when hr==0 — that's a legitimate off-wrist reading (see
+      // live.dart's `wristOn = hr > 0`), not an undecoded record. Falling
+      // through to 'data_record' below dropped the timestamp and wearing
+      // state for every wrist-off period.
+      return Decoded('realtime_hr', {
+        'rec_type': recType,
+        'ts_epoch': r.tsEpoch,
+        'hr': r.hr,
+        'rr_ms': r.rrIntervalsMs,
+        'wearing': r.hr > 0,
+      });
+    }
+  }
   // Compact realtime stream (small packet).
   if (inner.length < 64) {
     if (recType == 2) {
@@ -1433,28 +1459,6 @@ Decoded _decodeDataRecord(Uint8List inner,
       });
     }
     return Decoded('realtime_small', {'rec_type': recType});
-  }
-  // Live R10 (HR + IMU) — surface HR for the live display.
-  if (recType == Record.r10) {
-    final r = parseR10Lite(inner);
-    if (r != null) {
-      // rr_ms too: parseR10Lite already accepted these beats, and the short
-      // realtime-HR branch above emits them — dropping them here silently
-      // halved the beat supply of anything reading live R10 through
-      // decodeFrame rather than live.dart.
-      //
-      // Emit even when hr==0 — that's a legitimate off-wrist reading (see
-      // live.dart's `wristOn = hr > 0`), not an undecoded record. Falling
-      // through to 'data_record' below dropped the timestamp and wearing
-      // state for every wrist-off period.
-      return Decoded('realtime_hr', {
-        'rec_type': recType,
-        'ts_epoch': r.tsEpoch,
-        'hr': r.hr,
-        'rr_ms': r.rrIntervalsMs,
-        'wearing': r.hr > 0,
-      });
-    }
   }
   // R24: delegate to the native Dart full-record decoder (Source 1).
   if (recType == Record.r24) {
