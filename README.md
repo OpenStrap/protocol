@@ -34,7 +34,7 @@ server that ever sees your raw bytes.
 - `band.dart` — the multi-generation ("multi-band") wire-format profile: WHOOP 5 (gen5 /
   "fd4b") is WHOOP 4 (gen4 / "Harvard") in a different envelope, and this is what lets
   framing/records/edge stay band-agnostic instead of forking per generation.
-- `gen5_records.dart` — WHOOP 5 (gen5) historical record decoders: v18/v20/v21/v26.
+- `gen5_records.dart` — WHOOP 5 (gen5) historical record decoders: v18/v20/v21/v22/v26.
 - `hrs.dart` — the Bluetooth SIG's generic Heart Rate Service (0x180D) as a pure
   function, for any standard chest strap or optical armband, not one vendor's device.
 - `oura.dart` — the Oura ring's wire format, as pure functions.
