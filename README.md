@@ -5,20 +5,43 @@
 [![stars](https://img.shields.io/github/stars/OpenStrap/protocol?style=flat&color=e2825f)](https://github.com/OpenStrap/protocol/stargazers)
 [![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
 
-Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
-band, it hands you back a record with named fields, or a decoded command/event. That's
-the whole job.
+Pure Dart, zero runtime deps, multi-band. You hand it an already-unwrapped chunk of
+bytes from a device — WHOOP 4, WHOOP 5, an Oura ring, or any generic Bluetooth Heart
+Rate Service (0x180D) sensor — it hands you back a record with named fields, or a
+decoded command/event. That's the whole job.
 
 This isn't backend-side anymore — the app ([edge](https://github.com/OpenStrap/edge))
 depends on this package directly and calls it on-device. There's no cloud, no upload, no
 server that ever sees your raw bytes.
 
-> Not affiliated with WHOOP. This is for reading your own band's data.
+> Not affiliated with WHOOP, Oura, or any other device maker. This is for reading your
+> own device's data.
+
+## Part of OpenStrap
+
+This is the byte layer of a three-repo project — reverse-engineered BLE GATT protocols
+in, named records out. Nothing here talks to a server.
+
+- **protocol** (this repo) — bytes ↔ records/frames/commands for WHOOP 4/5, Oura, and
+  generic BLE heart-rate sensors.
+- [analytics](https://github.com/OpenStrap/analytics) — turns those records into
+  metrics: HRV, sleep staging, recovery, strain.
+- [edge](https://github.com/OpenStrap/edge) — the actual app: the Bluetooth connection,
+  storage, sync, UI.
 
 ## What's actually in here
 
-- `records.dart` — the record decoders (`R24`, `parseR24`, and the firmware-aware
-  fallback chain for older/short frames — see below).
+- `band.dart` — the multi-generation device profile (`BandProfile`/`DeviceType`) that
+  keeps framing/records/edge band-agnostic instead of forking per generation.
+- `records.dart` — the WHOOP 4 (gen4) record decoders (`R24`, `parseR24`, and the
+  firmware-aware fallback chain for older/short frames — see below).
+- `gen5_records.dart` — the WHOOP 5 (gen5) record decoders: v18/v20/v21/v26 and the rest
+  of the gen5-specific record map. gen5 is gen4 in a different envelope, not a separate
+  protocol — see `band.dart`'s doc comment for the verified deltas.
+- `oura.dart` — the Oura ring wire format.
+- `hrs.dart` — the Bluetooth SIG Heart Rate Service (`0x180D`) as a pure function, for
+  any standard chest strap or optical armband that implements the spec, not one vendor's
+  device.
 - `live.dart` — the live/high-rate stuff: R10, the 0x28 compact-HR stream, the 0x33 IMU
   stream, RR-interval extraction.
 - `framing.dart` — the actual byte-level framing: `0xAA` start-of-frame, CRC8 length
@@ -30,6 +53,29 @@ server that ever sees your raw bytes.
   etc.) and the control-plane decoders (HELLO, events, command responses, metadata/sync
   markers).
 - `constants.dart` — the GATT UUIDs, opcode tables, event IDs.
+
+## WHOOP 5 (gen5)
+
+gen5 shares WHOOP 4's protocol almost entirely — same opcodes (except `HELLO`, which
+moves to `0x91`), same CRC32 payload check — wrapped in a different frame header
+(8 bytes + crc16-modbus instead of 4 bytes + crc8) and a different GATT service prefix
+(`fd4b…` instead of `6108…`). `BandProfile.gen5` selects it; everything else in this
+package takes a profile rather than hardcoding gen4's shape. See `gen5_records.dart` for
+the gen5-specific record layouts (v18/v20/v21/v26).
+
+## Oura ring
+
+`oura.dart` decodes the Oura ring's own BLE wire format — a different GATT service and
+byte layout from WHOOP entirely, reverse-engineered the same way the WHOOP records were:
+real captures, plausibility checks, no vendor docs.
+
+## Generic Bluetooth heart rate sensors
+
+`hrs.dart` decodes the Bluetooth SIG's standard Heart Rate Service (`0x2A37`
+characteristic under service `0x180D`) — the spec most chest straps and optical armbands
+already speak, independent of any single vendor. This is how OpenStrap works with a
+device it has never specifically reverse-engineered: if it speaks the SIG spec, this
+decoder already reads it.
 
 ## The one record that matters most
 
@@ -140,7 +186,7 @@ Pure Dart, no Flutter dependency:
 
 ```bash
 dart pub get
-dart test          # 71 tests, incl. the 2934-case TS-parity suite
+dart test          # the full suite, incl. the 2934-case TS-parity suite
 ```
 
 Run tests from the repo root — the parity fixture (`decode_parity_cases.json`) is
@@ -155,7 +201,9 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against `_external/noop/`  `bWanShiTong/reverse-engineering-whoop-post/`  for facts/techniques is fine; copying its code is not.
+Cross-checking against other public reverse-engineering writeups for facts/techniques is
+fine — e.g. [bWanShiTong/reverse-engineering-whoop-post](https://github.com/bWanShiTong/reverse-engineering-whoop-post)
+— copying their code is not.
 
 ## Contributing
 

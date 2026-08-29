@@ -580,5 +580,50 @@ void main() {
       expect(decoded.fields['hr'], 65);
       expect(decoded.fields['rr_ms'], isEmpty);
     });
+
+    // decodeFrame used to never route to parseRealtimeHrV2 at all — any short
+    // realtime packet fell straight to the v1 decoder, which reads a v2
+    // body's reserved byte [9] as an RR count and never surfaces off-body or
+    // garment location.
+    test(
+        'a revision-2 body routes to parseRealtimeHrV2 and surfaces off-body + location',
+        () {
+      final b = Uint8List(20);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x28;
+      b[1] = 2; // revision 2
+      bd.setUint32(2, 1780840486, Endian.little); // ts
+      b[8] = 79; // hr
+      b[18] = 0; // off-body
+      b[19] = 2; // bicep
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      expect(decoded.fields['ts_epoch'], 1780840486);
+      expect(decoded.fields['hr'], 79);
+      expect(decoded.fields['wearing'], isFalse);
+      expect(decoded.fields['location_raw'], 2);
+    });
+  });
+
+  group('live R10 dispatch', () {
+    // hr == 0 is a legitimate off-wrist reading (see live.dart's
+    // `wristOn: hr > 0`), not a failed decode. This used to fall through to a
+    // bare 'data_record' with no wearing field at all.
+    test('hr == 0 still emits realtime_hr with wearing:false, not silence',
+        () {
+      final b = Uint8List(64);
+      final bd = b.buffer.asByteData();
+      b[0] = 0x28;
+      b[1] = Record.r10;
+      bd.setUint32(3, 42, Endian.little); // counter
+      bd.setUint32(7, 1780840486, Endian.little); // ts
+      b[17] = 0; // hr == 0: off-wrist
+
+      final decoded = decodeFrame(Frame(b, true, true));
+      expect(decoded.kind, 'realtime_hr');
+      expect(decoded.fields['hr'], 0);
+      expect(decoded.fields['wearing'], isFalse);
+    });
   });
 }
