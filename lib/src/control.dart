@@ -4,6 +4,7 @@
 // NOT duplicated here: decodeFrame delegates the R24 branch to the now-native
 // Dart parseR24 (records.dart, Source 1). PURE Dart.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'band.dart';
 import 'constants.dart';
@@ -20,16 +21,8 @@ double f32(Uint8List b, int o) => _bd(b).getFloat32(o, Endian.little);
 
 double _round(double v, int decimals) {
   if (v.isNaN || v.isInfinite) return 0.0;
-  final p = _pow10(decimals);
+  final p = math.pow(10, decimals).toDouble();
   return (v * p).roundToDouble() / p;
-}
-
-double _pow10(int n) {
-  double p = 1;
-  for (int i = 0; i < n; i++) {
-    p *= 10;
-  }
-  return p;
 }
 
 String _hex(Uint8List b) {
@@ -1414,8 +1407,46 @@ Decoded _decodeDataRecord(Uint8List inner,
     return Decoded('data_record', {'rec_type': inner.length > 1 ? inner[1] : -1});
   }
   final recType = inner.length > 1 ? inner[1] : -1;
+  // Live R10 (HR + IMU) — surface HR for the live display. Checked before the
+  // generic small-packet branch below: a short/lite R10 record (parseR10Lite
+  // only requires 18 bytes) is still under that branch's 64-byte cutoff and
+  // would otherwise be swallowed there first, misread by the wrong offsets,
+  // and never reach this branch at all.
+  if (recType == Record.r10) {
+    final r = parseR10Lite(inner);
+    if (r != null) {
+      // rr_ms too: parseR10Lite already accepted these beats, and the short
+      // realtime-HR branch above emits them — dropping them here silently
+      // halved the beat supply of anything reading live R10 through
+      // decodeFrame rather than live.dart.
+      //
+      // Emit even when hr==0 — that's a legitimate off-wrist reading (see
+      // live.dart's `wristOn = hr > 0`), not an undecoded record. Falling
+      // through to 'data_record' below dropped the timestamp and wearing
+      // state for every wrist-off period.
+      return Decoded('realtime_hr', {
+        'rec_type': recType,
+        'ts_epoch': r.tsEpoch,
+        'hr': r.hr,
+        'rr_ms': r.rrIntervalsMs,
+        'wearing': r.hr > 0,
+      });
+    }
+  }
   // Compact realtime stream (small packet).
   if (inner.length < 64) {
+    if (recType == 2) {
+      final v2 = parseRealtimeHrV2(inner);
+      if (v2 != null) {
+        return Decoded('realtime_hr', {
+          'rec_type': recType,
+          'ts_epoch': v2.tsEpoch,
+          'hr': v2.hrBpm,
+          'wearing': !v2.isOffBody,
+          'location': v2.locationRaw,
+        });
+      }
+    }
     final hr = parseRealtimeHr(inner);
     if (hr != null) {
       return Decoded('realtime_hr', {
@@ -1428,22 +1459,6 @@ Decoded _decodeDataRecord(Uint8List inner,
       });
     }
     return Decoded('realtime_small', {'rec_type': recType});
-  }
-  // Live R10 (HR + IMU) — surface HR for the live display.
-  if (recType == Record.r10) {
-    final r = parseR10Lite(inner);
-    if (r != null && r.hr > 0) {
-      // rr_ms too: parseR10Lite already accepted these beats, and the short
-      // realtime-HR branch above emits them — dropping them here silently
-      // halved the beat supply of anything reading live R10 through
-      // decodeFrame rather than live.dart.
-      return Decoded('realtime_hr', {
-        'rec_type': recType,
-        'hr': r.hr,
-        'rr_ms': r.rrIntervalsMs,
-        'wearing': true,
-      });
-    }
   }
   // R24: delegate to the native Dart full-record decoder (Source 1).
   if (recType == Record.r24) {

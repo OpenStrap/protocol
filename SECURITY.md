@@ -17,43 +17,31 @@ company with an on-call rota:
   for anything that puts user data at risk.
 - Credit in the release notes if you want it.
 
+## What this package actually is
+
+This repo is a pure-Dart library with zero runtime dependencies: bytes in,
+decoded records/frames/commands out. It doesn't run on its own, ship an app,
+talk to a network, or store anything — no database, no telemetry, no
+Firebase. It's a dependency of [edge](https://github.com/OpenStrap/edge),
+which is where the app, its distribution model, and its data-handling
+questions live.
+
 ## What's in scope
 
-- Anything that discloses a user's health data off their device.
-- Anything that lets a third party read, write to, or hijack the Bluetooth
-  session with someone's band.
-- Local data-at-rest problems: the database, exports, the App Group container,
-  widget snapshots.
-- The optional companion worker in
-  [backend](https://github.com/OpenStrap/backend): auth, the import endpoints,
-  the opt-in telemetry and health-upload paths.
-- Anything that causes the app to send data anywhere the user did not agree to.
+- A decoder that misparses bytes in a way that's exploitable, not just wrong
+  (buffer overreads, crashes on malformed input, anything an attacker could
+  use by controlling bytes the band or a proxy sends).
+- Anything in this package's command builders that could be used to send a
+  command to a band the caller didn't ask for.
 
 ## What's out of scope
 
 - The band's own firmware. We don't ship it, can't patch it, and won't publish
   attacks against it.
 - WHOOP's own apps and services. Please report those to WHOOP.
-- The fact that sideloaded builds are unsigned, or that a rooted/jailbroken
-  device can read app storage. Both are known properties of the distribution
-  model, documented in the README.
+- App-level distribution and privacy questions (signing, sideloading, device
+  storage access, telemetry, health-data upload) — those belong to
+  [edge's SECURITY.md](https://github.com/OpenStrap/edge/blob/main/SECURITY.md)
+  and [PRIVACY.md](https://github.com/OpenStrap/edge/blob/main/PRIVACY.md),
+  not this repo.
 - Metric accuracy. Wrong numbers are bugs — open a normal issue.
-
-## Where your data actually is
-
-Worth knowing before you go looking: OpenStrap computes and stores your health
-data on-device, and there's no account or server holding it. Two qualifications,
-so the boundary is exact:
-
-- **Anonymous diagnostics** (Firebase crash/performance, never health data) are
-  **on by default in GitHub release builds** and absent from App Store / Play
-  Store builds. Switchable off in-app.
-- **Health-data contribution** uploads the local database, but is opt-in, off by
-  default, and compiled out of store builds entirely.
-
-Everything else the companion worker does — legacy import, an update pointer —
-is optional and carries no health data. See [edge's PRIVACY.md](https://github.com/OpenStrap/edge/blob/main/PRIVACY.md).
-
-That means the realistic attack surface is the phone, the Bluetooth link, and
-the local database — not a cloud backend. Reports focused there are the most
-useful.
