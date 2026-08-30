@@ -3,6 +3,7 @@
 [![test](https://github.com/OpenStrap/protocol/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/protocol/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![stars](https://img.shields.io/github/stars/OpenStrap/protocol?style=flat&color=e2825f)](https://github.com/OpenStrap/protocol/stargazers)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/dUXds5MWkd)
 [![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
 
 Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
