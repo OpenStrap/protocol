@@ -73,13 +73,19 @@ class DafitFrame {
 
 /// Parse one notification as a data frame. Null when it cannot be one —
 /// too short, the wrong header (an ACK frame reads `0xDC` here and is
-/// correctly rejected), or a payload length longer than the bytes actually
-/// delivered.
+/// correctly rejected), a payload length longer than the bytes actually
+/// delivered, or an outer length that disagrees with the payload length —
+/// the two are supposed to describe the same frame (`outerLen == 5 +
+/// payloadLen`), and a frame where they disagree is malformed, not merely
+/// unfamiliar. Accepting it anyway would hand [buildDafitAck] a length to
+/// echo back that this frame never actually had.
 DafitFrame? parseDafitFrame(List<int> value) {
   if (value.length < 8 || value[0] != kDafitDataHeader) return null;
   final outerLen = (value[1] << 8) | value[2];
   final payloadLen = (value[6] << 8) | value[7];
-  if (value.length - 8 < payloadLen) return null;
+  if (value.length - 8 < payloadLen || outerLen != 5 + payloadLen) {
+    return null;
+  }
   return DafitFrame(
     value[3],
     value[5],
@@ -132,9 +138,19 @@ bool isDafitAckFrame(List<int> value) =>
 /// Pack a local date/time into this family's bit-packed SET_DATE_TIME field:
 /// seconds, then (year-2000), month, day, hour, minute each shifted into
 /// their own bit range of one big-endian u32.
+///
+/// `year - 2000` has to fit the field's own six bits (0-63, i.e. 2000-2063).
+/// Outside that range the later shift would silently drop the high bits and
+/// write a DIFFERENT year to the band's clock — a wrong date it would then
+/// act on with total confidence — so this throws instead.
 int packDafitDateTime(DateTime t) {
+  final yearOffset = t.year - 2000;
+  if (yearOffset < 0 || yearOffset > 63) {
+    throw ArgumentError.value(t.year, 'year',
+        'this family\'s clock field only represents 2000-2063');
+  }
   return t.second |
-      ((t.year - 2000) << 26) |
+      (yearOffset << 26) |
       (t.month << 22) |
       (t.day << 17) |
       (t.hour << 12) |

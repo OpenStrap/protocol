@@ -25,6 +25,18 @@ void main() {
           isNull);
     });
 
+    test('rejects an outer length that disagrees with the payload length',
+        () {
+      // Same bytes as the real captured frame above, but the outer length
+      // (byte 2) claims 8 instead of the correct 9 — a malformed frame, not
+      // a shorter one, since the payload bytes and their own length field
+      // still say 4.
+      expect(
+          parseDafitFrame(
+              [0xcd, 0x00, 0x08, 0x12, 0x01, 0x01, 0x00, 0x04, 0xa5, 0x83, 0x73, 0xdb]),
+          isNull);
+    });
+
     test('isDafitAckFrame identifies only the fixed 8-byte ack shape', () {
       expect(isDafitAckFrame([0xdc, 0x00, 0x05, 0x1a, 0x01, 0x00, 0x0c, 0x01]),
           isTrue);
@@ -63,6 +75,15 @@ void main() {
       expect((v >> 17) & 0x1f, 5); // day
       expect((v >> 22) & 0xf, 3); // month
       expect((v >> 26) & 0x3f, 24); // year - 2000
+    });
+
+    test('packDafitDateTime refuses a year outside 2000-2063', () {
+      expect(() => packDafitDateTime(DateTime(1999, 1, 1)),
+          throwsArgumentError);
+      expect(() => packDafitDateTime(DateTime(2064, 1, 1)),
+          throwsArgumentError);
+      // The boundary itself is fine.
+      expect(() => packDafitDateTime(DateTime(2063, 1, 1)), returnsNormally);
     });
 
     test('dafitInitSequence is eight well-formed, parseable frames', () {
