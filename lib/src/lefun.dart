@@ -65,27 +65,53 @@ class LefunFrame {
   const LefunFrame(this.report, this.params);
 }
 
+/// Throws unless [b] is a single wire byte. Every field this envelope carries
+/// — the report code and every argument — is one GATT-frame byte, and a
+/// caller passing something outside 0-255 would otherwise silently produce a
+/// frame with a value no receiving device's byte reader can represent.
+void _checkByte(int b, String name) {
+  if (b < 0 || b > 0xff) {
+    throw ArgumentError.value(b, name, 'must be a single byte (0-255)');
+  }
+}
+
 /// Build one host-to-device frame. Throws if [params] would push the frame
 /// past [kLefunMaxFrameLength] — there is no multi-segment chunking here, so a
-/// command that cannot fit one write has no builder in this file.
+/// command that cannot fit one write has no builder in this file — or if
+/// [report] or any of [params] falls outside 0-255.
 List<int> buildLefunFrame(int report, {List<int> params = const <int>[]}) {
   final length = kLefunHeaderLength + params.length;
   if (length > kLefunMaxFrameLength) {
     throw ArgumentError('Lefun frame does not fit one GATT write');
+  }
+  _checkByte(report, 'report');
+  for (final p in params) {
+    _checkByte(p, 'params');
   }
   final body = <int>[kLefunRequestMarker, length, report, ...params];
   return <int>[...body, _lefunChecksum(body)];
 }
 
 /// Parse one device-to-host frame. Null for anything too short, missing the
-/// response marker, whose declared length disagrees with what actually
-/// arrived, or whose checksum does not match — the last two mean a partial or
-/// corrupted delivery, never a value to patch up and keep.
+/// response marker, declaring a length outside `kLefunHeaderLength ..
+/// kLefunMaxFrameLength`, or whose checksum does not match — any of those
+/// means a partial or corrupted delivery, never a value to patch up and keep.
+///
+/// A DECLARED LENGTH SHORTER THAN THE BUFFER IS ACCEPTED, deliberately: this
+/// codec has not been checked against a real capture, and a device in this
+/// family appending bytes past its own declared length — the way the Oura
+/// ring is known to (see `oura.dart`) — would otherwise have every one of its
+/// notifications refused outright instead of parsed with the extra bytes
+/// available to whoever archives the raw delivery.
 LefunFrame? parseLefunFrame(List<int> value) {
   if (value.length < kLefunHeaderLength) return null;
   if (value[0] != kLefunResponseMarker) return null;
   final length = value[1];
-  if (length < kLefunHeaderLength || length > value.length) return null;
+  if (length < kLefunHeaderLength ||
+      length > kLefunMaxFrameLength ||
+      length > value.length) {
+    return null;
+  }
   final body = value.sublist(0, length - 1);
   if (_lefunChecksum(body) != value[length - 1]) return null;
   return LefunFrame(value[2], value.sublist(3, length - 1));

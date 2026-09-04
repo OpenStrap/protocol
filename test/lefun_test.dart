@@ -28,6 +28,22 @@ void main() {
         throwsArgumentError,
       );
     });
+
+    test('an out-of-range report code throws', () {
+      expect(() => buildLefunFrame(256), throwsArgumentError);
+      expect(() => buildLefunFrame(-1), throwsArgumentError);
+    });
+
+    test('an out-of-range argument byte throws', () {
+      expect(
+        () => buildLefunFrame(0x01, params: const [256]),
+        throwsArgumentError,
+      );
+      expect(
+        () => buildLefunFrame(0x01, params: const [-1]),
+        throwsArgumentError,
+      );
+    });
   });
 
   group('parseLefunFrame', () {
@@ -66,6 +82,22 @@ void main() {
         parseLefunFrame(const [0x5A, 0x05, 0x03, 0x57, 0x00]),
         isNull,
       );
+    });
+
+    test('a declared length longer than the device ceiling is refused', () {
+      // Declares 21 bytes, one past kLefunMaxFrameLength, regardless of what
+      // the buffer itself holds.
+      expect(parseLefunFrame(const [0x5A, 21, 0x03]), isNull);
+    });
+
+    test('bytes past the declared length are tolerated, not refused', () {
+      // A valid battery reply with one undeclared trailing byte — the same
+      // shape a device in this family that pads past its own length would
+      // send (see the module doc on why this is accepted, not refused).
+      final frame =
+          parseLefunFrame(const [0x5A, 0x05, 0x03, 0x57, 0xFB, 0x00])!;
+      expect(frame.report, kLefunReportBattery);
+      expect(frame.params, [0x57]);
     });
   });
 
