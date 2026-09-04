@@ -85,6 +85,11 @@ ZeTimeFrame? parseZeTimeFrame(List<int> value) {
 }
 
 /// Battery level, 0-100, from a battery-command reply. Null when [f] is not a
-/// battery reply or carries no level byte.
-int? zetimeBatteryLevel(ZeTimeFrame f) =>
-    f.cmd == kZeTimeCmdBattery && f.payload.isNotEmpty ? f.payload[0] : null;
+/// battery reply, carries no level byte, or the byte is outside 0-100 — a
+/// single-byte percentage cannot legitimately read above 100, and a value
+/// that does is a misidentified reply, not a real reading.
+int? zetimeBatteryLevel(ZeTimeFrame f) {
+  if (f.cmd != kZeTimeCmdBattery || f.payload.isEmpty) return null;
+  final level = f.payload[0];
+  return level <= 100 ? level : null;
+}

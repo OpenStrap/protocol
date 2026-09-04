@@ -21,6 +21,11 @@ void main() {
     expect(zetimeBatteryLevel(f), 63);
   });
 
+  test('refuses a level byte above 100 — not a real percentage', () {
+    final f = parseZeTimeFrame([0x6f, 0x08, 0x01, 0x01, 0x00, 200, 0x8f])!;
+    expect(zetimeBatteryLevel(f), isNull);
+  });
+
   test('a non-battery frame has no battery level', () {
     final f = parseZeTimeFrame([0x6f, 0x02, 0x01, 0x01, 0x00, 9, 0x8f])!;
     expect(zetimeBatteryLevel(f), isNull);
