@@ -46,6 +46,14 @@ void main() {
           isFalse);
     });
 
+    test('isDafitAckFrame rejects an 8-byte 0xDC packet with the wrong fixed '
+        'bytes', () {
+      // Right header and length, but the trailing fixed byte is not the 0x01
+      // this shape always carries.
+      expect(isDafitAckFrame([0xdc, 0x00, 0x05, 0x1a, 0x01, 0x00, 0x0c, 0x00]),
+          isFalse);
+    });
+
     test('buildDafitFrame round-trips through parseDafitFrame', () {
       final built = buildDafitFrame(0x12, 0x0a, const [0x02]);
       expect(built, [0xcd, 0x00, 0x06, 0x12, 0x01, 0x0a, 0x00, 0x01, 0x02]);

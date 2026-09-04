@@ -132,8 +132,18 @@ Uint8List buildDafitAck(DafitFrame acked) {
 /// this family also uses band-to-app, interspersed with data frames during
 /// the same exchange. Not decoded further: nothing downstream needs more
 /// than "this notification was an ack, not data".
+///
+/// Checks every fixed byte the shape actually has ([1], [2], [4] and [7] are
+/// all constant — see [buildDafitAck]), not just the header: an 8-byte
+/// notification that happens to start with 0xDC but disagrees with the rest
+/// of the shape is not an ack, it is something this file does not recognise.
 bool isDafitAckFrame(List<int> value) =>
-    value.length == 8 && value[0] == kDafitAckHeader;
+    value.length == 8 &&
+    value[0] == kDafitAckHeader &&
+    value[1] == 0x00 &&
+    value[2] == 0x05 &&
+    value[4] == 0x01 &&
+    value[7] == 0x01;
 
 /// Pack a local date/time into this family's bit-packed SET_DATE_TIME field:
 /// seconds, then (year-2000), month, day, hour, minute each shifted into
