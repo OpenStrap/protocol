@@ -70,6 +70,22 @@ void main() {
       expect(parseO2RingInfo(json.codeUnits)!.files, isEmpty);
     });
 
+    test('a numeric battery is accepted, not just a percent string', () {
+      const json = '{"CurBAT":75,"FileList":"","Model":"O2Ring","SN":"X"}';
+      expect(parseO2RingInfo(json.codeUnits)!.batteryPct, 75);
+    });
+
+    test('a non-string Model or SN falls back to null, never throws', () {
+      const json = '{"CurBAT":"75%","FileList":"","Model":123,"SN":false}';
+      final info = parseO2RingInfo(json.codeUnits);
+      expect(info, isNotNull);
+      expect(info!.model, isNull);
+      expect(info.serial, isNull);
+      // The rest of the object still decodes — one bad field does not sink
+      // the whole reply.
+      expect(info.batteryPct, 75);
+    });
+
     test('refuses non-JSON rather than guessing at fields', () {
       expect(parseO2RingInfo([0xAA, 0x14, 0x00]), isNull);
     });

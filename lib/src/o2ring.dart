@@ -130,7 +130,14 @@ O2RingInfo? parseO2RingInfo(List<int> data) {
   }
   if (obj is! Map) return null;
   final bat = obj['CurBAT'];
-  final pct = bat is String ? int.tryParse(bat.replaceAll('%', '')) : null;
+  // A percent string is the documented shape; a bare number is accepted too
+  // rather than refused, since nothing here depends on which one a given
+  // firmware sends.
+  final pct = switch (bat) {
+    num n => n.toInt(),
+    String s => int.tryParse(s.replaceAll('%', '').trim()),
+    _ => null,
+  };
   final rawFiles = obj['FileList'];
   final files = rawFiles is String && rawFiles.isNotEmpty
       ? [
@@ -138,10 +145,16 @@ O2RingInfo? parseO2RingInfo(List<int> data) {
             if (f.trim().isNotEmpty) f.trim(),
         ]
       : const <String>[];
+  // GUARDED, NOT CAST. An open JSON value that turns out not to be a string
+  // must fall back to null like every other field here, never throw a
+  // TypeError past this function's own null-on-anything-unusable contract —
+  // the caller runs this from inside a BLE notification callback.
+  final model = obj['Model'];
+  final serial = obj['SN'];
   return O2RingInfo(
     batteryPct: pct,
-    model: obj['Model'] as String?,
-    serial: obj['SN'] as String?,
+    model: model is String ? model : null,
+    serial: serial is String ? serial : null,
     files: files,
   );
 }
