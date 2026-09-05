@@ -41,14 +41,24 @@ const int kUltrahumanResultFail = 0xff;
 /// notification's payload is an array of.
 const int kUltrahumanRecordLen = 32;
 
-List<int> _u16le(int v) => <int>[v & 0xff, (v >> 8) & 0xff];
+List<int> _u16le(int v) {
+  if (v < 0 || v > 0xffff) {
+    throw RangeError.value(v, 'v', 'must fit in an unsigned 16-bit field');
+  }
+  return <int>[v & 0xff, (v >> 8) & 0xff];
+}
 
-List<int> _u32le(int v) => <int>[
-      v & 0xff,
-      (v >> 8) & 0xff,
-      (v >> 16) & 0xff,
-      (v >> 24) & 0xff,
-    ];
+List<int> _u32le(int v) {
+  if (v < 0 || v > 0xffffffff) {
+    throw RangeError.value(v, 'v', 'must fit in an unsigned 32-bit field');
+  }
+  return <int>[
+    v & 0xff,
+    (v >> 8) & 0xff,
+    (v >> 16) & 0xff,
+    (v >> 24) & 0xff,
+  ];
+}
 
 /// Set the ring's real-time clock to [unixSeconds].
 List<int> ultrahumanCmdSetTime(int unixSeconds) =>
@@ -91,15 +101,31 @@ class UltrahumanResponse {
 }
 
 /// Parse one response notification. Null when it is too short to be one —
-/// `opcode + result + count + trailer` is 5 bytes, the floor with zero payload.
+/// `opcode + result + count + trailer` is 5 bytes, the floor with zero payload
+/// — or when a successful `0x04` reply's `count` byte claims a different
+/// number of records than its payload actually holds (e.g. count=1 against a
+/// 2-byte payload): a caller reading `count` records out of a payload that
+/// doesn't hold that many is exactly the "confidently wrong" failure this
+/// file exists to avoid, so the malformed frame is rejected outright rather
+/// than silently handed back short. Only checked on `kUltrahumanResultOk` —
+/// a fail/empty result's `count` byte is not documented to carry this
+/// meaning, and still needs to reach the caller so it can abort properly.
 UltrahumanResponse? parseUltrahumanResponse(List<int> value) {
   if (value.length < 5) return null;
   final payloadLen = value.length - 5;
   final bytes = Uint8List.fromList(value);
+  final opcode = bytes[0];
+  final result = bytes[1];
+  final count = bytes[2];
+  if (opcode == kUltrahumanOpGetRecordings &&
+      result == kUltrahumanResultOk &&
+      payloadLen != count * kUltrahumanRecordLen) {
+    return null;
+  }
   return UltrahumanResponse(
-    bytes[0],
-    bytes[1],
-    bytes[2],
+    opcode,
+    result,
+    count,
     Uint8List.sublistView(bytes, 3, 3 + payloadLen),
     Uint8List.sublistView(bytes, 3 + payloadLen),
   );

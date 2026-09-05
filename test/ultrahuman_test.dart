@@ -70,6 +70,13 @@ void main() {
     test('get recordings is a u16-LE start index', () {
       expect(ultrahumanCmdGetRecordings(300), [0x04, ..._u16le(300)]);
     });
+
+    test('out-of-range values are rejected, not silently truncated', () {
+      expect(() => ultrahumanCmdGetRecordings(-1), throwsRangeError);
+      expect(() => ultrahumanCmdGetRecordings(0x10000), throwsRangeError);
+      expect(() => ultrahumanCmdSetTime(-1), throwsRangeError);
+      expect(() => ultrahumanCmdSetTime(0x100000000), throwsRangeError);
+    });
   });
 
   group('response framing', () {
@@ -101,6 +108,20 @@ void main() {
         () {
       expect(parseUltrahumanResponse([0x04, 0x00, 0, 0]), isNull);
       expect(parseUltrahumanResponse(const []), isNull);
+    });
+
+    test(
+        'an ok 0x04 reply whose count does not match its payload is refused, '
+        'not silently truncated', () {
+      // count=1 claims one 32-byte record; payload is 2 bytes.
+      final value = <int>[0x04, 0x00, 1, 0x11, 0x22, 0xaa, 0xbb];
+      expect(parseUltrahumanResponse(value), isNull);
+    });
+
+    test('a fail/empty result is still framed even if count looks off', () {
+      // Result byte governs these, not count/payload agreement.
+      expect(parseUltrahumanResponse([0x04, 0xff, 9, 0xaa, 0xbb]), isNotNull);
+      expect(parseUltrahumanResponse([0x04, 0xee, 9, 0xaa, 0xbb]), isNotNull);
     });
   });
 
