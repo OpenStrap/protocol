@@ -77,10 +77,8 @@ void main() {
       expect(parseRing11mCapabilitiesRaw(f), [0x01, 0x02]);
     });
 
-    test('model query builds an empty-payload group 0x02 frame', () {
-      final f = parseRing11mFrame(ring11mCmdModelQuery())!;
-      expect((f.group, f.command), (kRing11mGroupDeviceInfo, kRing11mCmdModelQuery));
-      expect(f.payload, isEmpty);
+    test('model query reproduces the verified example frame byte-for-byte', () {
+      expect(ring11mCmdModelQuery(), _hex('020308004750ef20'));
     });
   });
 
@@ -101,6 +99,11 @@ void main() {
           ring11mCmdAutoToggle(kRing11mCmdAutoSpo2Toggle, false, intervalMinutes: 45))!;
       expect(high.payload, [0x00, 60]);
     });
+
+    test('the automatic-toggle command selector is checked, not passed through', () {
+      expect(() => ring11mCmdAutoToggle(kRing11mCmdSetTime, true),
+          throwsArgumentError);
+    });
   });
 
   group('app control', () {
@@ -108,6 +111,10 @@ void main() {
       final f = parseRing11mFrame(
           ring11mCmdManualMeasurement(true, kRing11mMeasureSpo2))!;
       expect(f.payload, [0x01, kRing11mMeasureSpo2]);
+    });
+
+    test('an unrecognised manual-measurement kind is refused, not sent', () {
+      expect(() => ring11mCmdManualMeasurement(true, 0x7f), throwsArgumentError);
     });
 
     test('find-device and live-totals both carry an empty payload', () {
@@ -144,6 +151,33 @@ void main() {
     test('ack is exactly 05 80 00, nack is exactly 05 80 04', () {
       expect(buildRing11mHistoryAck(true), [0x05, 0x80, 0x00]);
       expect(buildRing11mHistoryAck(false), [0x05, 0x80, 0x04]);
+    });
+
+    test('ring11mHistoryBlockCrcOk is the paired check for a parsed terminator',
+        () {
+      const data = [1, 2, 3, 4, 5, 6, 7, 8];
+      final crc = ring11mHistoryCrc(data);
+      final good = parseRing11mHistoryTerminator(Ring11mFrame(
+          kRing11mGroupHealthHistory,
+          kRing11mCmdHistoryTerminator,
+          Uint8List.fromList([0x01, 0x00, crc & 0xff, (crc >> 8) & 0xff])))!;
+      expect(ring11mHistoryBlockCrcOk(data, good), isTrue);
+      final bad = parseRing11mHistoryTerminator(Ring11mFrame(
+          kRing11mGroupHealthHistory,
+          kRing11mCmdHistoryTerminator,
+          Uint8List.fromList([0x01, 0x00, 0xde, 0xad])))!;
+      expect(ring11mHistoryBlockCrcOk(data, bad), isFalse);
+    });
+  });
+
+  group('framing limits', () {
+    test('a payload past the u16 length field is refused, not truncated', () {
+      expect(
+          () => buildRing11mFrame(0x05, 0x01, List.filled(kRing11mMaxPayloadLen + 1, 0)),
+          throwsArgumentError);
+      // The ceiling itself still builds.
+      expect(buildRing11mFrame(0x05, 0x01, List.filled(kRing11mMaxPayloadLen, 0)).length,
+          0xffff);
     });
   });
 }

@@ -19,7 +19,7 @@
 // bytes before it — verified by direct computation against that frame, not
 // assumed from a name. `_crc16CcittFalse` below is pinned to it.
 //
-// NOT INDEPENTENTLY VERIFIED, and left undone rather than guessed: which
+// NOT INDEPENDENTLY VERIFIED, and left undone rather than guessed: which
 // wire command actually starts a history transfer for a given data type (no
 // concrete command byte for any history "query key" was available to check
 // against a real frame), and every history record's internal field layout
@@ -120,8 +120,16 @@ Ring11mFrame? parseRing11mFrame(List<int> value) {
   );
 }
 
+/// The most a payload may be: `totalLen` is a u16 LE field counting the whole
+/// frame, header and CRC included, so anything past this overflows it.
+const int kRing11mMaxPayloadLen = 0xffff - 6;
+
 /// Build one outbound frame, header, payload and CRC all included.
 Uint8List buildRing11mFrame(int group, int command, [List<int> payload = const <int>[]]) {
+  if (payload.length > kRing11mMaxPayloadLen) {
+    throw ArgumentError.value(payload.length, 'payload.length',
+        'would overflow the frame\'s own u16 length field');
+  }
   final totalLen = 6 + payload.length;
   final out = Uint8List(totalLen);
   out[0] = group & 0xff;
@@ -136,8 +144,11 @@ Uint8List buildRing11mFrame(int group, int command, [List<int> payload = const <
 }
 
 // ── device info ─────────────────────────────────────────────────────────
+/// The verified example frame's own payload, `47 50` — see the header note.
+/// Not decoded as anything meaningful on its own (no ASCII reading of two
+/// bytes is offered here), just reproduced exactly rather than guessed empty.
 Uint8List ring11mCmdModelQuery() =>
-    buildRing11mFrame(kRing11mGroupDeviceInfo, kRing11mCmdModelQuery);
+    buildRing11mFrame(kRing11mGroupDeviceInfo, kRing11mCmdModelQuery, const [0x47, 0x50]);
 
 /// The ASCII model string (e.g. `"R11M"`), or null when [f] is not this
 /// reply or is not printable ASCII.
@@ -214,6 +225,10 @@ Uint8List ring11mCmdSetTime(DateTime local) {
 /// documented pattern — rather than an unrelated guess. Treat this one as
 /// unverified until checked against a real device.
 Uint8List ring11mCmdAutoToggle(int command, bool enable, {int intervalMinutes = 30}) {
+  if (command != kRing11mCmdAutoHrToggle && command != kRing11mCmdAutoSpo2Toggle) {
+    throw ArgumentError.value(command, 'command',
+        'must be kRing11mCmdAutoHrToggle or kRing11mCmdAutoSpo2Toggle');
+  }
   final snapped = intervalMinutes >= 45 ? 60 : 30;
   return buildRing11mFrame(
     kRing11mGroupSetting,
@@ -226,11 +241,19 @@ Uint8List ring11mCmdAutoToggle(int command, bool enable, {int intervalMinutes = 
 Uint8List ring11mCmdFindDevice() =>
     buildRing11mFrame(kRing11mGroupAppControl, kRing11mCmdFindDevice);
 
-Uint8List ring11mCmdManualMeasurement(bool start, int kind) => buildRing11mFrame(
-      kRing11mGroupAppControl,
-      kRing11mCmdManualMeasurement,
-      <int>[start ? 0x01 : 0x00, kind],
-    );
+Uint8List ring11mCmdManualMeasurement(bool start, int kind) {
+  if (kind != kRing11mMeasureHr &&
+      kind != kRing11mMeasureBp &&
+      kind != kRing11mMeasureSpo2) {
+    throw ArgumentError.value(kind, 'kind',
+        'must be kRing11mMeasureHr, kRing11mMeasureBp or kRing11mMeasureSpo2');
+  }
+  return buildRing11mFrame(
+    kRing11mGroupAppControl,
+    kRing11mCmdManualMeasurement,
+    <int>[start ? 0x01 : 0x00, kind],
+  );
+}
 
 Uint8List ring11mCmdLiveActivityTotals() =>
     buildRing11mFrame(kRing11mGroupAppControl, kRing11mCmdLiveActivityTotals);
@@ -248,6 +271,11 @@ class Ring11mHistoryTerminator {
 }
 
 /// The terminator carried by [f], or null when [f] is not one.
+///
+/// STRUCTURE ONLY — this does not and cannot check the CRC itself: that
+/// requires the block's own accumulated data bytes, which live with whatever
+/// is collecting them, not with one frame. [ring11mHistoryBlockCrcOk] is the
+/// paired check every caller should run before treating a block as good.
 Ring11mHistoryTerminator? parseRing11mHistoryTerminator(Ring11mFrame f) {
   if (f.group != kRing11mGroupHealthHistory ||
       f.command != kRing11mCmdHistoryTerminator ||
@@ -266,6 +294,13 @@ Ring11mHistoryTerminator? parseRing11mHistoryTerminator(Ring11mFrame f) {
 /// [Ring11mHistoryTerminator.crc16] without a second implementation of the
 /// algorithm.
 int ring11mHistoryCrc(List<int> blockData) => _crc16CcittFalse(blockData);
+
+/// Whether [blockData] matches the CRC [term] declares — the check every
+/// caller must run before treating a completed block as good. A parsed
+/// [Ring11mHistoryTerminator] on its own asserts nothing about correctness;
+/// this is what does.
+bool ring11mHistoryBlockCrcOk(List<int> blockData, Ring11mHistoryTerminator term) =>
+    ring11mHistoryCrc(blockData) == term.crc16;
 
 /// The host's ack/nack of one history block — NOT run through
 /// [buildRing11mFrame]: the source material gives these as a fixed 3-byte
