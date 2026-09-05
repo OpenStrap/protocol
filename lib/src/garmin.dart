@@ -116,20 +116,17 @@ class GarminMlrControlOther extends GarminMlrPacket {
   const GarminMlrControlOther(this.type);
 }
 
-/// Route one raw notification. Null only for input too short to be anything
-/// at all — everything else lands in one of the [GarminMlrPacket] arms above.
+/// Route one raw notification. Null for input too short, or structurally not
+/// one of the two shapes this protocol documents (a flagged watch-to-host
+/// data frame, or a control frame with byte 0 clear) — everything else lands
+/// in one of the [GarminMlrPacket] arms above.
 GarminMlrPacket? garminDecodeMlr(List<int> data) {
   if (data.isEmpty) return null;
   if ((data[0] & _kMlrFlag) != 0) {
     final handle = (data[0] & _kMlrHandleMask) >> _kMlrHandleShift;
     return GarminMlrData(handle, Uint8List.fromList(data));
   }
-  // Byte 0 clear and non-zero is the watch addressing a handle above the
-  // 3-bit flagged range with a bare byte — still a data frame.
-  if (data[0] != 0) {
-    if (data.length < 2) return null;
-    return GarminMlrData(data[0], Uint8List.fromList(data));
-  }
+  if (data[0] != 0) return null;
   if (data.length < 2) return null;
   final type = data[1];
   if (type == _kRespCloseAll) return const GarminCloseAllAck();

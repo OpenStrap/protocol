@@ -116,6 +116,11 @@ void main() {
       expect((decoded as GarminMlrData).handle, 2);
     });
 
+    test('a non-flagged, non-zero first byte is rejected, not a data frame',
+        () {
+      expect(garminDecodeMlr(const [0x03, 0x01, 0x02]), isNull);
+    });
+
     test('CLOSE_ALL_RESP decodes to the close-all ack', () {
       expect(garminDecodeMlr(const [0x00, 0x06]), isA<GarminCloseAllAck>());
     });
