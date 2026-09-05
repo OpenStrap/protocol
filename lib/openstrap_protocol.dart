@@ -19,6 +19,7 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 export 'src/oura.dart';
 export 'src/hrs.dart';
 export 'src/polar_pmd.dart';
+export 'src/lefun.dart';
 
 // Source 1 — record decoders.
 export 'src/records.dart'
