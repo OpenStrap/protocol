@@ -91,6 +91,15 @@ void main() {
       expect(parsePolarPmdPpiFrame(frame), isNull);
     });
 
+    test('a non-zero frame type is refused — PPI defines only frame type 0',
+        () {
+      final frame = ppiFrame([
+        [60, 0xE8, 0x03, 0x0A, 0x00, 0x00],
+      ]);
+      frame[9] = 0x01;
+      expect(parsePolarPmdPpiFrame(frame), isNull);
+    });
+
     test('a body that is not a whole number of 6-byte records is refused',
         () {
       final frame = ppiFrame([

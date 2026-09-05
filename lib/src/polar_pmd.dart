@@ -104,19 +104,19 @@ class PolarPpiSample {
 ///
 /// Layout: byte 0 measurement type (low 6 bits); bytes 1-8 a u64 LE PMD
 /// timestamp (unused here — PPI carries no clock this decoder needs, see
-/// [PolarPpiSample]'s field list); byte 9 frame type (bit 7 = compressed);
-/// bytes 10+ one or more fixed 6-byte PPI records:
+/// [PolarPpiSample]'s field list); byte 9 frame type; bytes 10+ one or more
+/// fixed 6-byte PPI records:
 /// `[hr][ppiMs u16 LE][errorEstimateMs u16 LE][flags]`.
 ///
 /// Returns null when the frame is too short, is not measurement type PPI, is
-/// flagged compressed (PPI is never compressed — a compressed bit here means
-/// this is not the shape this decoder expects), or its body is not a whole
-/// number of 6-byte records. A malformed frame is dropped, never patched up
-/// into a plausible-looking beat.
+/// not frame type 0 (PPI defines only frame type 0 — any other value,
+/// compressed included, is not the shape this decoder expects), or its body
+/// is not a whole number of 6-byte records. A malformed frame is dropped,
+/// never patched up into a plausible-looking beat.
 List<PolarPpiSample>? parsePolarPmdPpiFrame(List<int> value) {
   if (value.length < 10) return null;
   if ((value[0] & 0x3F) != kPolarPmdMeasTypePpi) return null;
-  if ((value[9] & 0x80) != 0) return null;
+  if (value[9] != 0) return null;
   final bodyLen = value.length - 10;
   if (bodyLen == 0 || bodyLen % 6 != 0) return null;
   final out = <PolarPpiSample>[];
