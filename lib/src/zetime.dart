@@ -32,8 +32,8 @@ const int kZeTimeCmdBattery = 0x08;
 
 /// One decoded frame off the wire:
 /// `[0x6f][cmd][action][lenLo][lenHi]…payload…[0x8f]`, where the declared
-/// length counts the payload plus the trailing `[0x8f]` (i.e. `payload.length
-/// + 1`).
+/// length counts the payload bytes only — it equals `payload.length` exactly
+/// and does not count the trailing `[0x8f]`.
 class ZeTimeFrame {
   final int cmd;
   final int action;
