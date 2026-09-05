@@ -18,6 +18,7 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 // sharing one barrel must not share a bare verb.
 export 'src/oura.dart';
 export 'src/hrs.dart';
+export 'src/ring11m.dart';
 
 // Source 1 — record decoders.
 export 'src/records.dart'
