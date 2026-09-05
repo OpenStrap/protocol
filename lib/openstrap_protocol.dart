@@ -19,6 +19,13 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 export 'src/oura.dart';
 export 'src/hrs.dart';
 export 'src/ultrahuman.dart';
+export 'src/wearfit.dart';
+export 'src/o2ring.dart';
+export 'src/ringconn.dart';
+export 'src/zetime.dart';
+export 'src/dafit.dart';
+export 'src/polar_pmd.dart';
+export 'src/lefun.dart';
 
 // Source 1 — record decoders.
 export 'src/records.dart'
