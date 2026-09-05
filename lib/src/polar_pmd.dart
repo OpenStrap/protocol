@@ -78,8 +78,11 @@ class PolarPpiSample {
   /// The sensor's own error estimate for [ppiMs], in milliseconds.
   final int errorEstimateMs;
 
-  /// Flags byte, bit 0: this reading should be dropped from an HRV
-  /// computation (a "blocker" sample).
+  /// Flags byte, bit 0. Documented as marking a reading that should be
+  /// dropped from an HRV computation (a "blocker" sample), but — like
+  /// [skinContactBits] below — this comes from the same never-tested flags
+  /// byte, so which bit is blocker is NOT independently confirmed against
+  /// hardware.
   final bool blocker;
 
   /// Flags byte, bits 1-2, verbatim. These are documented as carrying
