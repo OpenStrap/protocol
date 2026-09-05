@@ -13,6 +13,21 @@ void main() {
       );
     });
 
+    test('the actual INFO call site builds the documented opcode byte-exact',
+        () {
+      // AA 14 EB 00 00 00 00 C6 — cmd 0x14 (independently documented
+      // elsewhere as this ring family's INFO opcode, see o2ring.dart's
+      // header) run through the envelope math the 0x17 vector above
+      // proves. Exercises o2ringCmdInfo() itself, the only call site this
+      // module actually uses, so a typo or later edit to kO2RingCmdInfo
+      // fails here instead of passing silently through an opcode-agnostic
+      // round-trip.
+      expect(
+        o2ringCmdInfo(),
+        equals(<int>[0xAA, 0x14, 0xEB, 0x00, 0x00, 0x00, 0x00, 0xC6]),
+      );
+    });
+
     test('round-trips a command with a payload through parse', () {
       final built = buildO2RingCommand(0x14, block: 7, data: [1, 2, 3]);
       final f = parseO2RingFrame(built);

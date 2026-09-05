@@ -12,7 +12,17 @@
 // The no-payload request this file builds for opcode 0x17 comes out
 // byte-for-byte `AA 17 E8 00 00 00 00 1B`, which is an independently
 // published, hardware-captured request for this exact ring family — the one
-// external fact this module is checked against.
+// external fact the envelope math itself is checked against.
+//
+// THE ONE OPCODE THIS FILE ACTUALLY USES IS ALSO INDEPENDENTLY DOCUMENTED,
+// SEPARATELY FROM THE ENVELOPE MATH. 0x14 is named INFO (empty request,
+// JSON reply) in independently published protocol notes for this ring
+// family, matching this file's own doc comment and its `O2RingInfo` field
+// names below. That is a second, distinct external fact — the opcode value
+// itself — layered on top of the byte-order proof above, not a substitute
+// for it: nobody on this project has confirmed a real ring answers `AA 14
+// EB 00 00 00 00 C6` (the deterministic frame the proven envelope produces
+// for that opcode with no payload).
 //
 // WHAT IS DELIBERATELY NOT HERE. Every documented account of this ring's file
 // commands (open/read/close a stored recording) disagrees with the envelope
@@ -93,6 +103,10 @@ List<int> buildO2RingCommand(int cmd, {int block = 0, List<int> data = const []}
 }
 
 /// Device info / battery / stored-file list. No payload.
+///
+/// 0x14 is independently documented elsewhere as this ring family's INFO
+/// opcode — see this file's header for what that external fact does and
+/// does not cover.
 const int kO2RingCmdInfo = 0x14;
 
 /// `buildO2RingCommand(kO2RingCmdInfo)`, named for the one call site.
