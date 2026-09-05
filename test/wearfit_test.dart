@@ -68,6 +68,17 @@ void main() {
       // AB 00 04 FF 91 80 01
       expect(wearFitCmdGetBattery(), [0xab, 0x00, 0x04, 0xff, 0x91, 0x80, 0x01]);
     });
+
+    test('buildWearFitFrame accepts the largest payload the length byte can hold', () {
+      final built = buildWearFitFrame(0x20, List<int>.filled(253, 0x01));
+      expect(built[2], 0xff);
+      expect(built.length, 258);
+    });
+
+    test('buildWearFitFrame rejects a payload the length byte cannot hold', () {
+      expect(() => buildWearFitFrame(0x20, List<int>.filled(254, 0x01)),
+          throwsArgumentError);
+    });
   });
 
   group('WearFit battery', () {

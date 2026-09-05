@@ -60,7 +60,14 @@ WearFitFrame? parseWearFitFrame(List<int> value) {
 }
 
 /// Build one outbound frame.
+///
+/// [payload] must leave room for the length byte at [2] (`2 + payload.length`
+/// fits in one byte): 253 bytes or fewer.
 Uint8List buildWearFitFrame(int opcode, [List<int> payload = const <int>[]]) {
+  if (payload.length > 253) {
+    throw ArgumentError.value(payload.length, 'payload.length',
+        'must be 253 or fewer — the frame length byte cannot hold more');
+  }
   final len = 2 + payload.length;
   final out = Uint8List(5 + payload.length);
   out[0] = kWearFitHeader;
