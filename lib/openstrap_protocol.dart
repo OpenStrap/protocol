@@ -18,6 +18,7 @@ export 'src/band.dart' show DeviceType, GattProfile, BandProfile;
 // sharing one barrel must not share a bare verb.
 export 'src/oura.dart';
 export 'src/hrs.dart';
+export 'src/ringconn.dart';
 export 'src/zetime.dart';
 export 'src/dafit.dart';
 export 'src/polar_pmd.dart';
