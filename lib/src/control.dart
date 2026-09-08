@@ -159,8 +159,7 @@ class R10Lite {
   /// them from. Reports what was ACCEPTED, never what the byte declared.
   final List<int> rrIntervalsMs;
 
-  R10Lite(this.tsEpoch, this.hr, this.counter,
-      {this.rrIntervalsMs = const []});
+  R10Lite(this.tsEpoch, this.hr, this.counter, {this.rrIntervalsMs = const []});
 }
 
 R10Lite? parseR10Lite(Uint8List inner) {
@@ -383,6 +382,16 @@ class Gen5HelloInfo {
   /// The optical discriminator selects the WHOOP 5.0 family in the interval
   /// `48 <= value < 86`.
   bool get isWhoop5 => opticalDiscriminator >= 48 && opticalDiscriminator < 86;
+
+  /// WHOOP MG — app generation `MAVERICK` in the official revision-1 HELLO
+  /// parser: optical discriminator in `[0, 38)`. The physical MG reports 0.
+  ///
+  /// Gated on [helloRevision] == 1, unlike [isWhoop5]: MG is the gate for the
+  /// Labrador/ECG lifecycle, and a HELLO of an unknown revision must never be
+  /// read through revision-1 offsets to grant that. The service UUID, the
+  /// advertised name and command acceptance are NOT MG evidence — the
+  /// ordinary WHOOP 5.0 shares all three and maps to `GOOSE` (optical 82).
+  bool get isMaverick => helloRevision == 1 && opticalDiscriminator < 38;
 
   /// [tsSeconds] gated to the plausible unix range, null otherwise.
   ///
@@ -618,8 +627,7 @@ EventInfo? parseEvent(
 }) {
   if (inner.length < 4 || inner[0] != PacketType.event) return null;
   final eid = u16(inner, 2);
-  final gen5ScopedOut =
-      _kGen5ScopedEventIds.contains(eid) && !profile.isGen5;
+  final gen5ScopedOut = _kGen5ScopedEventIds.contains(eid) && !profile.isGen5;
   final name = gen5ScopedOut ? 'EVENT_$eid' : EventId.name(eid);
   // Timestamp: whole seconds u32 @ [4], sub-seconds u16 @ [8]; the event body
   // begins at [12]. All guarded by length so short frames degrade cleanly.
@@ -956,7 +964,9 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     if (revOk && payload.length >= 63) {
       final oldest = u32(payload, 35);
       final newest = u32(payload, 59);
-      if (_plausibleUnix(oldest) && _plausibleUnix(newest) && oldest <= newest) {
+      if (_plausibleUnix(oldest) &&
+          _plausibleUnix(newest) &&
+          oldest <= newest) {
         dec['range_oldest'] = oldest;
         dec['range_newest'] = newest;
       }
@@ -1404,7 +1414,8 @@ Decoded _decodeDataRecord(Uint8List inner,
     // u32 timestamp, so it invents a plausible-looking bpm out of a clock.
     // edge routes historical frames elsewhere and never reaches this, but the
     // decoder must not fabricate for whoever does.
-    return Decoded('data_record', {'rec_type': inner.length > 1 ? inner[1] : -1});
+    return Decoded(
+        'data_record', {'rec_type': inner.length > 1 ? inner[1] : -1});
   }
   final recType = inner.length > 1 ? inner[1] : -1;
   // Live R10 (HR + IMU) — surface HR for the live display. Checked before the

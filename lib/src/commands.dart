@@ -101,10 +101,15 @@ Uint8List cmdGetHello(int seq) =>
     buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
 Uint8List cmdGetHelloModern(int seq) =>
     buildCommand(seq, Cmd.getHello, const [0x01]);
-Uint8List cmdAbortHistorical(int seq) =>
-    buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00]);
+
+/// ABORT_HISTORICAL_TRANSMITS (0x14 = 20), no semantic body. [profile]
+/// selects the envelope (gen5 pads the bodyless inner to `[35][seq][20][00]`).
+Uint8List cmdAbortHistorical(int seq,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00], profile);
 Uint8List cmdSendHistorical(int seq) =>
     buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
+
 /// Read the strap RTC (GET_CLOCK = 0x0B = 11) with an EMPTY body.
 ///
 /// Shared across generations — hardware-verified on WHOOP 5: opcode 11 with
@@ -195,8 +200,8 @@ Uint8List cmdEnterHighFreqSync(int seq,
   // the permissive u16 range rather than inheriting a limit we cannot check.
   if (profile.isGen5) {
     if (intervalSeconds <= 60) {
-      throw ArgumentError.value(intervalSeconds, 'intervalSeconds',
-          'gen5 requires > 60 seconds');
+      throw ArgumentError.value(
+          intervalSeconds, 'intervalSeconds', 'gen5 requires > 60 seconds');
     }
     if (durationSeconds >= 28800) {
       throw ArgumentError.value(
@@ -405,9 +410,8 @@ Uint8List cmdSetAlarmSimple(int seq, DateTime when,
 /// whether this rev-1 body means anything to a gen5 is untested.
 Uint8List cmdSetAlarmRev1(int seq, DateTime when,
         {int hapticMode = 0, BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(
-        seq, Cmd.setAlarmTime, alarmRev1Payload(when, hapticMode: hapticMode),
-        profile);
+    buildCommand(seq, Cmd.setAlarmTime,
+        alarmRev1Payload(when, hapticMode: hapticMode), profile);
 
 /// The bare 9-byte payload of the REV-1 alarm form (see [cmdSetAlarmRev1]).
 ///
@@ -484,6 +488,7 @@ Uint8List cmdSetAlarm(
   DateTime when, {
   int? index,
   List<int>? hapticPattern,
+
   /// gen5's trailing body byte — the **alarm type**, always `0` in practice.
   /// See the GENERATION DIFFERENCE note above for why this parameter keeps
   /// its third-party name.
@@ -1039,8 +1044,8 @@ enum LabradorOperation {
 /// not something a retry fixes.
 Uint8List cmdLabradorDataGeneration(int seq, LabradorOperation op,
         {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.toggleLabradorDataGeneration,
-        [revision1, op.value], profile);
+    buildCommand(
+        seq, Cmd.toggleLabradorDataGeneration, [revision1, op.value], profile);
 
 /// Enable/disable the filtered-reading RAW save (TOGGLE_LABRADOR_RAW_SAVE,
 /// 125) — `[0x01][0|1]`. Part of the prepare step (ON) and of the stop step

@@ -79,6 +79,9 @@ export 'src/gen5_records.dart'
         parseGen5ImuBuffer,
         parseGen5Historical,
         reconstructSaturatedDeltaWindow;
+// WHOOP MG Labrador (filtered ECG, R17) and raw ECG (R16) — see labrador.dart.
+export 'src/labrador.dart'
+    show LabradorR17, LabradorFlags, LabradorUnreadableMask, LabradorR16Raw;
 export 'src/live.dart'
     show
         DecodedSample,

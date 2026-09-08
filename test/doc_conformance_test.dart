@@ -35,8 +35,7 @@ void main() {
     expect(f.inner.sublist(3, 5), [0x00, 0x00]);
   });
 
-  test('success result = 01 + markerA + markerB, 9 bytes verbatim',
-      () {
+  test('success result = 01 + markerA + markerB, 9 bytes verbatim', () {
     final token = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
     final f = parseFrame(
         buildHistoryResultOk(1, token, profile: BandProfile.gen5),
@@ -62,7 +61,8 @@ void main() {
     expect(body.sublist(16, 18), [0, 0], reason: 'per-effect loop control');
     expect(body[18], 0x07, reason: 'overall waveform loop control');
     expect(body[19], 0x1e, reason: '30 s duration cap');
-    expect(body[20], 0x00, reason: 'alarm type 0 — the 21st byte IS on the wire');
+    expect(body[20], 0x00,
+        reason: 'alarm type 0 — the 21st byte IS on the wire');
   });
 
   test('GET_ALARM_TIME 04 01 / RUN_ALARM 02 01 / DISABLE 02 ff', () {
@@ -96,8 +96,7 @@ void main() {
     expect(sub, (250 * 32768) ~/ 1000);
   });
 
-  test('GET_CLOCK(11) empty body; GET_DATA_RANGE(34) empty on gen5',
-      () {
+  test('GET_CLOCK(11) empty body; GET_DATA_RANGE(34) empty on gen5', () {
     final c = parseFrame(cmdGetClock(1, profile: BandProfile.gen5),
         profile: BandProfile.gen5)!;
     expect(c.inner[2], 11);
@@ -109,6 +108,58 @@ void main() {
     expect(r.inner[2], 34);
     expect(r.inner.length, 4);
     expect(r.inner[3], 0, reason: 'alignment padding, not a body byte');
+  });
+
+  test('WHOOP MG Labrador lists — exact gen5 bodies and padding (docs/mg/05)',
+      () {
+    List<int> inner(Uint8List f) =>
+        parseFrame(f, profile: BandProfile.gen5)!.inner;
+    // PREPARE: 123 wrist (01 01 right / 01 02 left), 139 ON, 125 ON.
+    final right = inner(
+        cmdSelectWrist(1, WristSelection.right, profile: BandProfile.gen5));
+    expect(right[2], 123);
+    expect(right.sublist(3), [0x01, 0x01, 0x00, 0x00, 0x00],
+        reason: 'physical wire body 01 01 00 00 00');
+    final left = inner(
+        cmdSelectWrist(1, WristSelection.left, profile: BandProfile.gen5));
+    expect(left.sublist(3, 5), [0x01, 0x02]);
+    final fOn = inner(cmdLabradorFiltered(1, true, profile: BandProfile.gen5));
+    expect(fOn[2], 139);
+    expect(fOn.sublist(3), [0x01, 0x01, 0x00, 0x00, 0x00]);
+    final rOn = inner(cmdLabradorRawSave(1, true, profile: BandProfile.gen5));
+    expect(rOn[2], 125);
+    expect(rOn.sublist(3), [0x01, 0x01, 0x00, 0x00, 0x00]);
+    // START: 20 (bodyless, one aligned pad byte), 124 start 01 02.
+    final abort = inner(cmdAbortHistorical(1, profile: BandProfile.gen5));
+    expect(abort, [35, 1, 20, 0x00], reason: 'bodyless 20 → one pad byte');
+    expect(
+        inner(cmdLabradorDataGeneration(1, LabradorOperation.start,
+                profile: BandProfile.gen5))
+            .sublist(2),
+        [124, 0x01, 0x02, 0x00, 0x00, 0x00]);
+    // RESTART: 124 01 03.
+    expect(
+        inner(cmdLabradorDataGeneration(1, LabradorOperation.restart,
+                profile: BandProfile.gen5))
+            .sublist(3, 5),
+        [0x01, 0x03]);
+    // CLEANUP: 124 stop 01 01, 139 OFF 01 00, 125 OFF 01 00.
+    expect(
+        inner(cmdLabradorDataGeneration(1, LabradorOperation.stop,
+                profile: BandProfile.gen5))
+            .sublist(3, 5),
+        [0x01, 0x01]);
+    expect(
+        inner(cmdLabradorFiltered(1, false, profile: BandProfile.gen5))
+            .sublist(3),
+        [0x01, 0x00, 0x00, 0x00, 0x00]);
+    expect(
+        inner(cmdLabradorRawSave(1, false, profile: BandProfile.gen5))
+            .sublist(3),
+        [0x01, 0x00, 0x00, 0x00, 0x00]);
+    // The gen4 default of cmdAbortHistorical is byte-identical to before.
+    expect(hx(cmdAbortHistorical(1)),
+        hx(buildCommand(1, Cmd.abortHistoricalTransmits, const [0x00])));
   });
 
   test('toggles — 3 bare bool; 106/107 rev+bool; labrador ops', () {
