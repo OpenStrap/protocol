@@ -259,6 +259,16 @@ void main() {
       expect(ack.revision, 1);
       expect(ack.payload, [0x01, 0x02]);
     });
+
+    test('0x7b select wrist response is dropped when cmd_status is not ok',
+        () {
+      // Same stale-but-plausible body as above, but cmd_status = 0 (failed)
+      // — a failure reply's body is unpopulated, so these bytes must not be
+      // trusted as confirmation the wrist selection took effect.
+      final inner = hexToBytes('24037b' '0700' '0102');
+      final resp = parseCommandResponse(inner)!;
+      expect(resp.decoded.containsKey('select_wrist'), isFalse);
+    });
   });
 
   group('WHOOP realtime HR revision 2', () {

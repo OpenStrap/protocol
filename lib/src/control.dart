@@ -1001,10 +1001,17 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
   } else if (op == Cmd.selectWrist && payload.length >= 3) {
-    dec['select_wrist'] = SelectWristResponse(
-      revision: payload[2],
-      payload: Uint8List.fromList(payload.sublist(2)),
-    );
+    // Status-gated like getHello above: this is a SET-style confirmation,
+    // and a failure reply does not populate the body, so its bytes are
+    // stale. Without the check a rejected wrist-selection write (bad value,
+    // or refused mid-handshake) would still mint a `select_wrist` object
+    // that looks like confirmation the selection took effect.
+    if (status == 1) {
+      dec['select_wrist'] = SelectWristResponse(
+        revision: payload[2],
+        payload: Uint8List.fromList(payload.sublist(2)),
+      );
+    }
   } else if (op == Cmd.getBatteryPackInfo && payload.length >= 30) {
     // 28-byte body [rev][attached][id ×6][name ×16][u16][type][status], again
     // starting at payload[2]. Every field was previously read two bytes early,
