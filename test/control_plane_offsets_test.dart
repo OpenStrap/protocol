@@ -526,6 +526,28 @@ void main() {
       expect(r.add(parseConsoleLog(logPacket(10, '!'))!), isTrue);
       expect(r.flush(), 'after the gap!');
     });
+
+    test(
+        'a caller that only flushes on hasCompletedRun keeps a 4-chunk line '
+        'whole, even though every add() returns false on a fresh instance',
+        () {
+      // add() returning false on the very first chunk into a fresh instance
+      // used to be indistinguishable from a real gap. A caller that flushed
+      // on every `false` (the old documented contract) reset _lastIndex each
+      // time, so record_index 5/6/7/8 came back as four single-chunk
+      // fragments instead of one line.
+      final r = ConsoleLogReassembler();
+      for (final chunk in [
+        logPacket(5, 'BLE_'),
+        logPacket(6, 'CMD: '),
+        logPacket(7, 'Historical '),
+        logPacket(8, 'Data\n'),
+      ]) {
+        r.add(parseConsoleLog(chunk)!);
+        if (r.hasCompletedRun) r.flush();
+      }
+      expect(r.flush(), 'BLE_CMD: Historical Data\n');
+    });
   });
 
   group('HELLO battery scan starts on the body, not the status byte', () {

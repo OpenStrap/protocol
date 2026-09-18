@@ -1238,6 +1238,12 @@ ConsoleLogChunk? parseConsoleLog(Uint8List inner) {
 /// run has accumulated so far. A gap in `record_index` (a dropped/reordered
 /// frame) flushes what's buffered rather than silently splicing unrelated
 /// text together.
+///
+/// Check [hasCompletedRun] before calling [flush] — don't react to [add]'s
+/// raw boolean. `add()` returning false means "not contiguous with the last
+/// chunk", which is also true for the very first chunk into a fresh or
+/// just-flushed instance; flushing on every `false` would hand back that lone
+/// chunk instead of letting the run keep building.
 class ConsoleLogReassembler {
   final StringBuffer _buf = StringBuffer();
 
@@ -1247,9 +1253,14 @@ class ConsoleLogReassembler {
   String? _completed;
   int? _lastIndex;
 
+  /// True when a gap has parked a finished run for [flush] to return. Use
+  /// this, not [add]'s return value, to decide whether to call [flush].
+  bool get hasCompletedRun => _completed != null;
+
   /// Feed one decoded chunk. Returns true if it extended the current
-  /// contiguous run; false if it started a new one — call [flush] after a
-  /// `false` return to get the run the gap ended.
+  /// contiguous run; false if it started a new one — check
+  /// [hasCompletedRun] (not this return value) to know when a finished run
+  /// is ready for [flush].
   bool add(ConsoleLogChunk chunk) {
     final contiguous = _lastIndex != null &&
         // record_index is a u8 — allow wraparound at 0xFF, matching the
