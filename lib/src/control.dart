@@ -868,10 +868,18 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     //   body[2:6] epoch u32 LE   body[6:8] subseconds u16 LE
     // — which confirms the epoch offset used here, and adds the active flag.
     // The response carries no alarm ID; the requested ID selects it.
+    //
+    // Status-gated on gen5 ONLY, same convention as getClock/getDataRange/
+    // getBatteryPackInfo above: this opcode is sent to both profiles (see
+    // commands.dart), gen5's status byte is confirmed so a failure/deferred
+    // reply's stale body (leftover bytes from a prior successful read) isn't
+    // reported as the strap's current alarm; gen4's status byte is
+    // unconfirmed so it stays ungated, same reasoning as those siblings.
+    final statusOk = !profile.isGen5 || status == 1;
     final form = payload.length >= 3 ? payload[2] : -1;
-    if (form == 0x01 && payload.length >= 7) {
+    if (statusOk && form == 0x01 && payload.length >= 7) {
       dec['alarm_epoch'] = u32(payload, 3);
-    } else if (form == 0x04 && payload.length >= 8) {
+    } else if (statusOk && form == 0x04 && payload.length >= 8) {
       dec['alarm_epoch'] = u32(payload, 4);
       // "exactly 1 means active" — anything else is not an armed alarm, and is
       // reported as inactive rather than guessed at.
