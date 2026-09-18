@@ -1009,14 +1009,23 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // 28-byte body [rev][attached][id ×6][name ×16][u16][type][status], again
     // starting at payload[2]. Every field was previously read two bytes early,
     // so type/status were reading the two halves of the unnamed u16.
-    dec['battery_pack_info'] = BatteryPackInfoResponse(
-      revision: payload[2],
-      attached: payload[3] == 1,
-      identifier: _macAddress(payload, 4),
-      name: _batteryPackName(payload),
-      batteryPackTypeRaw: payload[28],
-      statusRaw: payload[29],
-    );
+    //
+    // Status-gated on gen5 ONLY, same convention as getClock/getDataRange
+    // above: this opcode is sent to both profiles (see commands.dart), gen5's
+    // status byte is confirmed so a failure reply's stale body is dropped,
+    // gen4's is unconfirmed so it stays ungated to avoid silently losing
+    // valid gen4 replies.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk) {
+      dec['battery_pack_info'] = BatteryPackInfoResponse(
+        revision: payload[2],
+        attached: payload[3] == 1,
+        identifier: _macAddress(payload, 4),
+        name: _batteryPackName(payload),
+        batteryPackTypeRaw: payload[28],
+        statusRaw: payload[29],
+      );
+    }
   } else if (op == Cmd.reportVersionInfo) {
     dec['version_info'] = <String, dynamic>{
       'payload_len': payload.length,

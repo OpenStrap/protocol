@@ -206,6 +206,42 @@ void main() {
       expect(pack.statusRaw, 7);
     });
 
+    test('0x97 battery pack info on gen5 decodes when cmd_status is ok', () {
+      final inner = hexToBytes(
+        '240297'
+        '0701' // echoed request seq, status = 1 (ok)
+        '0101'
+        '112233445566'
+        '50756666696e20426174746572790000'
+        '0000'
+        '0c'
+        '07',
+      );
+      final resp = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      final pack = resp.decoded['battery_pack_info'] as BatteryPackInfoResponse;
+      expect(pack.identifier, '11:22:33:44:55:66');
+    });
+
+    test(
+        '0x97 battery pack info on gen5 is dropped when cmd_status is not ok',
+        () {
+      // Same stale-but-full-length body as above, but cmd_status = 0
+      // (failed) — a gen5 reply's body is unpopulated on failure, so these
+      // bytes must not be trusted.
+      final inner = hexToBytes(
+        '240297'
+        '0700' // echoed request seq, status = 0 (failed)
+        '0101'
+        '112233445566'
+        '50756666696e20426174746572790000'
+        '0000'
+        '0c'
+        '07',
+      );
+      final resp = parseCommandResponse(inner, profile: BandProfile.gen5)!;
+      expect(resp.decoded.containsKey('battery_pack_info'), isFalse);
+    });
+
     test('0x07 version info is surfaced honestly as raw payload', () {
       final inner = hexToBytes('24010700112233445566778899aabbccddeeff0011');
       final resp = parseCommandResponse(inner)!;
