@@ -868,10 +868,18 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     //   body[2:6] epoch u32 LE   body[6:8] subseconds u16 LE
     // — which confirms the epoch offset used here, and adds the active flag.
     // The response carries no alarm ID; the requested ID selects it.
+    //
+    // Status-gated on gen5 ONLY, same convention as getClock/getDataRange/
+    // getBatteryPackInfo above: this opcode is sent to both profiles (see
+    // commands.dart), gen5's status byte is confirmed so a failure/deferred
+    // reply's stale body (leftover bytes from a prior successful read) isn't
+    // reported as the strap's current alarm; gen4's status byte is
+    // unconfirmed so it stays ungated, same reasoning as those siblings.
+    final statusOk = !profile.isGen5 || status == 1;
     final form = payload.length >= 3 ? payload[2] : -1;
-    if (form == 0x01 && payload.length >= 7) {
+    if (statusOk && form == 0x01 && payload.length >= 7) {
       dec['alarm_epoch'] = u32(payload, 3);
-    } else if (form == 0x04 && payload.length >= 8) {
+    } else if (statusOk && form == 0x04 && payload.length >= 8) {
       dec['alarm_epoch'] = u32(payload, 4);
       // "exactly 1 means active" — anything else is not an armed alarm, and is
       // reported as inactive rather than guessed at.
@@ -907,7 +915,14 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (= payload[5]), exactly where _decodeAdvName already reads them.
     // Without this branch the gen5 bootstrap's final pre-READY read was sent
     // but its reply never decoded.
-    dec['strap_name'] = _decodeAdvName(payload);
+    //
+    // STATUS-GATED, like the battery and clock reads above: a non-success
+    // reply does not populate the body, so its bytes are whatever the buffer
+    // held last — _decodeAdvName's printable-run fallback can turn that stale
+    // data into a plausible-looking name.
+    if (status == 1) {
+      dec['strap_name'] = _decodeAdvName(payload);
+    }
   } else if (op == Cmd.getClock || op == Cmd.getClockGen5) {
     // Reply bodies (the body starts at payload[2]):
     //   gen4 0x0B: 8 B  [u32 sec][u32 subsec]         → seconds @ payload[2]
@@ -1001,10 +1016,17 @@ CmdResponse? parseCommandResponse(Uint8List inner,
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
   } else if (op == Cmd.selectWrist && payload.length >= 3) {
-    dec['select_wrist'] = SelectWristResponse(
-      revision: payload[2],
-      payload: Uint8List.fromList(payload.sublist(2)),
-    );
+    // Status-gated like getHello above: this is a SET-style confirmation, and
+    // a failure reply does not populate the body, so its bytes are stale.
+    // Without the check a rejected wrist-selection write (bad value, or
+    // refused mid-handshake) would still mint a `select_wrist` object that
+    // looks like confirmation the selection took effect.
+    if (status == 1) {
+      dec['select_wrist'] = SelectWristResponse(
+        revision: payload[2],
+        payload: Uint8List.fromList(payload.sublist(2)),
+      );
+    }
   } else if (op == Cmd.getBatteryPackInfo && payload.length >= 30) {
     // 28-byte body [rev][attached][id ×6][name ×16][u16][type][status], again
     // starting at payload[2]. Every field was previously read two bytes early,

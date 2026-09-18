@@ -323,6 +323,27 @@ void main() {
       expect(g5.decoded['strap_name'], name);
       expect(g4.decoded['strap_name'], name);
     });
+
+    test(
+        'GET_ADVERTISING_NAME is status-gated, like the battery/hello/clock reads',
+        () {
+      // A FAILURE/PENDING/UNSUPPORTED reply does not populate the body —
+      // these bytes are stale buffer contents shaped like a plausible name,
+      // exactly the shape a real failure reply could leave behind.
+      const stale = 'Band-7';
+      final body = [0x01, 0x00, stale.length, ...stale.codeUnits];
+      for (final status in [0, 2, 3]) {
+        final g5 = parseCommandResponse(
+            cmdResponse(Cmd.getCustomAdvertisingName, body, status: status),
+            profile: BandProfile.gen5)!;
+        final g4 = parseCommandResponse(
+            cmdResponse(Cmd.getAdvertisingNameHarvard, body, status: status))!;
+        expect(g5.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+        expect(g4.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+      }
+    });
   });
 
   group('EVENT (0x30) body is bounded by the declared length', () {
