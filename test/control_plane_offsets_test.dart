@@ -347,6 +347,44 @@ void main() {
       expect(r.decoded['alarm_active'], isTrue);
     });
 
+    test(
+        'GET_BODY_LOCATION_AND_STATUS: gen5 a non-success outer status emits '
+        'nothing', () {
+      // Same convention as getClock/getDataRange/getAlarmTime: a failure
+      // reply's body bytes are stale leftovers from a prior successful read.
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getBodyLocationAndStatus, body, status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('body_location_status'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('GET_BODY_LOCATION_AND_STATUS: gen5 a success outer status still '
+        'decodes normally', () {
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getBodyLocationAndStatus, body, status: 1),
+          profile: BandProfile.gen5)!;
+      final decoded =
+          r.decoded['body_location_status'] as BodyLocationStatusResponse;
+      expect(decoded.revision, 1);
+      expect(decoded.locationRaw, 7);
+    });
+
+    test('GET_BODY_LOCATION_AND_STATUS: gen4 is left ungated on outer status',
+        () {
+      final body = [0x01, 0x00, 0xFF, 0x07];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getBodyLocationAndStatus, body, status: 0))!;
+      final decoded =
+          r.decoded['body_location_status'] as BodyLocationStatusResponse;
+      expect(decoded.revision, 1);
+      expect(decoded.locationRaw, 7);
+    });
+
     test('gen5 GET_CUSTOM_ADVERTISING_NAME (0x8D) decodes like gen4 0x4C', () {
       // Reply body: revision, status, length, then the ASCII name — the same
       // shape at the same offsets on both generations.

@@ -1007,12 +1007,19 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // starts after the response header, i.e. at payload[2] — reading from
     // payload[0] landed on the echoed-seq/status pair, so `locationRaw` was
     // the status byte and resolved to "wrist" on every successful reply.
-    dec['body_location_status'] = BodyLocationStatusResponse(
-      revision: payload[2],
-      locationRaw: payload[5],
-      confidence: payload[4], // constant 0xFF on every observed reply
-      status: payload[3], // constant 0
-    );
+    //
+    // Status-gated like the siblings above: a failed outer reply does not
+    // populate the body, so its bytes are stale and would otherwise mint a
+    // confident (and wrong) body-location reading.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk) {
+      dec['body_location_status'] = BodyLocationStatusResponse(
+        revision: payload[2],
+        locationRaw: payload[5],
+        confidence: payload[4], // constant 0xFF on every observed reply
+        status: payload[3], // constant 0
+      );
+    }
   } else if ((op == Cmd.enterHighFreqSync || op == Cmd.exitHighFreqSync)) {
     dec['high_freq_sync'] = HighFreqSyncResponse(op);
   } else if (op == Cmd.selectWrist && payload.length >= 3) {
