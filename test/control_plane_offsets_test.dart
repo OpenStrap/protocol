@@ -310,6 +310,43 @@ void main() {
       expect(get4(2)['alarm_active'], isFalse);
     });
 
+    test(
+        'gen5: a non-success outer status emits neither alarm_epoch nor '
+        'alarm_active', () {
+      // Same convention as getClock/getDataRange: a failure/deferred reply's
+      // body bytes are stale leftovers from a prior successful read.
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getAlarmTime, body, status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('alarm_epoch'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('alarm_active'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('gen5: a success outer status still decodes normally', () {
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getAlarmTime, body, status: 1),
+          profile: BandProfile.gen5)!;
+      expect(r.decoded['alarm_epoch'], 1786000000);
+      expect(r.decoded['alarm_active'], isTrue);
+    });
+
+    test('gen4 is left ungated on outer status, unlike gen5', () {
+      // Matches getClock/getDataRange's gen4 policy: the status byte's
+      // semantics are unconfirmed on gen4, so gating it would silently drop
+      // valid alarm reads rather than risk a stale one.
+      final body = [0x04, 1, ...le32(1786000000), ...le16(0)];
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getAlarmTime, body, status: 0))!;
+      expect(r.decoded['alarm_epoch'], 1786000000);
+      expect(r.decoded['alarm_active'], isTrue);
+    });
+
     test('gen5 GET_CUSTOM_ADVERTISING_NAME (0x8D) decodes like gen4 0x4C', () {
       // Reply body: revision, status, length, then the ASCII name — the same
       // shape at the same offsets on both generations.
@@ -322,6 +359,27 @@ void main() {
           cmdResponse(Cmd.getAdvertisingNameHarvard, body))!;
       expect(g5.decoded['strap_name'], name);
       expect(g4.decoded['strap_name'], name);
+    });
+
+    test(
+        'GET_ADVERTISING_NAME is status-gated, like the battery/hello/clock reads',
+        () {
+      // A FAILURE/PENDING/UNSUPPORTED reply does not populate the body —
+      // these bytes are stale buffer contents shaped like a plausible name,
+      // exactly the shape a real failure reply could leave behind.
+      const stale = 'Band-7';
+      final body = [0x01, 0x00, stale.length, ...stale.codeUnits];
+      for (final status in [0, 2, 3]) {
+        final g5 = parseCommandResponse(
+            cmdResponse(Cmd.getCustomAdvertisingName, body, status: status),
+            profile: BandProfile.gen5)!;
+        final g4 = parseCommandResponse(
+            cmdResponse(Cmd.getAdvertisingNameHarvard, body, status: status))!;
+        expect(g5.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+        expect(g4.decoded.containsKey('strap_name'), isFalse,
+            reason: 'status=$status');
+      }
     });
   });
 
