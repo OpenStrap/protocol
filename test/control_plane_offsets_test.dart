@@ -180,6 +180,43 @@ void main() {
           dataRangeBody(writePage: 200000, totalPages: 131072)))!;
       expect(r.decoded.containsKey('pages_behind'), isFalse);
     });
+
+    test('gen5: a non-success outer status emits neither range nor backlog',
+        () {
+      // A failure reply's body bytes are stale leftovers from a prior
+      // successful read; the revision byte alone (payload[2]==1) is not
+      // enough to trust them.
+      for (final status in [0, 2, 3]) {
+        final r = parseCommandResponse(
+            cmdResponse(Cmd.getDataRange, dataRangeBody(), status: status),
+            profile: BandProfile.gen5)!;
+        expect(r.decoded.containsKey('range_oldest'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('range_newest'), isFalse,
+            reason: 'status=$status');
+        expect(r.decoded.containsKey('pages_behind'), isFalse,
+            reason: 'status=$status');
+      }
+    });
+
+    test('gen5: a success outer status still decodes normally', () {
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getDataRange, dataRangeBody(), status: 1),
+          profile: BandProfile.gen5)!;
+      expect(r.decoded['range_oldest'], 1780000000);
+      expect(r.decoded['range_newest'], 1786000000);
+      expect((r.decoded['pages_behind'] as Map)['written'], 30);
+    });
+
+    test('gen4 is left ungated on outer status, unlike gen5', () {
+      // Matches getClock's gen4 policy a few groups up: the status byte's
+      // semantics are unconfirmed on gen4, so gating it would silently drop
+      // range/backlog emission rather than risk a stale read.
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getDataRange, dataRangeBody(), status: 0))!;
+      expect(r.decoded['range_oldest'], 1780000000);
+      expect(r.decoded['range_newest'], 1786000000);
+    });
   });
 
   // The alarm/haptics status byte: the SET and RUN

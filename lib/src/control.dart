@@ -953,7 +953,15 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (mod 4), so the grid could never land on either and range_oldest /
     // range_newest were never emitted at all.
     final revOk = payload.length > 2 && payload[2] == 1;
-    if (revOk && payload.length >= 63) {
+    // Status-gated like the clock read above: a failure reply leaves the body
+    // unpopulated, so a stale revision byte and stale-but-plausible page/
+    // backlog numbers from a prior successful read would otherwise be
+    // reported as current. Same shared-opcode shape as getClock/getClockGen5
+    // (this opcode is used by both profiles — see commands.dart), so gen4
+    // is deliberately left ungated for the same unconfirmed-status-byte
+    // reason documented there.
+    final statusOk = !profile.isGen5 || status == 1;
+    if (statusOk && revOk && payload.length >= 63) {
       final oldest = u32(payload, 35);
       final newest = u32(payload, 59);
       if (_plausibleUnix(oldest) && _plausibleUnix(newest) && oldest <= newest) {
@@ -965,7 +973,7 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // strap's own view of its ring buffer, which is what separates a stalled
     // offload from an idle one. Degrades safely: implausible values emit
     // nothing at all.
-    if (revOk && payload.length >= 35) {
+    if (statusOk && revOk && payload.length >= 35) {
       final writePage = u32(payload, 11);
       final capacity = u32(payload, 23); // TotalPages
       if (capacity > 0 && writePage <= capacity) {
