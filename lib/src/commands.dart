@@ -101,8 +101,8 @@ Uint8List cmdGetHello(int seq) =>
     buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
 Uint8List cmdGetHelloModern(int seq) =>
     buildCommand(seq, Cmd.getHello, const [0x01]);
-Uint8List cmdAbortHistorical(int seq) =>
-    buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00]);
+Uint8List cmdAbortHistorical(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.abortHistoricalTransmits, const [0x00], profile);
 Uint8List cmdSendHistorical(int seq) =>
     buildCommand(seq, Cmd.sendHistoricalData, const [0x00]);
 /// Read the strap RTC (GET_CLOCK = 0x0B = 11) with an EMPTY body.

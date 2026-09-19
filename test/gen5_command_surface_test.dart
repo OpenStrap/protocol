@@ -440,6 +440,27 @@ void main() {
       }
     });
 
+    test('ABORT_HISTORICAL_TRANSMITS (20) is profile-aware', () {
+      // The first step of the Labrador prepare/start sequence; must frame
+      // as gen5 (8-byte header, CRC16-Modbus) when the rest of that sequence
+      // does, not silently fall back to gen4 framing.
+      final gen5Frame = cmdAbortHistorical(1, profile: gen5);
+      final f = parseFrame(gen5Frame, profile: gen5)!;
+      expect(f.valid, isTrue, reason: 'must parse as a gen5 frame');
+      expect(f.opcode, Cmd.abortHistoricalTransmits);
+      // A gen4 parse of a gen5 frame must NOT also validate (wrong header
+      // length / CRC scheme) — otherwise this test can't tell them apart.
+      final asGen4 = parseFrame(gen5Frame, profile: BandProfile.gen4);
+      expect(asGen4 == null || !asGen4.valid, isTrue,
+          reason: 'a gen5 frame must not also parse as valid gen4');
+
+      // Default (no profile arg) stays gen4 — backward compatible.
+      final gen4Frame = cmdAbortHistorical(1);
+      final f4 = parseFrame(gen4Frame, profile: BandProfile.gen4)!;
+      expect(f4.valid, isTrue);
+      expect(f4.opcode, Cmd.abortHistoricalTransmits);
+    });
+
     // Filtered reading ("Labrador", R17) — the three lifecycle toggles.
     // Every body is [revision 01][operation]; 124's operation is
     // NOT a boolean.
