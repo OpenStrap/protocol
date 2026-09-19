@@ -138,8 +138,6 @@ export 'src/commands.dart'
         cmdDisableAlarm,
         kDefaultAlarmHaptics,
         gen5ClientHello,
-        cmdGetDataRangeGen5,
-        cmdSendHistoricalGen5,
         cmdSetClockGen5,
         cmdGetClockGen5,
         cmdBuzzGen5Maverick,

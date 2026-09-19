@@ -105,10 +105,42 @@ void main() {
     // zeros — any real body byte here would be a doc deviation.
     expect(c.inner.length, 4);
     expect(c.inner[3], 0, reason: 'alignment padding, not a body byte');
-    final r = parseFrame(cmdGetDataRangeGen5(1), profile: BandProfile.gen5)!;
+    final r = parseFrame(
+        cmdGetDataRange(1, profile: BandProfile.gen5), profile: BandProfile.gen5)!;
     expect(r.inner[2], 34);
     expect(r.inner.length, 4);
     expect(r.inner[3], 0, reason: 'alignment padding, not a body byte');
+  });
+
+  test('SEND_HISTORICAL_DATA(16) empty body on gen5, [0x00] on gen4', () {
+    final gen5 = parseFrame(
+        cmdSendHistorical(1, profile: BandProfile.gen5),
+        profile: BandProfile.gen5)!;
+    expect(gen5.inner[2], 22);
+    expect(gen5.inner.length, 4);
+    final gen4 = parseFrame(cmdSendHistorical(1))!;
+    expect(gen4.inner.sublist(2), [22, 0x00]);
+  });
+
+  // These six used to have no [profile] parameter at all, so a caller could
+  // not ask for gen5 framing — the frame was gen4-shaped (crc8 header)
+  // regardless, which a real gen5 strap cannot parse. Assert each now frames
+  // correctly under BOTH profiles, with gen4 output unchanged.
+  test('previously-unwired builders now frame correctly on gen5', () {
+    for (final profile in [BandProfile.gen4, BandProfile.gen5]) {
+      for (final f in <Uint8List>[
+        cmdLinkValid(1, profile: profile),
+        cmdGetHello(1, profile: profile),
+        cmdGetHelloModern(1, profile: profile),
+        cmdReportVersionInfo(1, profile: profile),
+        cmdToggleHr(1, true, profile: profile),
+        cmdSendR10R11(1, true, profile: profile),
+        cmdEnableOptical(1, true, profile: profile),
+      ]) {
+        expect(parseFrame(f, profile: profile), isNotNull,
+            reason: 'must parse under the profile it was built for');
+      }
+    }
   });
 
   test('toggles — 3 bare bool; 106/107 rev+bool; labrador ops', () {

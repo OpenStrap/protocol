@@ -117,6 +117,15 @@ void main() {
       expect(frame.inner, [0x23, 0x06, 0x22, 0x00]);
     });
 
+    test('cmdGetDataRange(profile: gen5) frames with the gen5 envelope', () {
+      final frame = parseFrame(
+          cmdGetDataRange(0x07, profile: BandProfile.gen5),
+          profile: BandProfile.gen5)!;
+      expect(frame.valid, isTrue);
+      // gen5 body is empty — inner is [type][seq][opcode] padded to /4.
+      expect(frame.inner, [0x23, 0x07, 0x22, 0x00]);
+    });
+
     test('cmdSetClock builds the WHOOP-exact 8-byte sec+subsec payload', () {
       // Fixed instant: sec = 0x12345678, millis = 500.
       // subsec = 500 * 32768 ~/ 1000 = 16384 = 0x4000 (u16 LE, then 2 zero pad).
