@@ -461,6 +461,25 @@ void main() {
       expect(f4.opcode, Cmd.abortHistoricalTransmits);
     });
 
+    test('GET_BATTERY_LEVEL (26) is profile-aware', () {
+      // control.dart's decode branches on profile.isGen5 for this exact
+      // opcode's reply (u8 percent vs u16 LE deci-percent), so the request
+      // builder must be able to frame gen5 too.
+      final gen5Frame = cmdGetBattery(1, profile: gen5);
+      final f = parseFrame(gen5Frame, profile: gen5)!;
+      expect(f.valid, isTrue, reason: 'must parse as a gen5 frame');
+      expect(f.opcode, Cmd.getBatteryLevel);
+      final asGen4 = parseFrame(gen5Frame, profile: BandProfile.gen4);
+      expect(asGen4 == null || !asGen4.valid, isTrue,
+          reason: 'a gen5 frame must not also parse as valid gen4');
+
+      // Default (no profile arg) stays gen4 — backward compatible.
+      final gen4Frame = cmdGetBattery(1);
+      final f4 = parseFrame(gen4Frame, profile: BandProfile.gen4)!;
+      expect(f4.valid, isTrue);
+      expect(f4.opcode, Cmd.getBatteryLevel);
+    });
+
     // Filtered reading ("Labrador", R17) — the three lifecycle toggles.
     // Every body is [revision 01][operation]; 124's operation is
     // NOT a boolean.

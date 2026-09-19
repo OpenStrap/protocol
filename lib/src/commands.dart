@@ -95,8 +95,8 @@ final List<Uint8List> initPackets = [
 // ── Convenience builders for live ops ──────────────────────────────────────
 Uint8List cmdLinkValid(int seq) =>
     buildCommand(seq, Cmd.linkValid, const [0x00]);
-Uint8List cmdGetBattery(int seq) =>
-    buildCommand(seq, Cmd.getBatteryLevel, const []);
+Uint8List cmdGetBattery(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getBatteryLevel, const [], profile);
 Uint8List cmdGetHello(int seq) =>
     buildCommand(seq, Cmd.getHelloHarvard, const [0x00]);
 Uint8List cmdGetHelloModern(int seq) =>
