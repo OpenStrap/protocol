@@ -10,6 +10,17 @@ import 'constants.dart';
 import 'gen5_records.dart';
 import 'records.dart';
 
+/// Minimum byte length of a genuine R10 record (rec_type 10) — the accel
+/// arrays run through byte 685 (X@85, Y@285, Z@485, 100 int16 samples each).
+/// A real R10, live (0x2B) or archived historical (0x2F, same field map), is
+/// always ~1920 bytes; nothing that long exists by coincidence. Used to tell
+/// a genuine R10 apart from a short (~96-byte) record whose UNRELATED
+/// historical layout-version byte happens to also be 10 — without this floor,
+/// that byte collision reads v24-layout bytes as R10 fields (HR, R-R, IMU)
+/// with none of the plausibility gate [parseR24] applies to every other
+/// unrecognized version.
+const int kR10MinLength = 685;
+
 /// A decoded HR/activity sample.
 class DecodedSample {
   final int ts; // unix seconds
@@ -130,7 +141,7 @@ ImuFrame? frameAccel(String hex) {
     return ts > 0 ? ImuFrame(ts, idx, mags, xs, ys, zs) : null;
   }
   // R10: rec 0x0A, ts@7, accel X@85/Y@285/Z@485 (100 int16 each).
-  if (rec == 0x0a && b.length >= 685) {
+  if (rec == 0x0a && b.length >= kR10MinLength) {
     final ts = view.getUint32(7, Endian.little);
     final mags = <double>[];
     final xs = <double>[];
@@ -223,12 +234,24 @@ RealtimeRrResult? realtimeRr(String hex) {
     // between the wearing flag and live HRV/breathing compute. Four slots
     // exist, so four is the ceiling.
     maxRr = 4;
-  } else if (rec == 10) {
+  } else if (rec == 10 &&
+      (pkt == PacketType.realtimeRawData || b.length >= kR10MinLength)) {
     tsOff = 7;
     cntOff = 18;
     // R10 declares its count at [18] and carries the values from [19], inside
     // a 1920-byte record — there is genuine room for these, so the historical
     // ceiling applies unchanged.
+    //
+    // rec==10 is ALSO a valid WHOOP-4 historical layout-version byte (a
+    // 0x2F-framed archived R10 snapshot, same field map, seen for real in
+    // hardware captures), so this isn't gated on pkt==0x2B alone — a live
+    // (0x2B) frame is unambiguously R10 at any length (even truncated), but a
+    // historical (0x2F) frame also needs [kR10MinLength]: a short (~96-byte)
+    // 0x2F record whose UNRELATED layout-version byte happens to be 10 is not
+    // R10 at all, and reading its v24-layout bytes as R-R data here — guarded
+    // only by the 200–2500 ms range check — fabricated beats. A genuine R10,
+    // live or archived, is always ~1920 bytes; nothing that size exists
+    // otherwise.
     maxRr = kMaxRrPerRecord;
   } else {
     return null;
@@ -274,7 +297,7 @@ class _Motion {
 // zero-motion sample. A non-null result with steps==0 IS a measurement: the
 // window was read and no gait rhythm was found.
 _Motion? _r10Motion(ByteData view, int len) {
-  if (len < 685) return null;
+  if (len < kR10MinLength) return null;
   const acc = 1 / 4096;
   List<int> arr(int off) {
     final out = <int>[];
@@ -458,8 +481,20 @@ DecodedSample? decodeRecord(String hex) {
     );
   }
 
-  // R10 / 0x2B — ts@7, hr@17, IMU arrays → activity.
-  if (recType == 10) {
+  // R10 — ts@7, hr@17, IMU arrays → activity.
+  //
+  // recType==10 alone is not enough: recType doubles as the historical
+  // layout-VERSION byte (inner[1]) on a 0x2F frame, and version 10 is NOT in
+  // [kKnownRecordVersions]. A live (0x2B) frame is unambiguously R10 at any
+  // length. A historical (0x2F) frame also needs [kR10MinLength] (a real
+  // archived R10 is ~1920 bytes) — otherwise a short (~96-byte) historical
+  // record whose UNRELATED layout-version byte happens to be 10 would have
+  // its v24-layout bytes reinterpreted as R10 fields (a meaningless "hr" at
+  // the same byte offset, fabricated IMU/motion) instead of falling through
+  // to `return null` below and getting archived like every other
+  // unrecognized version.
+  if (recType == 10 &&
+      (pktType == PacketType.realtimeRawData || b.length >= kR10MinLength)) {
     final ts = view.getUint32(7, Endian.little);
     final hr = b[17];
     // Null motion = the frame carried no readable IMU window; propagate that
