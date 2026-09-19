@@ -280,12 +280,13 @@ Uint8List cmdEnableOptical(int seq, bool on, {BandProfile profile = BandProfile.
 /// nothing to tell the caller. A value that does not fit a u8 is a caller bug,
 /// so throw. (Contrast [cmdSetAlarm], which masks because its payload is a
 /// pattern LIST already validated for length.)
-Uint8List cmdBuzz(int seq, [int pattern = hapticShortPulse]) {
+Uint8List cmdBuzz(int seq,
+    [int pattern = hapticShortPulse, BandProfile profile = BandProfile.gen4]) {
   if (pattern < 0 || pattern > 0xff) {
     throw ArgumentError.value(
         pattern, 'pattern', 'haptic waveform effect must fit in a u8 (0-255)');
   }
-  return buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0]);
+  return buildCommand(seq, Cmd.runHapticsPattern, [pattern, 0, 0, 0, 0], profile);
 }
 
 // ── On-device haptic alarm (SET_ALARM_TIME = 0x42) ─────────────────────────
