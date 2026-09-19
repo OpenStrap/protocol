@@ -153,8 +153,12 @@ Uint8List cmdSetClock(int seq,
   return buildCommand(seq, Cmd.setClock, payload, profile);
 }
 
-Uint8List cmdGetDataRange(int seq) =>
-    buildCommand(seq, Cmd.getDataRange, const [0x00]);
+/// GET_DATA_RANGE (0x22) — shared opcode, envelope + payload differ by
+/// profile: gen4 takes a `[0x00]` body, gen5 expects an EMPTY payload (see
+/// control.dart's dual-profile decoder for this opcode).
+Uint8List cmdGetDataRange(int seq, {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.getDataRange,
+        profile.isGen5 ? const [] : const [0x00], profile);
 Uint8List cmdReportVersionInfo(int seq) =>
     buildCommand(seq, Cmd.reportVersionInfo, const []);
 
@@ -601,10 +605,6 @@ Uint8List cmdDisableAlarm(int seq,
 /// gen5 header layout. Sequence defaults to 1 to match that canonical frame.
 Uint8List gen5ClientHello({int seq = 1}) =>
     buildCommand(seq, Cmd.getHello, const [0x01], BandProfile.gen5);
-
-/// gen5 GET_DATA_RANGE (0x22) with the EMPTY payload gen5 expects.
-Uint8List cmdGetDataRangeGen5(int seq) =>
-    buildCommand(seq, Cmd.getDataRange, const [], BandProfile.gen5);
 
 /// gen5 SEND_HISTORICAL_DATA (0x16) with the EMPTY payload gen5 expects — the
 /// command that starts the flash drain.

@@ -105,7 +105,8 @@ void main() {
     // zeros — any real body byte here would be a doc deviation.
     expect(c.inner.length, 4);
     expect(c.inner[3], 0, reason: 'alignment padding, not a body byte');
-    final r = parseFrame(cmdGetDataRangeGen5(1), profile: BandProfile.gen5)!;
+    final r = parseFrame(
+        cmdGetDataRange(1, profile: BandProfile.gen5), profile: BandProfile.gen5)!;
     expect(r.inner[2], 34);
     expect(r.inner.length, 4);
     expect(r.inner[3], 0, reason: 'alignment padding, not a body byte');
