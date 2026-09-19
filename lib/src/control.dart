@@ -829,13 +829,22 @@ CmdResponse? parseCommandResponse(Uint8List inner,
     // (pay[93]==body[91] is the fw MAJOR byte, which is only why the old
     // ==50 gate happened to hold). Both are superseded by the full map.
     //
+    // PROFILE-GATED: this same opcode is also how gen4 answers
+    // cmdGetHelloModern (see commands.dart), whose reply body shape is NOT
+    // confirmed to match gen5's fixed Gen5HelloInfo map. Running a gen4
+    // reply through that map would misattribute its fields at gen5's byte
+    // offsets — a confidently wrong serial/firmware/battery reading for a
+    // device that isn't gen5, or a silently dropped reply if it's shorter
+    // than gen5's 104-byte body. Until gen4's modern-hello layout is
+    // verified, this branch stays gen5-only and emits nothing for gen4.
+    //
     // STATUS-GATED, like the battery and clock reads above/below: hello
     // answers PENDING (2) before its terminal result, and FAILURE (0) /
     // UNSUPPORTED (3) are real wire cases. A non-success reply does not
     // populate the body, so its bytes are whatever the buffer held last —
     // parsing them would mint a confident serial, battery and firmware version
     // out of stale memory.
-    if (status == 1) {
+    if (profile.isGen5 && status == 1) {
       final body =
           payload.length >= 2 ? Uint8List.sublistView(payload, 2) : payload;
       final h = Gen5HelloInfo.parse(body);
