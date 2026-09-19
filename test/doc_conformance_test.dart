@@ -114,6 +114,15 @@ void main() {
   test('toggles — 3 bare bool; 106/107 rev+bool; labrador ops', () {
     final hr = parseFrame(cmdToggleHr(1, true), profile: BandProfile.gen4)!;
     expect(hr.inner.sublist(2, 4), [3, 0x01], reason: 'opcode 3 takes bare 01');
+    final hr5 = parseFrame(cmdToggleHr(1, true, profile: BandProfile.gen5),
+        profile: BandProfile.gen5)!;
+    expect(hr5.inner.sublist(2, 4), [3, 0x01],
+        reason: 'gen5 toggle HR must parse as crc16 framing, same body');
+    final opt5 = parseFrame(
+        cmdEnableOptical(1, true, profile: BandProfile.gen5),
+        profile: BandProfile.gen5)!;
+    expect(opt5.inner.sublist(3, 5), [revision1, 0x01],
+        reason: 'gen5 enable optical must parse as crc16 framing');
     final imu = parseFrame(cmdToggleImu(1, true, profile: BandProfile.gen5),
         profile: BandProfile.gen5)!;
     expect(imu.inner.sublist(3, 5), [0x01, 0x01]);

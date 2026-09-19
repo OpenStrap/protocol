@@ -226,8 +226,9 @@ Uint8List cmdSelectWrist(int seq, WristSelection selection,
 // That puts [cmdEnableOptical] (0x6B) next to the 0x99 persistent-save family
 // rather than next to a live stream. Unconfirmed for gen4, so the opcodes are
 // left pointed where they are — only the description is corrected.
-Uint8List cmdToggleHr(int seq, bool on) =>
-    buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00]);
+Uint8List cmdToggleHr(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(seq, Cmd.toggleRealtimeHr, [on ? 0x01 : 0x00], profile);
 
 /// Toggle the realtime raw (R10/R11) stream (SEND_R10_R11_REALTIME = 0x3F).
 ///
@@ -258,8 +259,10 @@ Uint8List cmdToggleImu(int seq, bool on,
           : <int>[on ? 0x01 : 0x00],
       profile,
     );
-Uint8List cmdEnableOptical(int seq, bool on) =>
-    buildCommand(seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00]);
+Uint8List cmdEnableOptical(int seq, bool on,
+        {BandProfile profile = BandProfile.gen4}) =>
+    buildCommand(
+        seq, Cmd.enableOpticalData, [revision1, on ? 0x01 : 0x00], profile);
 
 /// Play a haptic waveform effect (RUN_HAPTICS_PATTERN = 0x4F).
 ///
