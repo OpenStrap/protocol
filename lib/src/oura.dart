@@ -90,9 +90,9 @@ OuraEvent? parseOuraEvent(OuraFrame f) {
 }
 
 // ── event tags this file has something to say about ────────────────────────
-/// Wall-clock the ring recorded when the host last set its RTC. The ONLY event
-/// that pairs a Unix second with an envelope decisecond, which makes it the one
-/// honest anchor between the two clocks.
+/// Wall-clock the ring recorded when the host last set its RTC. It pairs a Unix
+/// second with an envelope decisecond, so it anchors one clock to the other
+/// (as does [kOuraEvtRtcBeacon]).
 const int kOuraEvtTimeSync = 0x42;
 
 /// An array of skin-temperature probes.
@@ -100,6 +100,10 @@ const int kOuraEvtTemp = 0x46;
 
 /// A single skin-temperature reading.
 const int kOuraEvtTempPeriod = 0x69;
+
+/// The RTC beacon, a wall-clock anchor the ring emits on its own. See
+/// [decodeRtcBeacon].
+const int kOuraEvtRtcBeacon = 0x85;
 
 /// Sleep-stage hypnogram carriers: `information`, `details`, and `data`
 /// (numbered 14-byte pages, 52 epochs each). Same codes on all three.
@@ -132,6 +136,25 @@ int? decodeTimeSync(OuraEvent e) {
   // A ring whose RTC was never set reports something that is not a date. The
   // window is the same one `sync_policy` uses for the WHOOP: an absolute Unix
   // second in this decade, and nothing else is an anchor.
+  return (v >= 1700000000 && v <= 4100000000) ? v : null;
+}
+
+/// Unix seconds from an `rtc_beacon` (`0x85`) body, or null when [e] is not
+/// one or the value is not a date.
+///
+/// Layout: `u32` LE Unix seconds at offset 0, then reserved bytes and a `u16`
+/// at offset 8 whose meaning is unknown. Bodies under 10 bytes are refused.
+/// Same date window as [decodeTimeSync], so an unset RTC never becomes an
+/// anchor.
+///
+/// Like [decodeTimeSync], this layout has no real captured [kOuraEvtRtcBeacon]
+/// frame in this repo behind it, so check a real one against it before
+/// trusting it for anything beyond the date window.
+int? decodeRtcBeacon(OuraEvent e) {
+  if (e.tag != kOuraEvtRtcBeacon || e.body.length < 10) return null;
+  final v = e.body.buffer
+      .asByteData(e.body.offsetInBytes)
+      .getUint32(0, Endian.little);
   return (v >= 1700000000 && v <= 4100000000) ? v : null;
 }
 
@@ -392,9 +415,10 @@ List<int> ouraCmdSetNotifyFlags(int flags) => <int>[0x1c, 0x01, flags & 0xff];
 /// Set the ring's real-time clock: u64 LE Unix seconds, then a timezone in
 /// half-hour steps.
 ///
-/// This is what later produces a [kOuraEvtTimeSync] event, and that event is the
-/// only measured bridge between the ring's decisecond counter and a date — so
-/// this write is not housekeeping, it is what makes the timestamps meaningful.
+/// This is what later produces a [kOuraEvtTimeSync] event, one of the two
+/// measured bridges (with [kOuraEvtRtcBeacon]) between the ring's decisecond
+/// counter and a date — so this write is not housekeeping, it is what makes the
+/// timestamps meaningful.
 List<int> ouraCmdSyncTime(int unixSeconds, {int tzHalfHours = 0}) {
   final b = Uint8List(9);
   final d = b.buffer.asByteData();

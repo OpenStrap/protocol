@@ -244,6 +244,24 @@ void main() {
           parseOuraFrame(_hex('4208') + _hex('01000000') + _hex('00000000'))!)!;
       expect(decodeTimeSync(unset), isNull);
     });
+    test('an rtc beacon is a little-endian unix second', () {
+      final ok = parseOuraEvent(parseOuraFrame(
+              _hex('850e') + _hex('01000000') + _hex('4fd2376a00000000e803'))!)!;
+      expect(decodeRtcBeacon(ok), 1782043215);
+      // A 9-byte body, one short of the full layout, is not a beacon.
+      final short = parseOuraEvent(parseOuraFrame(
+              _hex('850d') + _hex('01000000') + _hex('4fd2376a00000000e8'))!)!;
+      expect(short.body.length, 9);
+      expect(decodeRtcBeacon(short), isNull);
+      // A different tag is not a beacon either.
+      final other = parseOuraEvent(parseOuraFrame(
+              _hex('420e') + _hex('01000000') + _hex('4fd2376a00000000e803'))!)!;
+      expect(decodeRtcBeacon(other), isNull);
+      // An unset RTC is not an anchor.
+      final unset = parseOuraEvent(parseOuraFrame(
+              _hex('850e') + _hex('01000000') + _hex('0100000000000000e803'))!)!;
+      expect(decodeRtcBeacon(unset), isNull);
+    });
   });
 
   group('outbound frames', () {
