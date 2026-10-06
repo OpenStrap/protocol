@@ -36,6 +36,23 @@ void main() {
     });
   });
 
+  group('control-point indications and feature read', () {
+    test('the sensor stopping PPI by itself is recognised', () {
+      expect(polarPmdPpiStopped([0x01, 0x03]), isTrue);
+      expect(polarPmdPpiStopped([0x01, 0x00, 0x03]), isTrue);
+      expect(polarPmdPpiStopped([0x01, 0x00]), isFalse); // ECG only
+      expect(polarPmdPpiStopped([0xF0, 0x02, 0x03, 0x00]), isFalse);
+      expect(polarPmdPpiStopped([]), isFalse);
+    });
+
+    test('the feature bitmap says whether PPI is offered', () {
+      expect(polarPmdSupportsPpi([0x0F, 0x08]), isTrue); // PPI bit (3)
+      expect(polarPmdSupportsPpi([0x0F, 0x05]), isFalse); // ECG + ACC only
+      expect(polarPmdSupportsPpi([0xF0, 0x08]), isNull);
+      expect(polarPmdSupportsPpi([0x0F]), isNull);
+    });
+  });
+
   group('PPI frames', () {
     List<int> ppiFrame(List<List<int>> records) => [
           0x03, // measurement type, low 6 bits
@@ -73,6 +90,18 @@ void main() {
           .single;
       expect(s.blocker, isTrue);
       expect(s.skinContactBits, 0x03);
+    });
+
+    test('contact reads the flags the way 0x2A37 reads its contact bits', () {
+      bool? contactOf(int flags) => parsePolarPmdPpiFrame(ppiFrame([
+            [60, 0xE8, 0x03, 0x0A, 0x00, flags],
+          ]))!
+              .single
+              .contact;
+      expect(contactOf(0x04), isFalse); // supported, no contact
+      expect(contactOf(0x06), isTrue); // supported, contact
+      expect(contactOf(0x00), isNull); // not supported
+      expect(contactOf(0x02), isNull); // status bit without support
     });
 
     test('a non-PPI measurement type is not this decoder\'s frame', () {

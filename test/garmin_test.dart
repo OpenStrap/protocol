@@ -38,6 +38,21 @@ void main() {
       expect(out.single, orderedEquals(data));
     });
 
+    test('reassembler skips stray delimiters between frames', () {
+      final a = garminCobsEncode([1, 2, 3]);
+      final b = garminCobsEncode([4, 0, 5]);
+      for (final stray in [
+        [0],
+        [0, 0, 0],
+      ]) {
+        expect(GarminCobsReassembler().feed([...a, ...stray, ...b]),
+            [orderedEquals([1, 2, 3]), orderedEquals([4, 0, 5])]);
+        final r = GarminCobsReassembler();
+        expect(r.feed([...a, ...stray]), [orderedEquals([1, 2, 3])]);
+        expect(r.feed(b), [orderedEquals([4, 0, 5])]);
+      }
+    });
+
     test('reassembler recovers two frames coalesced into one delivery', () {
       final a = garminCobsEncode([1, 2]);
       final b = garminCobsEncode([3, 4, 5]);
@@ -87,6 +102,52 @@ void main() {
       expect(status, isNotNull);
       expect(status!.refMsgType, 5024);
       expect(status.ok, isTrue);
+      final unknown = garminParseGfdiFrame(
+          garminBuildStatusAck(5099, status: kGarminStatusUnknown))!;
+      expect(garminParseStatusAck(unknown)!.status, 2);
+    });
+
+    test('compact-form frames reach every parser', () {
+      int compact(int type, int txn) => 0x8000 | (txn << 8) | (type - 5000);
+      GarminGfdiFrame f(int type, List<int> payload) =>
+          garminParseGfdiFrame(garminBuildGfdiFrame(compact(type, 3), payload))!;
+
+      final time = garminBuildTimeResponse(
+          f(kGarminMsgCurrentTimeRequest, [1, 0, 0, 0]),
+          nowUnixSeconds: 1735689600,
+          utcOffsetSeconds: 0)!;
+      expect(time.sublist(2, 4), [0x00, 0x83],
+          reason: 'the transaction id is echoed');
+      expect(
+          garminParseDeviceInformation(
+              f(kGarminMsgDeviceInformation, List.filled(12, 0))),
+          isNotNull);
+      expect(garminParseSystemEvent(f(kGarminMsgSystemEvent, [8, 0])), (8, 0));
+      final pb = garminParseGfdiFrame(
+          garminBuildProtobufRequest(requestId: 1, protoBytes: const []))!;
+      final pf = garminParseProtobufFrame(f(kGarminMsgProtobufResponse, pb.payload));
+      expect(pf?.messageType, kGarminMsgProtobufResponse);
+      expect(garminParseStatusAck(f(kGarminMsgResponse, [0xa0, 0x13, 0])),
+          isNotNull);
+    });
+
+    test('protobuf ack carries request id, offset and chunk status', () {
+      final req = garminParseGfdiFrame(garminBuildGfdiFrame(
+          kGarminMsgProtobufResponse,
+          garminParseGfdiFrame(garminBuildProtobufRequest(
+                  requestId: 0x0102, protoBytes: const [1]))!
+              .payload))!;
+      final ack = garminParseGfdiFrame(
+          garminBuildProtobufAck(req, garminParseProtobufFrame(req)!))!;
+      expect(ack.type, kGarminMsgResponse);
+      expect(ack.payload, [0xb4, 0x13, 0, 0x02, 0x01, 0, 0, 0, 0, 0, 0]);
+    });
+
+    test('system event frame', () {
+      final f = garminParseGfdiFrame(
+          garminBuildSystemEvent(kGarminEventHandshakeComplete))!;
+      expect(f.type, kGarminMsgSystemEvent);
+      expect(f.payload, [8, 0]);
     });
 
     test('time response carries the Garmin-epoch timestamp and UTC offset',
@@ -118,16 +179,14 @@ void main() {
   });
 
   group('MLR', () {
-    test('close-all and register-ml requests are 12 bytes', () {
-      expect(garminCloseAllRequest(), hasLength(12));
-      expect(garminRegisterMlRequest(kGarminServiceGfdi), hasLength(12));
+    test('close-all is 12 bytes on the wire, register-ml 13', () {
+      expect(garminEncodeTx(0, garminCloseAllRequest()), hasLength(12));
+      expect(garminEncodeTx(0, garminRegisterMlRequest(kGarminServiceGfdi)),
+          hasLength(13));
     });
 
-    test('a flagged data frame reports its handle', () {
-      final decoded = garminDecodeMlr([0x80 | (2 << 4), 1, 2, 3]);
-      expect(decoded, isA<GarminMlrData>());
-      expect((decoded as GarminMlrData).handle, 2);
-      expect(decoded.payload, [1, 2, 3], reason: 'routing byte 0 must be stripped');
+    test('an MLR (bit 7) frame is not decoded as COBS data', () {
+      expect(garminDecodeMlr([0x80 | (2 << 4), 1, 2, 3]), isNull);
     });
 
     test('a bare non-zero handle byte is a data frame on that handle', () {
@@ -152,7 +211,40 @@ void main() {
     });
 
     test('CLOSE_ALL_RESP decodes to the close-all ack', () {
-      expect(garminDecodeMlr(const [0x00, 0x06]), isA<GarminCloseAllAck>());
+      expect(garminDecodeMlr(_control(0x06, [0, 0, 0])),
+          isA<GarminCloseAllAck>());
+      expect(garminDecodeMlr(const [0x00, 0x06]), isNull,
+          reason: 'every control frame is at least 13 bytes');
+    });
+
+    test("another client's answers are not ours", () {
+      expect(garminDecodeMlr(_control(0x06, [0, 0, 0], clientId: 9)),
+          isA<GarminMlrControlOther>());
+      final reg = _registerMlResp(
+          serviceCode: kGarminServiceGfdi, status: 0, handle: 3)
+        ..[2] = 9;
+      expect(garminDecodeMlr(reg), isA<GarminMlrControlOther>());
+    });
+
+    test('HANDLE_CLOSED and INVALID_HANDLE name the handle that is gone', () {
+      final closed = garminDecodeMlr(_control(0x03, [0, 0, 5, 0]));
+      expect((closed as GarminHandleClosed).handle, 5);
+      expect(garminDecodeMlr(_control(0x03, [0, 0, 5, 0], clientId: 9)),
+          isA<GarminMlrControlOther>());
+      final invalid = garminDecodeMlr(_control(0x04, [0, 0, 6], clientId: 9));
+      expect((invalid as GarminHandleClosed).handle, 6);
+    });
+
+    test('a 13-byte refusal decodes; ALREADY_IN_USE names another char', () {
+      final refused =
+          garminDecodeMlr(_control(0x01, [kGarminServiceGfdi, 0, 1]));
+      expect((refused as GarminRegisterMlResponse).status, 1);
+      final pending = garminDecodeMlr(
+          _control(0x01, [kGarminServiceGfdi, 0, kGarminRegisterPendingAuth]));
+      expect((pending as GarminRegisterMlResponse).accepted, isFalse);
+      final moved = garminDecodeMlr(_control(0x01,
+          [kGarminServiceGfdi, 0, kGarminRegisterAlreadyInUse, 0x11, 0x28]));
+      expect((moved as GarminRegisterMlResponse).alternateChar, 0x2811);
     });
 
     test('REGISTER_ML_RESP decodes service, status and handle', () {
@@ -243,6 +335,16 @@ List<int> _u32(int v) => (ByteData(4)..setUint32(0, v, Endian.little))
     .buffer
     .asUint8List();
 
+/// A control frame `0 | type | client id | rest`, our client id by default.
+List<int> _control(int type, List<int> rest, {int clientId = 2}) => [
+      0x00,
+      type,
+      ...(ByteData(8)..setInt64(0, clientId, Endian.little))
+          .buffer
+          .asUint8List(),
+      ...rest,
+    ];
+
 List<int> _registerMlResp({
   required int serviceCode,
   required int status,
@@ -251,6 +353,7 @@ List<int> _registerMlResp({
   final out = List<int>.filled(14, 0);
   out[0] = 0x00;
   out[1] = 0x01;
+  out[2] = 2; // client id
   final svc = ByteData(2)..setInt16(0, serviceCode, Endian.little);
   out[10] = svc.getUint8(0);
   out[11] = svc.getUint8(1);

@@ -61,16 +61,19 @@ void main() {
     expect(parseHeartRateMeasurement([0x02, 60])!.contact, isNull); // 0b01
   });
 
-  test('implausible beat intervals are dropped, not clamped', () {
-    // 8 ticks ≈ 8 ms and 4096 ticks = 4 s: neither is a beat. A clamped value
-    // would be a fabricated one.
+  test('out-of-range intervals pass through unclamped; zero ticks is dropped',
+      () {
+    // The plausibility bound is applied once, downstream. Here a value is
+    // either decoded verbatim or, at zero ticks, not an interval at all —
+    // never clamped into a fabricated one.
     final s = parseHeartRateMeasurement([
       0x10, 60, //
       0x08, 0x00, // 8 ms
+      0x00, 0x00, // 0 ticks — nothing measured
       0x00, 0x10, // 4000 ms
-      0x00, 0x04, // 1000 ms — the only real one
+      0x00, 0x04, // 1000 ms
     ])!;
-    expect(s.rrMs, [1000]);
+    expect(s.rrMs, [8, 4000, 1000]);
   });
 
   test('a searching sensor reporting 0 bpm is not a measurement', () {

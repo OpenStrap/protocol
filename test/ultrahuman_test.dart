@@ -20,38 +20,39 @@ Uint8List _f32le(double v) {
   return b.buffer.asUint8List();
 }
 
-/// One 32-byte record, built field-by-field from the documented offsets.
-/// The documented table only fills 30 of the 32 bytes (see `ultrahuman.dart`);
-/// the trailing 2 are padding this fixture supplies to reach the real record
-/// length, and the decoder never reads them.
+/// One 32-byte record, built field-by-field from the layout in
+/// `ultrahuman.dart`.
 List<int> _record({
   int tsA = 1700000000,
   int hr = 58,
   int hrv = 42,
   int spo2 = 97,
-  int measurementType = 1,
+  int hrQuality = kUltrahumanHrQualityLegacy,
   int tsB = 1700000000,
-  double maxSkinTempC = 34.5,
-  double minSkinTempC = 33.8,
+  double skinTempC = 34.5,
+  double ambientTempC = 26.0,
   int tsC = 1700000000,
-  int activityLevel = 12,
+  int activity = 12,
   int steps = 30,
-  int stress = 20,
+  int hrvSdnn = 20,
+  int tempQuality = 3,
+  int index = 0x1234,
 }) =>
     <int>[
       ..._u32le(tsA),
       hr,
       hrv,
       spo2,
-      measurementType,
+      hrQuality,
       ..._u32le(tsB),
-      ..._f32le(maxSkinTempC),
-      ..._f32le(minSkinTempC),
+      ..._f32le(skinTempC),
+      ..._f32le(ambientTempC),
       ..._u32le(tsC),
-      ..._u16le(activityLevel),
+      ..._u16le(activity),
       ..._u16le(steps),
-      ..._u16le(stress),
-      0x00, 0x00, // bytes 30-31 — undocumented, not read by the decoder
+      hrvSdnn,
+      tempQuality,
+      ..._u16le(index),
     ];
 
 void main() {
@@ -111,11 +112,23 @@ void main() {
     });
 
     test(
-        'an ok 0x04 reply whose count does not match its payload is refused, '
-        'not silently truncated', () {
-      // count=1 claims one 32-byte record; payload is 2 bytes.
-      final value = <int>[0x04, 0x00, 1, 0x11, 0x22, 0xaa, 0xbb];
-      expect(parseUltrahumanResponse(value), isNull);
+        'an ok 0x04 reply whose count byte does not match its payload still '
+        'yields every whole record, and never the trailer', () {
+      final rec = _record(tsA: 7);
+      final r = parseUltrahumanResponse(
+          <int>[0x04, 0x00, 3, ...rec, 0x11, 0x22, 0xaa, 0xbb])!;
+      expect(r.ok, isTrue);
+      expect(r.trailer, [0xaa, 0xbb]);
+      expect(parseUltrahumanRecords(r.payload).map((x) => x.tsA), [7]);
+    });
+
+    test('every result other than ok and empty is a failure', () {
+      for (final code in [0x03, 0x05, 0x07, 0x0a, 0xff]) {
+        expect(parseUltrahumanResponse([0x04, code, 0, 0, 0])!.failed, isTrue,
+            reason: 'result 0x${code.toRadixString(16)}');
+      }
+      expect(parseUltrahumanResponse([0x04, 0xee, 0, 0, 0])!.failed, isFalse);
+      expect(parseUltrahumanResponse([0x04, 0x00, 0, 0, 0])!.failed, isFalse);
     });
 
     test('a fail/empty result is still framed even if count looks off', () {
@@ -126,12 +139,36 @@ void main() {
   });
 
   group('the 32-byte record', () {
-    test('a record is exactly 32 bytes, 2 more than the documented fields '
-        'fill, and those 2 are not read', () {
+    test('a record is exactly 32 bytes and ends with its own index', () {
       final bytes = _record();
       expect(bytes.length, kUltrahumanRecordLen);
       final r = parseUltrahumanRecord(bytes, 0)!;
-      expect(r.stress, 20); // the last documented field, at offset 28-29
+      expect(r.index, 0x1234);
+    });
+
+    test('activity is a u16 across bytes 24-25; byte 28 is SDNN, unscaled',
+        () {
+      final r = parseUltrahumanRecord(
+          _record(activity: 0x0302, hrvSdnn: 255, tempQuality: 9), 0)!;
+      expect(r.activity, 0x0302);
+      expect(r.hrvSdnn, 255);
+      expect(r.tempQuality, 9);
+    });
+
+    test('bytes 12-15 are skin temperature, 16-19 the ambient sensor', () {
+      final r = parseUltrahumanRecord(
+          _record(skinTempC: 35.25, ambientTempC: 21.5), 0)!;
+      expect(r.skinTempC, 35.25);
+      expect(r.ambientTempC, 21.5);
+    });
+
+    test('only contact-class quality values are valid readings', () {
+      for (final q in [0, 1, 5, 6, 7, 9, 11]) {
+        expect(ultrahumanHrQualityValid(q), isTrue, reason: '$q');
+      }
+      for (final q in [2, 10, 14, 15, 100, 110, 150, 151]) {
+        expect(ultrahumanHrQualityValid(q), isFalse, reason: '$q');
+      }
     });
 
     test('every field lands at its documented offset', () {
@@ -140,28 +177,28 @@ void main() {
         hr: 61,
         hrv: 45,
         spo2: 98,
-        measurementType: kUltrahumanMeasureExercise,
+        hrQuality: kUltrahumanHrQualityCdtHr,
         tsB: 1700000002,
-        maxSkinTempC: 35.1,
-        minSkinTempC: 34.0,
+        skinTempC: 35.1,
+        ambientTempC: 24.0,
         tsC: 1700000003,
-        activityLevel: 88,
+        activity: 88,
         steps: 12,
-        stress: 40,
+        hrvSdnn: 40,
       );
       final r = parseUltrahumanRecord(bytes, 0)!;
       expect(r.tsA, 1700000001);
       expect(r.hr, 61);
       expect(r.hrv, 45);
       expect(r.spo2, 98);
-      expect(r.measurementType, kUltrahumanMeasureExercise);
+      expect(r.hrQuality, kUltrahumanHrQualityCdtHr);
       expect(r.tsB, 1700000002);
-      expect(r.maxSkinTempC, closeTo(35.1, 1e-4));
-      expect(r.minSkinTempC, closeTo(34.0, 1e-4));
+      expect(r.skinTempC, closeTo(35.1, 1e-4));
+      expect(r.ambientTempC, closeTo(24.0, 1e-4));
       expect(r.tsC, 1700000003);
-      expect(r.activityLevel, 88);
+      expect(r.activity, 88);
       expect(r.steps, 12);
-      expect(r.stress, 40);
+      expect(r.hrvSdnn, 40);
     });
 
     test('the three timestamps are independent, not collapsed to one', () {
