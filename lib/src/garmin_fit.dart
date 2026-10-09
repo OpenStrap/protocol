@@ -150,6 +150,7 @@ List<FitMessage> parseFit(List<int> bytes) {
       final global = d.getUint16(i + 2, endian);
       final n = b[i + 4];
       i += 5;
+      if (i + 3 * n > end) throw const FormatException('FIT: truncated def');
       final fields = <_Field>[];
       for (var f = 0; f < n; f++) {
         fields.add(_Field(b[i], b[i + 1], b[i + 2] & 0x1f));
@@ -157,7 +158,11 @@ List<FitMessage> parseFit(List<int> bytes) {
       }
       var devBytes = 0;
       if (h & 0x20 != 0) {
+        if (i >= end) throw const FormatException('FIT: truncated def');
         final nDev = b[i++];
+        if (i + 3 * nDev > end) {
+          throw const FormatException('FIT: truncated def');
+        }
         for (var f = 0; f < nDev; f++) {
           devBytes += b[i + 1];
           i += 3;

@@ -53,6 +53,10 @@ void main() {
     expect(m.map((x) => (x.tsSec, x.steps, x.hr)),
         [(1791000000, 12, 58), (1791000060, 0, null)]);
     expect(parsePebbleStepsItem([...u16(99), ...item.sublist(2)]), isNull);
+    expect(parsePebbleStepsItem(item.sublist(0, item.length - 1)), isNull,
+        reason: 'cut short of its record count');
+    expect(() => pebblePpogattPackets([1, 2], 0, maxPacket: 1),
+        throwsArgumentError);
   });
 
   test('overlay: deep sleep period', () {

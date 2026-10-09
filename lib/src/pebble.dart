@@ -60,6 +60,9 @@ List<int> pebbleFrame(int endpoint, List<int> payload) => [
 /// bytes (header included), numbering them from [firstSerial].
 List<List<int>> pebblePpogattPackets(List<int> frame, int firstSerial,
     {int maxPacket = 20}) {
+  // One byte is the header: below 2 a packet carries nothing and the loop
+  // below never advances.
+  if (maxPacket < 2) throw ArgumentError.value(maxPacket, 'maxPacket');
   final out = <List<int>>[];
   var serial = firstSerial;
   for (var i = 0; i < frame.length; i += maxPacket - 1) {
@@ -187,7 +190,8 @@ const Set<int> kPebbleStepsVersions = {5, 6, 7, 12, 13, 14};
 
 /// Decodes one steps item: `u16 version | u32 ts | ?u8 | u8 recordLength |
 /// u8 recordCount | records`, one record per minute from `ts`. Null for an
-/// unknown version — the caller must not ACK what it cannot read.
+/// unknown version or an item cut short of its record count — the caller
+/// must not ACK what it cannot read.
 List<PebbleMinute>? parsePebbleStepsItem(List<int> b) {
   if (b.length < 9) return null;
   final version = _u16(b, 0);
@@ -201,7 +205,8 @@ List<PebbleMinute>? parsePebbleStepsItem(List<int> b) {
   final out = <PebbleMinute>[];
   for (var r = 0; r < count; r++) {
     final o = 9 + r * recLen;
-    if (o + recLen > b.length) break;
+    // Short of its own count: a cut item, and a caller ACKs what decodes.
+    if (o + recLen > b.length) return null;
     final hr = version >= 7 ? b[o + 12] : 0;
     out.add(PebbleMinute(ts + r * 60, b[o], b[o + 1], _u16(b, o + 2), b[o + 4],
         hr == 0 ? null : hr));
