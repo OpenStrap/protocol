@@ -8,8 +8,9 @@
 
 Pure Dart, zero runtime deps. You hand it an already-unwrapped chunk of bytes from the
 band, it hands you back a record with named fields, or a decoded command/event. That's
-the whole job. Covers WHOOP 4 (gen4) and WHOOP 5 (gen5), a generic Bluetooth Heart Rate
-Service (0x180D) sensor, and the Oura ring's wire format.
+the whole job. Covers WHOOP 4 (gen4), WHOOP 5 and MG (gen5, including MG's ECG
+records), a generic Bluetooth Heart Rate Service (0x180D) sensor, and the Oura ring's
+wire format.
 
 This isn't backend-side anymore — the app ([edge](https://github.com/OpenStrap/edge))
 depends on this package directly and calls it on-device. There's no cloud, no upload, no
@@ -38,7 +39,13 @@ server that ever sees your raw bytes.
 - `gen5_records.dart` — WHOOP 5 (gen5) historical record decoders: v18/v20/v21/v22/v26.
 - `hrs.dart` — the Bluetooth SIG's generic Heart Rate Service (0x180D) as a pure
   function, for any standard chest strap or optical armband, not one vendor's device.
+- `labrador.dart` — WHOOP MG's ECG records (filtered and raw), which arrive live during a
+  reading rather than through the history drain.
 - `oura.dart` — the Oura ring's wire format, as pure functions.
+- `polar_pmd.dart` and the other single-device files in `lib/src/` — decoders for a set
+  of other sensors, watches and rings. These are experimental: none has been checked
+  against a device in hand yet, and the app keeps their data out of every metric until
+  one has.
 
 ## The one record that matters most
 
