@@ -36,7 +36,9 @@ void main() {
   test('datalog open and data', () {
     final open = [1, 7, ...List.filled(16, 0), ...u32(1), ...u32(81), 0, ...u16(4)];
     final s = parsePebbleDatalogOpen(open)!;
-    expect((s.sid, s.tag, s.itemSize), (7, 81, 4));
+    expect((s.sid, s.tag, s.itemSize, s.system), (7, 81, 4, true));
+    final app = [...open]..[5] = 0xab;
+    expect(parsePebbleDatalogOpen(app)!.system, isFalse);
     final data = [2, 7, ...u32(0), ...u32(0), 1, 2, 3, 4, 5, 6, 7, 8];
     expect(parsePebbleDatalogItems(data, 4), [[1, 2, 3, 4], [5, 6, 7, 8]]);
     expect(parsePebbleDatalogItems([...data, 9], 4), isNull);

@@ -36,7 +36,9 @@
 // history and re-sends it next time, which a timestamp-keyed upsert absorbs.
 //
 // TIMESTAMPS ARE UTC wall-clock components: the scale's clock is set in UTC
-// ([miScaleClockValue]) and its stamps are read back the same way.
+// ([miScaleClockValue]) and its stamps are read back the same way. A clock
+// found on local time before it is set (another app set it) stamped the
+// stored history local; the host reads those back as local.
 
 import 'health_thermometer.dart' show WallClock, gattDateTime;
 

@@ -40,6 +40,10 @@ const int kPebbleTagOverlay = 84;
 
 const int kPebbleOverlaySleep = 1;
 const int kPebbleOverlayDeepSleep = 2;
+const int kPebbleOverlayNap = 3;
+const int kPebbleOverlayDeepNap = 4;
+const int kPebbleOverlayWalk = 5;
+const int kPebbleOverlayRun = 6;
 
 // ── framing ──────────────────────────────────────────────────────────────
 
@@ -132,13 +136,20 @@ class PebbleDatalogSession {
   final int sid;
   final int tag;
   final int itemSize;
-  const PebbleDatalogSession(this.sid, this.tag, this.itemSize);
+
+  /// Whether the session's app uuid is all zeros: the watch's own health
+  /// service. A watch app logging under the same tag has its own uuid, and
+  /// its bytes are not health records.
+  final bool system;
+  const PebbleDatalogSession(this.sid, this.tag, this.itemSize,
+      {this.system = true});
 }
 
 /// The session announced by an open message, or null if malformed.
 PebbleDatalogSession? parsePebbleDatalogOpen(List<int> p) {
   if (p.length < 29 || p[0] != kPebbleDatalogOpen) return null;
-  return PebbleDatalogSession(p[1], _u32(p, 22), _u16(p, 27));
+  return PebbleDatalogSession(p[1], _u32(p, 22), _u16(p, 27),
+      system: p.sublist(2, 18).every((b) => b == 0));
 }
 
 /// The items of a data message, or null if malformed or not a whole number
@@ -198,7 +209,8 @@ List<PebbleMinute>? parsePebbleStepsItem(List<int> b) {
   return out;
 }
 
-/// One activity overlay: a sleep (1) or deep-sleep (2) period.
+/// One activity overlay: sleep (1), deep sleep (2), nap (3), deep nap (4),
+/// walk (5) or run (6).
 class PebbleOverlay {
   final int type;
   final int startSec;

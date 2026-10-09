@@ -13,11 +13,11 @@
 // correctness credential is a liability (ADDING_A_DEVICE 6.2): it proves
 // determinism, regression and physiological sanity. It does not prove
 // correctness, because there is no independent oracle for this band — nobody
-// on this project owns a ring. The decoders that are NOT here (beat intervals,
-// SpO2, steps, raw PPG) are absent precisely because there are no bytes to
-// build such a fixture from, and shipping a guess would have this file
-// faithfully encoding the wrong answer. The hypnogram vectors below are
-// synthetic: they pin bit order and refusal, not real-ring correctness.
+// on this project owns a ring. The decoders that are NOT here (steps, motion,
+// raw PPG) are absent because their fields or windows are not pinned. The
+// hypnogram and stream vectors below (HR/RMSSD pairs, SpO2, beat intervals,
+// always-on HR) are synthetic: they pin bit order and refusal, not real-ring
+// correctness.
 //
 // The NULL cases at the bottom are the load-bearing half: they are what proves
 // the decoder REFUSES rather than always producing something.
@@ -25,6 +25,8 @@
 // AES-128/ECB auth-response encryption is NOT exercised here — this package
 // has no cipher implementation. See the session that drives this wire format
 // for that half of the auth handshake.
+
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
@@ -65,11 +67,37 @@ void main() {
       expect(f.payload.length, 8);
     });
 
-    test('trailing bytes past the declared length are ignored', () {
-      // The ring is known to append them. Eight declared, eleven delivered.
+    test('parseOuraFrame reads only the first frame of a notification', () {
+      // Eight declared, eleven delivered: the tail is the next bundled frame.
       final f = parseOuraFrame(_hex('110808009e0e00000300') + _hex('aabbcc'))!;
       expect(f.payload.length, 8);
       expect(parseBatchSummary(f)!.bytesLeft, 3742);
+    });
+
+    test('a bundled notification yields every frame, in order', () {
+      final fs = parseOuraFrames(<int>[
+        0x61, 0x05, 0xa3, 0x4d, 0x8f, 0x00, 0x24, //
+        0x69, 0x06, 1, 0, 0, 0, 0x6c, 0x0d, //
+        ..._hex('110808009e0e00000300'),
+      ]);
+      expect(fs.map((f) => f.tag), [0x61, 0x69, 0x11]);
+      expect(parseOuraEvent(fs[1])!.tsDs, 1);
+      expect(parseBatchSummary(fs[2])!.bytesLeft, 3742);
+    });
+
+    test('a truncated last frame is dropped, the ones before it kept', () {
+      final fs = parseOuraFrames(
+          _hex('110808009e0e00000300') + _hex('aabbcc'));
+      expect(fs.map((f) => f.tag), [0x11]);
+    });
+
+    test('a standard event declaring more than 18 bytes drops the bundle', () {
+      expect(
+          parseOuraFrames(<int>[
+            0x61, 0x05, 0xa3, 0x4d, 0x8f, 0x00, 0x24, //
+            0x46, 19, ...List.filled(19, 0),
+          ]),
+          isEmpty);
     });
 
     test('a batch summary carries the count and the bytes still on the ring',
@@ -178,6 +206,18 @@ void main() {
       expect(parseOuraFrame(const <int>[0x61, 20, 1, 2, 3]), isNull);
     });
 
+    test('only 0x41..0x8f with a 4..18-byte payload is a standard event', () {
+      final ts = _hex('01000000');
+      expect(parseOuraEvent(OuraFrame(0x8f, Uint8List.fromList(ts))), isNotNull);
+      expect(parseOuraEvent(OuraFrame(0x90, Uint8List.fromList(ts))), isNull);
+      expect(parseOuraEvent(OuraFrame(0xfd, Uint8List.fromList(ts))), isNull);
+      expect(parseOuraEvent(OuraFrame(0xfe, Uint8List.fromList(ts))), isNull);
+      expect(
+          parseOuraEvent(
+              OuraFrame(0x61, Uint8List.fromList([...ts, ...List.filled(15, 0)]))),
+          isNull);
+    });
+
     test('a command response is not an event, and a short envelope is not one',
         () {
       expect(parseOuraEvent(parseOuraFrame(_hex('0d03') + _hex('560100'))!),
@@ -221,11 +261,24 @@ void main() {
       // array is more dangerous than none: it would publish one real probe and
       // silently hide that the offsets had moved.
       final good = parseOuraEvent(
-          parseOuraFrame(_hex('4606') + _hex('01000000') + _hex('1c0d'))!)!;
+          parseOuraFrame(_hex('6906') + _hex('01000000') + _hex('1c0d'))!)!;
       expect(decodeTemperatures(good), <double>[33.56]);
       final bad = parseOuraEvent(parseOuraFrame(
           _hex('4608') + _hex('01000000') + _hex('1c0d3075'))!)!;
       expect(decodeTemperatures(bad), isNull);
+    });
+
+    test('temperature lengths are bounded per tag', () {
+      List<double>? t(int tag, int n) =>
+          decodeTemperatures(OuraEvent(tag, 0, Uint8List.fromList([
+            for (var i = 0; i < n; i += 2) ...[0x1c, 0x0d]
+          ])));
+      expect(t(kOuraEvtTemp, 2), isNull);
+      expect(t(kOuraEvtTemp, 16), isNull);
+      expect(t(kOuraEvtTempPeriod, 4), isNull);
+      expect(t(kOuraEvtTemp, 4), [33.56, 33.56]);
+      expect(t(kOuraEvtTemp, 14), hasLength(7));
+      expect(t(kOuraEvtTempPeriod, 2), [33.56]);
     });
 
     test('an odd-length temperature body is null', () {
@@ -244,23 +297,89 @@ void main() {
           parseOuraFrame(_hex('4208') + _hex('01000000') + _hex('00000000'))!)!;
       expect(decodeTimeSync(unset), isNull);
     });
-    test('an rtc beacon is a little-endian unix second', () {
+    test('a skipped time sync decodes its second, timezone and reason', () {
+      // 1782043215 LE, tz -11 half-hours (0xf5), reason 1 (PPG running).
       final ok = parseOuraEvent(parseOuraFrame(
-              _hex('850e') + _hex('01000000') + _hex('4fd2376a00000000e803'))!)!;
-      expect(decodeRtcBeacon(ok), 1782043215);
-      // A 9-byte body, one short of the full layout, is not a beacon.
+              _hex('850e') + _hex('01000000') + _hex('4fd2376a00000000f501'))!)!;
+      final s = decodeTimeSyncSkipped(ok)!;
+      expect(s.unix, 1782043215);
+      expect(s.tzHalfHours, -11);
+      expect(s.reason, kOuraSkipReasonPpgMeasuring);
+      // It is not an anchor: decodeTimeSync ignores the tag.
+      expect(decodeTimeSync(ok), isNull);
+      // A 9-byte body, one short of the reason byte, is refused.
       final short = parseOuraEvent(parseOuraFrame(
-              _hex('850d') + _hex('01000000') + _hex('4fd2376a00000000e8'))!)!;
-      expect(short.body.length, 9);
-      expect(decodeRtcBeacon(short), isNull);
-      // A different tag is not a beacon either.
-      final other = parseOuraEvent(parseOuraFrame(
-              _hex('420e') + _hex('01000000') + _hex('4fd2376a00000000e803'))!)!;
-      expect(decodeRtcBeacon(other), isNull);
-      // An unset RTC is not an anchor.
+              _hex('850d') + _hex('01000000') + _hex('4fd2376a00000000f5'))!)!;
+      expect(decodeTimeSyncSkipped(short), isNull);
+      // An unset second is refused.
       final unset = parseOuraEvent(parseOuraFrame(
-              _hex('850e') + _hex('01000000') + _hex('0100000000000000e803'))!)!;
-      expect(decodeRtcBeacon(unset), isNull);
+              _hex('850e') + _hex('01000000') + _hex('0100000000000000f501'))!)!;
+      expect(decodeTimeSyncSkipped(unset), isNull);
+    });
+
+    test('a ring start resets the clock only when reset bit 1 is set', () {
+      OuraEvent start(int flags) =>
+          OuraEvent(kOuraEvtRingStart, 0, Uint8List.fromList([4, 0, 0, 0, flags]));
+      expect(ouraRingStartResetsClock(start(0x02)), isTrue);
+      expect(ouraRingStartResetsClock(start(0x32)), isTrue);
+      expect(ouraRingStartResetsClock(start(0x01)), isFalse);
+      expect(
+          ouraRingStartResetsClock(
+              OuraEvent(kOuraEvtRingStart, 0, Uint8List.fromList([4, 0, 0, 0]))),
+          isFalse);
+    });
+
+    test('an extended event checks its CRC-8 and reads a u64 time', () {
+      // CRC-8, poly 0x31, init 0xff, by the nibble table: an implementation
+      // independent of the bitwise one under test.
+      const tbl = [
+        0x00, 0x31, 0x62, 0x53, 0xc4, 0xf5, 0xa6, 0x97, //
+        0xb9, 0x88, 0xdb, 0xea, 0x7d, 0x4c, 0x1f, 0x2e,
+      ];
+      int crc8(List<int> b) {
+        var c = 0xff;
+        for (final x in b) {
+          c ^= x;
+          c = ((c << 4) & 0xff) ^ tbl[c >> 4];
+          c = ((c << 4) & 0xff) ^ tbl[c >> 4];
+        }
+        return c;
+      }
+      // "123456789" is the standard check string; this CRC gives 0xf7.
+      expect(crc8('123456789'.codeUnits), 0xf7);
+      final rest = <int>[0x5a, 10, 1, 0, 0, 0, 2, 0, 0, 0, 0xaa, 0xbb];
+      final bytes = <int>[0xfd, crc8(rest), ...rest];
+      final fs = parseOuraFrames(bytes);
+      expect(fs, hasLength(1));
+      expect(parseOuraEvent(fs.single), isNull,
+          reason: 'never read as a standard decisecond event');
+      final x = parseOuraExtendedEvent(fs.single)!;
+      expect(x.tag, 0x5a);
+      expect(x.time, 0x200000001);
+      expect(x.body, [0xaa, 0xbb]);
+      bytes[1] ^= 1;
+      expect(parseOuraExtendedEvent(parseOuraFrames(bytes).single), isNull);
+    });
+
+    test('the ring rejecting a command as unsupported is told apart', () {
+      expect(ouraIsUnsupported(parseOuraFrame(_hex('300110'))!, 0x10), isTrue);
+      expect(ouraIsUnsupported(parseOuraFrame(_hex('300110'))!, 0x2f), isFalse);
+      expect(ouraIsUnsupported(parseOuraFrame(_hex('30021000'))!, 0x10), isFalse);
+    });
+
+    test('a short batch summary still ends the batch, with unknowns as -1', () {
+      final one = parseBatchSummary(parseOuraFrame(_hex('110103'))!)!;
+      expect(one.received, 3);
+      expect(one.sleepAnalysisProgress, -1);
+      expect(one.bytesLeft, -1);
+      final two = parseBatchSummary(parseOuraFrame(_hex('11020307'))!)!;
+      expect(two.sleepAnalysisProgress, 7);
+      expect(two.bytesLeft, -1);
+      expect(parseBatchSummary(parseOuraFrame(_hex('1100'))!), isNull);
+    });
+
+    test('a fuel-gauge body too short for its layout is null', () {
+      expect(decodeDebugData(_hex('14cf50c80fb2ffffffd53e0000')), isNull);
     });
   });
 
@@ -285,6 +404,18 @@ void main() {
           _hex('4fd2376a00000000'));
     });
 
+    test('the notify mask uses the two-byte form only above 0xff', () {
+      expect(ouraCmdSetNotifyFlags(0xbf), _hex('1c01bf'));
+      expect(ouraCmdSetNotifyFlags(0x1bf), _hex('1c02bf01'));
+    });
+
+    test('a forced clock set adds a flags byte with bit 0 set', () {
+      expect(ouraCmdSyncTime(1782043215, tzHalfHours: -11, force: true),
+          _hex('120a') + _hex('4fd2376a00000000') + _hex('f501'));
+      expect(ouraCmdSyncTime(1782043215, tzHalfHours: 11),
+          _hex('1209') + _hex('4fd2376a00000000') + _hex('0b'));
+    });
+
     test('a value past the low 32 bits still encodes correctly', () {
       // 0x1_00000001 = 4294967297. Low word 0x00000001, high word 0x00000001
       // — proves the two-setUint32 split actually carries the high half,
@@ -303,7 +434,7 @@ void main() {
 
     test('two-bit codes unpack MSB-first, four to a byte', () {
       // 0b00_01_10_11: LSB-first would hand back the reverse.
-      final out = decodeSleepPhases(hypnogram(0x4b, '001b'))!;
+      final out = decodeSleepPhases(hypnogram(0x4e, '001b'))!;
       expect(out.header, 0x00);
       expect(out.phases, [
         OuraSleepPhase.deep,
@@ -313,8 +444,8 @@ void main() {
       ]);
     });
 
-    test('all three carrier tags decode the same codes', () {
-      for (final tag in <int>[0x4b, 0x4e, 0x5a]) {
+    test('both carrier tags decode the same codes', () {
+      for (final tag in <int>[0x4e, 0x5a]) {
         final out = decodeSleepPhases(hypnogram(tag, '01e4'))!;
         expect(out.phases, [
           OuraSleepPhase.awake,
@@ -335,11 +466,84 @@ void main() {
     });
 
     test('a header-only body is null', () {
-      expect(decodeSleepPhases(hypnogram(0x4b, '00')), isNull);
+      expect(decodeSleepPhases(hypnogram(0x5a, '00')), isNull);
+    });
+
+    test('0x4b is not a hypnogram carrier', () {
+      expect(decodeSleepPhases(hypnogram(0x4b, '001b')), isNull);
     });
 
     test('a non-hypnogram tag is null', () {
       expect(decodeSleepPhases(hypnogram(0x61, '001b')), isNull);
+    });
+  });
+
+  group('streams: bit order and refusal (synthetic vectors)', () {
+    OuraEvent ev(int tag, List<int> body) =>
+        OuraEvent(tag, 1000, Uint8List.fromList(body));
+
+    /// The 14-byte beat body for six intervals, the layout the decoder reads.
+    List<int> ibiBody(List<int> ibis) => [
+          for (final i in ibis) i >> 3,
+          for (final i in ibis) 0x80 | (i & 1),
+          ((ibis[0] >> 1) & 3) << 6 |
+              ((ibis[1] >> 1) & 3) << 4 |
+              ((ibis[2] >> 1) & 3) << 2 |
+              ((ibis[3] >> 1) & 3),
+          ((ibis[4] >> 1) & 3) << 6 | ((ibis[5] >> 1) & 3) << 4 | 0x07,
+        ];
+
+    test('HR/RMSSD: one pair per 5-minute window, in body order', () {
+      expect(decodeHrvPairs(ev(kOuraEvtHrv, [60, 40, 62, 45, 58, 50])),
+          [(60, 40), (62, 45), (58, 50)]);
+      expect(decodeHrvPairs(ev(kOuraEvtHrv, [60, 40, 62])), isNull);
+      expect(decodeHrvPairs(ev(kOuraEvtSpo2, [60, 40])), isNull);
+    });
+
+    test('SpO2: a header byte, then one reading a second; 0xff continues', () {
+      expect(decodeSpo2(ev(kOuraEvtSpo2, [0x01, 97, 96, 98, 0xff])),
+          [97, 96, 98]);
+      expect(decodeSpo2(ev(kOuraEvtSpo2, [0x01, 97, 0])), [97, 0]);
+      expect(decodeSpo2(ev(kOuraEvtSpo2, [0x01, 97, 101])), isNull,
+          reason: 'over 100 % is a wrong layout, not a reading');
+      expect(decodeSpo2(ev(kOuraEvtSpo2, [0x01, 0xff])), isNull);
+      expect(decodeSpo2(ev(kOuraEvtSpo2, [0x01])), isNull);
+    });
+
+    test('beat intervals: 11 bits, high byte, packed middle bits, low bit', () {
+      // 1003 ms = 0b111_1101_0_1_1: high 8 = 0x7d, middle 2 = 01, low 1 = 1.
+      // The amplitude bits (7..1 of bytes 6..11) are set and must not leak.
+      expect(
+          decodeIbiAmplitude(ev(kOuraEvtIbiAmplitude,
+              _hex('7d7d7d7d7d7d' '818181818181' '55' '57'))),
+          List.filled(6, 1003));
+      const ibis = [800, 1001, 1234, 650, 1999, 300];
+      expect(decodeIbiAmplitude(ev(kOuraEvtIbiAmplitude, ibiBody(ibis))),
+          ibis);
+      expect(
+          decodeIbiAmplitude(
+              ev(kOuraEvtIbiAmplitude, ibiBody(ibis).sublist(0, 13))),
+          isNull,
+          reason: 'the body is a fixed 14 bytes');
+    });
+
+    test('clean-beat intervals with a quality code, two bytes a beat', () {
+      // 1257 ms at quality 1: 0x9d << 3 | 1, quality bits 4..3 = 01.
+      expect(decodeGreenIbiQuality(ev(kOuraEvtGreenIbiQuality, _hex('9d09'))),
+          [(1257, kOuraIbiQualityGood)]);
+      expect(
+          decodeGreenIbiQuality(
+              ev(kOuraEvtGreenIbiQuality, _hex('9d09' '7d10'))),
+          [(1257, 1), (1000, 2)]);
+      expect(decodeGreenIbiQuality(ev(kOuraEvtGreenIbiQuality, [0x9d])),
+          isNull);
+    });
+
+    test('always-on HR: exactly its declared count of readings', () {
+      expect(decodeAohr(ev(kOuraEvtAohr, [1, 0, 2, 55, 1, 56, 1])),
+          [(55, 1), (56, 1)]);
+      expect(decodeAohr(ev(kOuraEvtAohr, [1, 0, 3, 55, 1, 56, 1])), isNull);
+      expect(decodeAohr(ev(kOuraEvtAohr, [1, 0])), isNull);
     });
   });
 
