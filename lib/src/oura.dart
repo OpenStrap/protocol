@@ -69,6 +69,11 @@ OuraFrame? parseOuraFrame(List<int> value) {
 
 /// Every frame in one notification, in order.
 ///
+/// UNVERIFIED ON HARDWARE. Whether the ring bundles several frames into one
+/// notification has not been seen on a real capture, so the app reads one
+/// frame per notification ([parseOuraFrame]) and does not call this. It is
+/// kept for a capture to check against.
+///
 /// A truncated last frame ends the walk and is dropped; the frames before it
 /// are kept. A standard event ([kOuraFirstEventTag]..[kOuraLastEventTag])
 /// declaring more than 18 payload bytes means the bundle is mis-framed, and
