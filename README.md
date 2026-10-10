@@ -196,8 +196,8 @@ reports are worth more than money, though.
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE). Contributions are covered by the [CLA](CLA.md); the
-OpenStrap name and logo by [TRADEMARKS.md](TRADEMARKS.md).
+AGPL-3.0. See [LICENSE](LICENSE). Contributions are licensed under the same terms. The
+OpenStrap name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
 
