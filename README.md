@@ -171,10 +171,8 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against other WHOOP reverse-engineering write-ups (e.g. the `noop`
-project, or bWanShiTong's `reverse-engineering-whoop-post`) for facts/techniques is
-fine; copying their code is not. These are external projects, not paths inside this
-repo — go find and clone them separately if you want to compare.
+The protocol documentation and decoders here are independently written for
+interoperability with devices you own. Don't copy third-party code into this repo.
 
 ## Contributing
 
