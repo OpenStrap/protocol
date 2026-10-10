@@ -86,6 +86,19 @@ New record types or opcodes should come with test cases from real frames.
 ## Scope
 
 Facts about a wire protocol, worked out by observing your own device, are fine.
-Vendor source code, firmware, decompiled binaries, and material from other
-reverse-engineering projects whose licences don't permit reuse are not — don't
-paste them into code, comments, commits, or PR descriptions.
+Vendor source code, firmware, binaries, and third-party material whose licences
+don't permit reuse are not. Don't paste them into code, comments, commits, or PR
+descriptions.
+
+## License and CLA
+
+OpenStrap is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). Before your first PR
+is merged you need to accept the [Contributor License Agreement](CLA.md). In short:
+you keep the copyright in your work, and you grant the copyright holder, OpenStrap,
+the right to relicense your contributions, including under commercial licences.
+To accept, add this line to your first PR description:
+
+> I have read the OpenStrap CLA (CLA.md) and agree to its terms for this and all my
+> future contributions to OpenStrap.
+
+The OpenStrap name and logo are covered separately by [TRADEMARKS.md](TRADEMARKS.md).
