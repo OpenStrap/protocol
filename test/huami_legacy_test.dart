@@ -47,6 +47,7 @@ void main() {
   test('a counter gap marks the transfer untrustworthy', () {
     final buf = HuamiActivityBuffer()..add([0, 1, 0, 0, 0])..add([2, 1, 0, 0, 0]);
     expect(buf.ok, isFalse);
+    expect(buf.minutes(1000), isEmpty);
     expect(huamiFetchDone([0x10, 0x02, 0x01]), isTrue);
   });
 

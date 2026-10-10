@@ -145,8 +145,12 @@ class HuamiActivityBuffer {
   }
 
   /// The minutes in this transfer, starting at [startSec]. A partial
-  /// trailing sample is ignored.
+  /// trailing sample is ignored. Empty after a counter gap ([ok] false): the
+  /// bytes past it would land on the wrong minutes. A transfer cut short is
+  /// still its contiguous prefix, so a caller resumes after the last minute
+  /// it got, not after the count the header announced.
   List<HuamiMinute> minutes(int startSec, {int previousKind = 1}) {
+    if (!ok) return const [];
     final out = <HuamiMinute>[];
     var kind = previousKind;
     for (var i = 0; i + 4 <= bytes.length; i += 4) {
