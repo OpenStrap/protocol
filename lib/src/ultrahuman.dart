@@ -8,11 +8,13 @@
 // this ships EXPERIMENTAL is not a missing credential — it is that nobody has
 // checked a single one of these decoders against a real capture. Every field
 // below is TYPED BYTE-READING off a documented offset, not a claim that the
-// number it produces means what its name says: HRV, activity level and stress
-// carry no documented scale or algorithm, and the two trailing response bytes
-// are opaque (a plausible checksum, unverified). A decoder that is confidently
-// wrong is worse than one that is silent, so nothing here is exported into an
-// edge adapter's declared signals — see the adapter for that half.
+// number it produces means what its name says: the two HRV bytes and activity
+// carry no documented algorithm, and the two trailing response bytes are
+// opaque (a plausible checksum, unverified). A decoder that is confidently
+// wrong is worse than one that is silent, so only the per-record HR is
+// surfaced (as sparse `hrSparse` samples, outside derivation via
+// `kDerivableSources`); HRV, SpO2 and skin temperature travel only as
+// vendor-attributed observations. See the adapter for that half.
 //
 // THE TWO OTHER PROVEN FACTS. There is no envelope: a request is just
 // `[opcode, ...body]` with no length byte and no CRC, and a response is
@@ -23,16 +25,20 @@
 
 import 'dart:typed_data';
 
-/// Request opcodes. Only the ones this file builds a request for — see the
-/// module doc for why the destructive ones (reset, airplane mode, power
-/// saving) have no builder here and never will.
+/// Request opcodes. Only the ones this file builds a request for. The
+/// destructive ones have no builder here and never will: 0x0d, 0x17 (device
+/// reset / shipping mode), 0x18, 0x19, 0x60, 0x61, 0x70 (airplane mode),
+/// 0x98 (software reset), 0x99, 0xbf, 0xd1-0xd4 (power saving), 0xf0, 0xfb
+/// and 0xfc.
 const int kUltrahumanOpSetTime = 0x02;
 const int kUltrahumanOpGetRecordings = 0x04;
 const int kUltrahumanOpGetTime = 0x05;
 const int kUltrahumanOpGetEarliestIndex = 0x07;
 const int kUltrahumanOpGetLatestIndex = 0x08;
 
-/// Response result byte.
+/// Response result byte. Anything other than ok or empty (busy, invalid
+/// command, no time set, a measurement already running, ...) is a failure;
+/// [kUltrahumanResultFail] is only the most common one.
 const int kUltrahumanResultOk = 0x00;
 const int kUltrahumanResultEmpty = 0xee;
 const int kUltrahumanResultFail = 0xff;
@@ -68,8 +74,9 @@ List<int> ultrahumanCmdSetTime(int unixSeconds) =>
 List<int> ultrahumanCmdGetTime() => const <int>[kUltrahumanOpGetTime];
 
 /// Fetch recordings starting at [startIndex], the ring's own record counter —
-/// NOT a byte offset and not a timestamp. One request can answer with several
-/// notifications, each carrying 0–7 records.
+/// NOT a byte offset and not a timestamp. One request streams the history
+/// from there as several notifications; how many records fit in one depends
+/// on the negotiated MTU (7 at 247), so a short frame is not the last one.
 List<int> ultrahumanCmdGetRecordings(int startIndex) =>
     <int>[kUltrahumanOpGetRecordings, ..._u16le(startIndex)];
 
@@ -98,34 +105,26 @@ class UltrahumanResponse {
 
   bool get ok => result == kUltrahumanResultOk;
   bool get empty => result == kUltrahumanResultEmpty;
+
+  /// Neither ok nor empty: the command failed, whatever the code says.
+  bool get failed => !ok && !empty;
 }
 
 /// Parse one response notification. Null when it is too short to be one —
-/// `opcode + result + count + trailer` is 5 bytes, the floor with zero payload
-/// — or when a successful `0x04` reply's `count` byte claims a different
-/// number of records than its payload actually holds (e.g. count=1 against a
-/// 2-byte payload): a caller reading `count` records out of a payload that
-/// doesn't hold that many is exactly the "confidently wrong" failure this
-/// file exists to avoid, so the malformed frame is rejected outright rather
-/// than silently handed back short. Only checked on `kUltrahumanResultOk` —
-/// a fail/empty result's `count` byte is not documented to carry this
-/// meaning, and still needs to reach the caller so it can abort properly.
+/// `opcode + result + count + trailer` is 5 bytes, the floor with zero payload.
+///
+/// [UltrahumanResponse.count] is NOT checked against the payload length. The
+/// ring only promises that a `0x04` data frame has an ok result and a
+/// non-zero count; the records are however many whole 32-byte records fit
+/// between offset 3 and the trailer ([parseUltrahumanRecords] takes the floor).
 UltrahumanResponse? parseUltrahumanResponse(List<int> value) {
   if (value.length < 5) return null;
   final payloadLen = value.length - 5;
   final bytes = Uint8List.fromList(value);
-  final opcode = bytes[0];
-  final result = bytes[1];
-  final count = bytes[2];
-  if (opcode == kUltrahumanOpGetRecordings &&
-      result == kUltrahumanResultOk &&
-      payloadLen != count * kUltrahumanRecordLen) {
-    return null;
-  }
   return UltrahumanResponse(
-    opcode,
-    result,
-    count,
+    bytes[0],
+    bytes[1],
+    bytes[2],
     Uint8List.sublistView(bytes, 3, 3 + payloadLen),
     Uint8List.sublistView(bytes, 3 + payloadLen),
   );
@@ -133,55 +132,94 @@ UltrahumanResponse? parseUltrahumanResponse(List<int> value) {
 
 /// One fixed 32-byte recording, decoded structurally.
 ///
-/// THE DOCUMENTED FIELD TABLE ONLY ACCOUNTS FOR 30 OF THE 32 BYTES — offsets
-/// 0-29 below, against a record the spec states is 32 bytes long. Bytes 30-31
-/// are read by nobody here: there is no documented field at that offset, and
-/// a made-up one is exactly the failure this file exists to avoid. An adapter
-/// archives the whole 32 bytes verbatim, so nothing is lost, only undecoded.
+/// LAYOUT (all little-endian): `0` u32 tsA (Unix s, PPG) · `4` hr · `5` HRV
+/// (RMSSD) · `6` spo2 · `7` HR quality / ring state · `8` u32 tsB
+/// (temperature) · `12` f32 skin (object) temp degC · `16` f32 ambient temp
+/// degC · `20` u32 tsC (motion) · `24` u16 activity · `26` u16 steps · `28`
+/// HRV (SDNN) · `29` temperature quality · `30` u16 the record's own index.
+/// There is no stress field. An adapter archives all 32 bytes verbatim.
 ///
-/// EVERY FIELD IS A TYPED READ, NOT A CALIBRATED MEASUREMENT. [hr], [spo2]
-/// report 0 for "unmeasured" exactly as the ring's own wire does — this is
-/// transcribed, not reinterpreted into null, so a caller checks the same
-/// sentinel the device uses. [hrv], [activityLevel] and [stress] have no
-/// documented scale or algorithm at all; they are archived by an adapter, not
-/// derived from. The three timestamps are independent fields on the wire and
+/// [hr] and [spo2] report 0 for "unmeasured" exactly as the ring's own wire
+/// does — transcribed, not reinterpreted into null. [hrv], [hrvSdnn] and
+/// [activity] are the ring's own numbers with no published algorithm:
+/// vendor values, never an input to our analytics. The three timestamps are independent fields on the wire and
 /// are kept independent here — they are known to diverge in workout mode, and
 /// collapsing them to one would be a claim nobody has checked.
 class UltrahumanRecord {
   final int tsA;
   final int hr;
+
+  /// RMSSD, ms.
   final int hrv;
   final int spo2;
-  final int measurementType;
+
+  /// Whether this record's optical readings are usable, and what the ring was
+  /// doing — see [ultrahumanHrQualityValid].
+  final int hrQuality;
   final int tsB;
-  final double maxSkinTempC;
-  final double minSkinTempC;
+
+  /// The skin-facing (object) sensor. NaN when the ring had no reading.
+  final double skinTempC;
+
+  /// The ambient sensor — not skin temperature.
+  final double ambientTempC;
   final int tsC;
-  final int activityLevel;
+  final int activity;
   final int steps;
-  final int stress;
+
+  /// SDNN, ms. Raw byte, no rescaling.
+  final int hrvSdnn;
+
+  /// Quality of [skinTempC] and [ambientTempC]; 0 means "do not use".
+  final int tempQuality;
+
+  /// The ring's own record index — the same u16 counter `0x04` fetches by.
+  final int index;
 
   const UltrahumanRecord({
     required this.tsA,
     required this.hr,
     required this.hrv,
     required this.spo2,
-    required this.measurementType,
+    required this.hrQuality,
     required this.tsB,
-    required this.maxSkinTempC,
-    required this.minSkinTempC,
+    required this.skinTempC,
+    required this.ambientTempC,
     required this.tsC,
-    required this.activityLevel,
+    required this.activity,
     required this.steps,
-    required this.stress,
+    required this.hrvSdnn,
+    required this.tempQuality,
+    required this.index,
   });
 }
 
-/// Measurement-type byte values documented for [UltrahumanRecord.measurementType].
-const int kUltrahumanMeasureNormal = 1;
-const int kUltrahumanMeasureExercise = 5;
-const int kUltrahumanMeasureBreathing = 6;
-const int kUltrahumanMeasureNotOnFinger = 100;
+/// [UltrahumanRecord.hrQuality] values. Only the ones a reader is likely to
+/// look for; every value the ring sends is still archived verbatim.
+const int kUltrahumanHrQualityContact = 0;
+const int kUltrahumanHrQualityLegacy = 1;
+const int kUltrahumanHrQualityLiveHr = 2;
+const int kUltrahumanHrQualityCdtHr = 5;
+const int kUltrahumanHrQualityCdtBreathing = 6;
+const int kUltrahumanHrQualityStealth = 7;
+const int kUltrahumanHrQualityLowConfidence = 9;
+const int kUltrahumanHrQualityNoContact = 10;
+const int kUltrahumanHrQualityPassiveSleep = 11;
+const int kUltrahumanHrQualityCharging = 100;
+const int kUltrahumanHrQualityChargingNoContact = 110;
+
+/// True when a record with this [UltrahumanRecord.hrQuality] carries usable
+/// HR/HRV/SpO2. Everything else (no contact, charging, live-HR placeholder,
+/// sensor errors) is not a reading.
+bool ultrahumanHrQualityValid(int q) => const {
+      kUltrahumanHrQualityContact,
+      kUltrahumanHrQualityLegacy,
+      kUltrahumanHrQualityCdtHr,
+      kUltrahumanHrQualityCdtBreathing,
+      kUltrahumanHrQualityStealth,
+      kUltrahumanHrQualityLowConfidence,
+      kUltrahumanHrQualityPassiveSleep,
+    }.contains(q);
 
 /// Decode the record at [offset] in [bytes], or null when
 /// `offset + 32 > bytes.length` — a truncated record, never guessed at.
@@ -194,14 +232,16 @@ UltrahumanRecord? parseUltrahumanRecord(List<int> bytes, int offset) {
     hr: d.getUint8(4),
     hrv: d.getUint8(5),
     spo2: d.getUint8(6),
-    measurementType: d.getUint8(7),
+    hrQuality: d.getUint8(7),
     tsB: d.getUint32(8, Endian.little),
-    maxSkinTempC: d.getFloat32(12, Endian.little),
-    minSkinTempC: d.getFloat32(16, Endian.little),
+    skinTempC: d.getFloat32(12, Endian.little),
+    ambientTempC: d.getFloat32(16, Endian.little),
     tsC: d.getUint32(20, Endian.little),
-    activityLevel: d.getUint16(24, Endian.little),
+    activity: d.getUint16(24, Endian.little),
     steps: d.getUint16(26, Endian.little),
-    stress: d.getUint16(28, Endian.little),
+    hrvSdnn: d.getUint8(28),
+    tempQuality: d.getUint8(29),
+    index: d.getUint16(30, Endian.little),
   );
 }
 

@@ -10,9 +10,12 @@
 // THREE LAYERS, each with its own framing:
 //
 //  1. Multi-Link (ML/MLR) multiplexes several logical services over one
-//     characteristic pair. The routing byte's bit 7 marks a watch-to-host MLR
-//     data frame with the handle in bits 6:4; the host addresses a handle
-//     with a bare byte. Handles are assigned per session by
+//     characteristic pair. On a handle registered non-reliable (flags 0, the
+//     only kind this code asks for) both directions address it with a bare
+//     routing byte. A routing byte with bit 7 set (handle in bits 6:4) is an
+//     MLR frame, sent only on a handle registered reliable (flags 2); its
+//     bytes after byte 0 carry the reliable layer's own header, not COBS, so
+//     they are never decoded here. Handles are assigned per session by
 //     CLOSE_ALL_REQ (evict whatever a previous session left registered) then
 //     REGISTER_ML_REQ per service code (GFDI = 1).
 //  2. COBS wraps the GFDI byte stream inside one ML handle — the public,
@@ -29,9 +32,10 @@
 // RESPONSE (5043/5044, wrapping a small hand-rolled protobuf reader — just
 // enough fields to ask for and read `DeviceStatusService`'s battery status),
 // CURRENT_TIME_REQUEST (5052, the watch asking for wall-clock time) and
-// RESPONSE/STATUS (5000, both the plain ack every inbound GFDI message gets
-// and the fuller time-answer shape). SYSTEM_EVENT (5030) is parsed for
-// logging only.
+// RESPONSE/STATUS (5000: every inbound message gets exactly one, a plain
+// ack or the fuller shape its type calls for, echoing a compact-form
+// request's transaction id). SYSTEM_EVENT (5030) is parsed for logging, and
+// sent once as HANDSHAKE_COMPLETE.
 //
 // CUT ON PURPOSE: chunked protobuf reassembly (`data_offset > 0` is logged
 // and abstained on, never guessed at), every OTHER numbered sub-service in
@@ -49,6 +53,10 @@ import 'dart:typed_data';
 /// Service codes this file registers a handle for. Real watches expose many
 /// more (six numbered real-time streams among them) — untouched this pass.
 const int kGarminServiceGfdi = 1;
+
+/// The REGISTRATION service, whose handle answers which multi-link services a
+/// watch supports. Deliberately skipped: this code registers GFDI directly
+/// and handles the ALREADY_IN_USE redirect on that answer instead.
 const int kGarminServiceRegistration = 4;
 
 /// This host's client identifier on the control channel. Any value the watch
@@ -57,8 +65,6 @@ const int kGarminServiceRegistration = 4;
 const int _kGarminClientId = 2;
 
 const int _kMlrFlag = 0x80;
-const int _kMlrHandleMask = 0x70;
-const int _kMlrHandleShift = 4;
 
 /// Widest handle a bare routing byte can address without setting the MLR
 /// flag and being read back as a different handle.
@@ -66,12 +72,17 @@ const int kGarminMaxHandle = 0x7f;
 
 const int _kReqRegisterMl = 0x00;
 const int _kRespRegisterMl = 0x01;
+const int _kHandleClosed = 0x03;
+const int _kInvalidHandle = 0x04;
 const int _kReqCloseAll = 0x05;
 const int _kRespCloseAll = 0x06;
 
+/// REGISTER_ML_RESP statuses with a meaning beyond "refused".
+const int kGarminRegisterPendingAuth = 2;
+const int kGarminRegisterAlreadyInUse = 3;
+
 /// Frame one ML control or data payload for the host-to-watch direction. The
-/// host always addresses a handle with a bare byte — only the watch sets the
-/// MLR flag on what it sends back.
+/// host always addresses a handle with a bare byte.
 Uint8List garminEncodeTx(int handle, List<int> payload) {
   if (handle < 0 || handle > kGarminMaxHandle) {
     throw ArgumentError.value(handle, 'handle', 'must be 0-$kGarminMaxHandle');
@@ -99,59 +110,89 @@ class GarminCloseAllAck extends GarminMlrPacket {
 
 /// REGISTER_ML_RESP: the watch's answer to one handle request. `status == 0`
 /// is acceptance; anything else is a refusal and [handle] is meaningless.
+/// [kGarminRegisterPendingAuth] means the watch is still deciding, and
+/// [kGarminRegisterAlreadyInUse] names, in [alternateChar], the 16-bit part
+/// (`6A4Exxxx`) of another multi-link characteristic to register on instead.
 class GarminRegisterMlResponse extends GarminMlrPacket {
   final int service;
   final int status;
   final int handle;
-  const GarminRegisterMlResponse(this.service, this.status, this.handle);
+  final int? alternateChar;
+  const GarminRegisterMlResponse(this.service, this.status, this.handle,
+      {this.alternateChar});
   bool get accepted => status == 0;
 }
 
+/// HANDLE_CLOSED (type 3) or INVALID_HANDLE (type 4): [handle] is gone and
+/// nothing more will arrive on it.
+class GarminHandleClosed extends GarminMlrPacket {
+  final int handle;
+  const GarminHandleClosed(this.handle);
+}
+
 /// A control-channel frame this file has no specific decode for (an
-/// unregistered request type, or a CLOSE_HANDLE reply this pass never
-/// sends). Named so a caller can tell "recognised but uninteresting" apart
+/// unregistered request type, or an answer addressed to another client id).
+/// Named so a caller can tell "recognised but uninteresting" apart
 /// from [garminDecodeMlr] answering null for genuinely malformed input.
 class GarminMlrControlOther extends GarminMlrPacket {
   final int type;
   const GarminMlrControlOther(this.type);
 }
 
-/// Route one raw notification. Null only for input too short to be anything
-/// — everything else lands in one of the [GarminMlrPacket] arms above.
+/// Route one raw notification. Null for input too short to be anything, a
+/// control frame under 13 bytes, and an MLR (bit 7) frame, whose bytes this
+/// file does not decode — everything else lands in one of the
+/// [GarminMlrPacket] arms above.
 GarminMlrPacket? garminDecodeMlr(List<int> data) {
   if (data.isEmpty) return null;
-  if ((data[0] & _kMlrFlag) != 0) {
-    final handle = (data[0] & _kMlrHandleMask) >> _kMlrHandleShift;
-    return GarminMlrData(handle, Uint8List.fromList(data.sublist(1)));
-  }
-  // Byte 0 clear and non-zero is the watch addressing a handle with a bare
-  // byte (how it answers a handle registered non-reliable, and the only form
-  // for handles above the 3-bit flagged range).
+  // Only on a handle registered reliable, which this code never asks for.
+  if ((data[0] & _kMlrFlag) != 0) return null;
+  // Byte 0 non-zero is the watch addressing a handle with a bare byte, which
+  // is how it sends on a handle registered non-reliable.
   if (data[0] != 0) {
     if (data.length < 2) return null;
     return GarminMlrData(data[0], Uint8List.fromList(data.sublist(1)));
   }
-  if (data.length < 2) return null;
+  // Every control frame is `0 | type | client id i64 | ...`, 13 bytes at
+  // least.
+  if (data.length < 13) return null;
   final type = data[1];
+  // INVALID_HANDLE names no client: it applies whoever registered the handle.
+  if (type == _kInvalidHandle) return GarminHandleClosed(data[12]);
+  final v = ByteData.sublistView(Uint8List.fromList(data));
+  if (v.getInt64(2, Endian.little) != _kGarminClientId) {
+    return GarminMlrControlOther(type); // another client's answer
+  }
   if (type == _kRespCloseAll) return const GarminCloseAllAck();
   if (type == _kRespRegisterMl) {
-    if (data.length < 14) return null;
-    final service = ByteData.sublistView(Uint8List.fromList(data), 10, 12)
-        .getInt16(0, Endian.little);
-    return GarminRegisterMlResponse(service, data[12], data[13]);
+    final service = v.getInt16(10, Endian.little);
+    final status = data[12];
+    if (status == 0) {
+      if (data.length < 14) return null;
+      return GarminRegisterMlResponse(service, status, data[13]);
+    }
+    if (status == kGarminRegisterAlreadyInUse) {
+      if (data.length < 15) return null;
+      return GarminRegisterMlResponse(service, status, 0,
+          alternateChar: v.getUint16(13, Endian.little));
+    }
+    return GarminRegisterMlResponse(service, status, 0);
+  }
+  if (type == _kHandleClosed && data.length >= 14) {
+    return GarminHandleClosed(data[12]);
   }
   return GarminMlrControlOther(type);
 }
 
-/// CLOSE_ALL_REQ payload: type(u8) + client id(i64) + reserved(u16=0) +
-/// reserved(u8=0). Client id sits right after the type, as in
-/// REGISTER_ML_REQ. Wipes any handle a previous session left registered.
+/// CLOSE_ALL_REQ payload: type(u8) + client id(i64) + reserved(u16=0), 12
+/// bytes on the wire with the control handle byte. Client id sits right
+/// after the type, as in REGISTER_ML_REQ. Wipes any handle a previous
+/// session left registered.
 Uint8List garminCloseAllRequest() {
-  final b = ByteData(12)
+  final b = ByteData(11)
     ..setUint8(0, _kReqCloseAll)
     ..setInt64(1, _kGarminClientId, Endian.little)
-    ..setUint16(9, 0, Endian.little)
-    ..setUint8(11, 0);
+    ..setUint16(9, 0, Endian.little);
   return b.buffer.asUint8List();
 }
 
@@ -252,6 +293,11 @@ class GarminCobsReassembler {
         }
         _buf.removeRange(0, lead);
       }
+      // A run of delimiters: the frame starts at the last one, so a stray
+      // 0x00 never pairs with the next frame's leading delimiter.
+      while (_buf.length > 1 && _buf[1] == 0x00) {
+        _buf.removeAt(0);
+      }
       final end = _buf.indexOf(0x00, 1);
       if (end < 0) break; // frame not complete yet
       final candidate = _buf.sublist(0, end + 1);
@@ -298,8 +344,31 @@ const int kGarminMsgProtobufRequest = 5043;
 const int kGarminMsgProtobufResponse = 5044;
 const int kGarminMsgCurrentTimeRequest = 5052;
 
+/// A GFDI message type with the compact form expanded: a type with bit 15
+/// set means `(type & 0xff) + 5000`.
+int garminMessageType(int type) =>
+    type & 0x8000 != 0 ? (type & 0xff) + 5000 : type;
+
+/// The transaction id a compact-form type carries (bits 12:8), or null for a
+/// plain u16 type.
+int? garminTransactionId(int type) =>
+    type & 0x8000 != 0 ? (type >> 8) & 0x1f : null;
+
+/// The type field of a RESPONSE answering a request whose raw type was
+/// [requestType]: compact with the same transaction id when the request had
+/// one, so the watch can match the answer, else a plain 5000.
+int garminResponseType(int requestType) {
+  final txn = garminTransactionId(requestType);
+  return txn == null ? kGarminMsgResponse : 0x8000 | (txn << 8);
+}
+
+/// RESPONSE statuses.
+const int kGarminStatusAck = 0;
+const int kGarminStatusUnknown = 2;
+
 /// One decoded GFDI frame: its message type and the payload after the
-/// 4-byte header, with the CRC already verified.
+/// 4-byte header, with the CRC already verified. [type] is the raw field;
+/// [garminMessageType] expands it.
 class GarminGfdiFrame {
   final int type;
   final Uint8List payload;
@@ -334,15 +403,29 @@ GarminGfdiFrame? garminParseGfdiFrame(List<int> frame) {
   return GarminGfdiFrame(type, bytes.sublist(4, size - 2));
 }
 
-/// Build the plain ack every inbound GFDI message (other than a RESPONSE
-/// itself) is documented to need: `ref_msg_type:u16 | status:i8(0)`, wrapped
-/// as a RESPONSE (5000) frame.
-Uint8List garminBuildStatusAck(int refMsgType) {
+/// Build the plain answer an inbound GFDI message with no richer reply gets:
+/// `ref_msg_type:u16 | status:i8 | extra`, wrapped as a RESPONSE frame of
+/// [responseType] (see [garminResponseType]). [status] is
+/// [kGarminStatusAck], or [kGarminStatusUnknown] for a message this code
+/// does not handle.
+Uint8List garminBuildStatusAck(int refMsgType,
+    {int status = kGarminStatusAck,
+    int responseType = kGarminMsgResponse,
+    List<int> extra = const []}) {
   final b = ByteData(3)
     ..setUint16(0, refMsgType, Endian.little)
-    ..setInt8(2, 0);
-  return garminBuildGfdiFrame(kGarminMsgResponse, b.buffer.asUint8List());
+    ..setInt8(2, status);
+  return garminBuildGfdiFrame(
+      responseType, [...b.buffer.asUint8List(), ...extra]);
 }
+
+/// Build SYSTEM_EVENT (5030) `[event_type, value]`.
+Uint8List garminBuildSystemEvent(int type, [int value = 0]) =>
+    garminBuildGfdiFrame(kGarminMsgSystemEvent, [type, value]);
+
+/// SYSTEM_EVENT type the host sends once it has answered the watch's
+/// configuration.
+const int kGarminEventHandshakeComplete = 8;
 
 /// One decoded RESPONSE (5000) frame: which message it answers, and whether
 /// that was accepted (`status == 0`).
@@ -354,21 +437,24 @@ class GarminStatusAck {
 }
 
 GarminStatusAck? garminParseStatusAck(GarminGfdiFrame f) {
-  if (f.type != kGarminMsgResponse || f.payload.length < 3) return null;
+  if (garminMessageType(f.type) != kGarminMsgResponse ||
+      f.payload.length < 3) {
+    return null;
+  }
   final view = ByteData.sublistView(f.payload);
   return GarminStatusAck(
       view.getUint16(0, Endian.little), view.getInt8(2));
 }
 
-/// Seconds between the Unix epoch and Garmin's own epoch (1990-01-01
-/// 00:00:00 UTC), which every Garmin timestamp field on this wire is counted
-/// from.
+/// Seconds between the Unix epoch and Garmin's own epoch
+/// (1989-12-31T00:00:00Z), which every Garmin timestamp field on this wire is
+/// counted from.
 const int kGarminEpochOffset = 631065600;
 
-/// Build the full answer to a CURRENT_TIME_REQUEST (5052) [request]: a
-/// RESPONSE (5000) frame shaped as `ref_msg_type:u16(5052) | status:i8(0) |
+/// Build the full answer to a CURRENT_TIME_REQUEST (5052) [request]: the one
+/// RESPONSE it gets, shaped as `ref_msg_type:u16(5052) | status:i8(0) |
 /// reference_id:u32 | garmin_timestamp:u32 | utc_offset_sec:i32 |
-/// dst_end:i32(0) | dst_start:i32(0)`. `reference_id` echoes the request's
+/// dst_start:u32(0) | dst_end:u32(0)`. `reference_id` echoes the request's
 /// own payload u32 so the watch can match the answer to what it asked. Null
 /// when [request] is not a 5052 frame carrying that id. DST transitions are
 /// left at 0 — this pass states the current UTC offset and nothing about a
@@ -378,7 +464,7 @@ Uint8List? garminBuildTimeResponse(
   required int nowUnixSeconds,
   required int utcOffsetSeconds,
 }) {
-  if (request.type != kGarminMsgCurrentTimeRequest ||
+  if (garminMessageType(request.type) != kGarminMsgCurrentTimeRequest ||
       request.payload.length < 4) {
     return null;
   }
@@ -392,7 +478,8 @@ Uint8List? garminBuildTimeResponse(
     ..setInt32(11, utcOffsetSeconds, Endian.little)
     ..setInt32(15, 0, Endian.little)
     ..setInt32(19, 0, Endian.little);
-  return garminBuildGfdiFrame(kGarminMsgResponse, b.buffer.asUint8List());
+  return garminBuildGfdiFrame(
+      garminResponseType(request.type), b.buffer.asUint8List());
 }
 
 /// The watch's self-description (5024): a fixed 12-byte header, then three
@@ -435,7 +522,8 @@ class GarminDeviceInformation {
 }
 
 GarminDeviceInformation? garminParseDeviceInformation(GarminGfdiFrame f) {
-  if (f.type != kGarminMsgDeviceInformation || f.payload.length < 12) {
+  if (garminMessageType(f.type) != kGarminMsgDeviceInformation ||
+      f.payload.length < 12) {
     return null;
   }
   final view = ByteData.sublistView(f.payload);
@@ -463,7 +551,10 @@ GarminDeviceInformation? garminParseDeviceInformation(GarminGfdiFrame f) {
 /// `(event_type, value)` out of a SYSTEM_EVENT (5030) frame — logged only,
 /// never acted on this pass.
 (int, int)? garminParseSystemEvent(GarminGfdiFrame f) {
-  if (f.type != kGarminMsgSystemEvent || f.payload.isEmpty) return null;
+  if (garminMessageType(f.type) != kGarminMsgSystemEvent ||
+      f.payload.isEmpty) {
+    return null;
+  }
   return (f.payload[0], f.payload.length > 1 ? f.payload[1] : 0);
 }
 
@@ -509,10 +600,26 @@ Uint8List garminBuildProtobufRequest({
       <int>[...head.buffer.asUint8List(), ...protoBytes]);
 }
 
+/// The one RESPONSE an inbound PROTOBUF_REQUEST/RESPONSE [f] gets:
+/// `ref | status 0 | request_id:u16 | data_offset:u32 | chunk_status:u8
+/// (0 ok, 1 error) | status_code:u8 (0 no error)`.
+Uint8List garminBuildProtobufAck(GarminGfdiFrame f, GarminProtobufFrame pf,
+    {bool ok = true}) {
+  final b = ByteData(8)
+    ..setUint16(0, pf.requestId, Endian.little)
+    ..setUint32(2, pf.dataOffset, Endian.little)
+    ..setUint8(6, ok ? 0 : 1)
+    ..setUint8(7, 0);
+  return garminBuildStatusAck(garminMessageType(f.type),
+      responseType: garminResponseType(f.type),
+      extra: b.buffer.asUint8List());
+}
+
 /// Parse the protobuf envelope out of a PROTOBUF_REQUEST/RESPONSE frame.
 GarminProtobufFrame? garminParseProtobufFrame(GarminGfdiFrame f) {
-  if ((f.type != kGarminMsgProtobufRequest &&
-          f.type != kGarminMsgProtobufResponse) ||
+  final type = garminMessageType(f.type);
+  if ((type != kGarminMsgProtobufRequest &&
+          type != kGarminMsgProtobufResponse) ||
       f.payload.length < 14) {
     return null;
   }
@@ -523,7 +630,7 @@ GarminProtobufFrame? garminParseProtobufFrame(GarminGfdiFrame f) {
   final protoLen = view.getInt32(10, Endian.little);
   if (protoLen < 0 || 14 + protoLen > f.payload.length) return null;
   return GarminProtobufFrame(
-    messageType: f.type,
+    messageType: type,
     requestId: requestId,
     dataOffset: dataOffset,
     totalLength: totalLength,
@@ -539,8 +646,9 @@ GarminProtobufFrame? garminParseProtobufFrame(GarminGfdiFrame f) {
 // `Smart.device_status_service` (field 8) ->
 // `DeviceStatusService.remote_device_battery_status_request` (field 2, sent
 // empty) / `...response` (field 3, read back) ->
-// `RemoteDeviceBatteryStatusResponse.status` (field 1, varint) /
-// `.current_battery_level` (field 2, varint, plain `int32` not zigzag).
+// `RemoteDeviceBatteryStatusResponse.status` (field 1, required enum
+// ResponseStatus: 0 UNKNOWN_RESPONSE_STATUS, 1 OK, 2 NO_REMOTE_DEVICE) /
+// `.current_battery_level` (field 2, optional `uint32` varint).
 
 void _writeVarint(BytesBuilder out, int value) {
   var v = value;
@@ -627,8 +735,9 @@ Iterable<_ProtoField> _protoFields(Uint8List data) sync* {
 Uint8List garminBatteryRequestProto() =>
     _protoLenDelim(8, _protoLenDelim(2, const <int>[]));
 
-/// One `RemoteDeviceBatteryStatusResponse`. `status` is null when the watch
-/// omitted the field — not the same as a healthy reading.
+/// One `RemoteDeviceBatteryStatusResponse`. `status` is the ResponseStatus
+/// enum (not the battery's charging state), null when the watch omitted the
+/// field — not the same as a healthy reading.
 class GarminBatteryStatus {
   final int? status;
   final int level;

@@ -1,6 +1,7 @@
 // Polar's PMD (measurement data) service, PPI stream only — plain functions,
 // no crypto, no key exchange. Any Polar optical sensor that exposes this GATT
-// service (armband, ring, chest strap).
+// service and offers PPI (armband, ring). H10/H9 chest straps are ECG-based
+// and refuse PPI start; they go through ble_hrs instead.
 //
 // NOTHING HERE HAS MET HARDWARE. Nobody on this project owns one and
 // `flutter_blue_plus` has no simulator path, so this is verified by the wire
@@ -24,6 +25,33 @@ const int kPolarPmdMeasTypePpi = 0x03;
 
 /// First byte of every control-point INDICATE reply.
 const int kPolarPmdControlPointResponseCode = 0xF0;
+
+/// First byte of the sensor's own unsolicited "these online streams have
+/// stopped" control-point indication, followed by one measurement-type byte
+/// per stopped stream.
+const int kPolarPmdOnlineMeasurementStopped = 0x01;
+
+/// First byte of the control point's READ value: the feature set, followed by
+/// one byte whose bit N is set when measurement type N is offered.
+const int kPolarPmdFeatureReadCode = 0x0F;
+
+/// Whether a control-point READ value says the sensor offers PPI: true or
+/// false from its feature bitmap, or null when the value is not a feature
+/// reply at all (too short, or not starting with [kPolarPmdFeatureReadCode]).
+/// A sensor with the PMD service and no PPI (an ECG chest strap) answers
+/// false here and refuses PPI start.
+bool? polarPmdSupportsPpi(List<int> value) {
+  if (value.length < 2 || value[0] != kPolarPmdFeatureReadCode) return null;
+  return (value[1] & (1 << kPolarPmdMeasTypePpi)) != 0;
+}
+
+/// Whether one control-point indication is the sensor ending the PPI stream
+/// by itself ([kPolarPmdOnlineMeasurementStopped] listing PPI among its
+/// types). False for every other indication, a START reply included.
+bool polarPmdPpiStopped(List<int> value) =>
+    value.isNotEmpty &&
+    value[0] == kPolarPmdOnlineMeasurementStopped &&
+    value.skip(1).any((t) => (t & 0x3F) == kPolarPmdMeasTypePpi);
 
 /// The bytes to write to the control point to start online PPI streaming.
 /// `(recording << 7) | measType` with `recording` clear (online streaming, not
@@ -78,18 +106,21 @@ class PolarPpiSample {
   /// The sensor's own error estimate for [ppiMs], in milliseconds.
   final int errorEstimateMs;
 
-  /// Flags byte, bit 0. Documented as marking a reading that should be
-  /// dropped from an HRV computation (a "blocker" sample), but — like
-  /// [skinContactBits] below — this comes from the same never-tested flags
-  /// byte, so which bit is blocker is NOT independently confirmed against
-  /// hardware.
+  /// Flags byte, bit 0: the sensor marks this interval invalid (motion
+  /// blocked the measurement). The interval is not a beat; the HR in the same
+  /// record carries no such mark.
   final bool blocker;
 
-  /// Flags byte, bits 1-2, verbatim. These are documented as carrying
-  /// skin-contact information, but which value means contact and which means
-  /// none is NOT independently confirmed against hardware — captured under
-  /// its own name rather than gated on.
+  /// Flags byte, bits 1-2, as `status | supported << 1`: bit 1 of the flags
+  /// is skin-contact status (1 = contact), bit 2 is skin-contact supported.
+  /// Same encoding as 0x2A37's contact bits, so 2 is "supported, no contact".
+  /// See [contact].
   final int skinContactBits;
+
+  /// The sensor's own contact claim, as `HrsSample.contact` reads 0x2A37:
+  /// null when it does not support the field, else true/false.
+  bool? get contact =>
+      (skinContactBits & 0x02) == 0 ? null : (skinContactBits & 0x01) == 1;
 
   const PolarPpiSample({
     required this.hr,
@@ -103,9 +134,10 @@ class PolarPpiSample {
 /// Parse one PMD data-characteristic notification as a PPI frame.
 ///
 /// Layout: byte 0 measurement type (low 6 bits); bytes 1-8 a u64 LE PMD
-/// timestamp (unused here — PPI carries no clock this decoder needs, see
-/// [PolarPpiSample]'s field list); byte 9 frame type; bytes 10+ one or more
-/// fixed 6-byte PPI records:
+/// timestamp in ns which, when non-zero, stamps the LAST record of the frame
+/// (earlier records sit one interval back each) — deliberately unused: the
+/// session anchors on arrival time instead; byte 9 frame type; bytes 10+
+/// one or more fixed 6-byte PPI records:
 /// `[hr][ppiMs u16 LE][errorEstimateMs u16 LE][flags]`.
 ///
 /// Returns null when the frame is too short, is not measurement type PPI, is

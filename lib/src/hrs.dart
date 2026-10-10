@@ -79,9 +79,12 @@ HrsSample? parseHeartRateMeasurement(List<int> value) {
       i += 2;
       // 1024 ticks = 1 s. Round to the nearest millisecond.
       final ms = (ticks * 1000 + 512) ~/ 1024;
-      // 250-3000 ms is 20-240 bpm. Outside that the value is not a beat
-      // interval, and a chest strap emits exactly this junk on a dropped beat.
-      if (ms >= 250 && ms <= 3000) rr.add(ms);
+      // Zero ticks is no interval at all. Every other value passes through
+      // unfiltered: the physiological bound lives in ONE place downstream
+      // (`plausibleRrOrNull` in edge's compute), which refuses a beat on every
+      // ingest path alike. A second, wider gate here only made the two
+      // disagree about which beats a strap sent.
+      if (ticks != 0) rr.add(ms);
     }
   }
   return HrsSample(hr: hr, rrMs: rr, contact: contact);
