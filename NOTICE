@@ -1,0 +1,9 @@
+OpenStrap protocol
+Copyright (c) 2026 OpenStrap
+
+This project was licensed under MIT up to commit 3ecf17e89ae2750ee0a64155266b41a9a3aa9091; later versions are AGPL-3.0.
+Copies of the code taken at or before that commit remain available under the MIT
+License that shipped with them. Everything after it is licensed under the GNU Affero
+General Public License version 3 (see LICENSE).
+
+The OpenStrap name and logo are not covered by the code licence. See TRADEMARKS.md.

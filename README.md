@@ -1,7 +1,7 @@
 # OpenStrap protocol
 
 [![test](https://github.com/OpenStrap/protocol/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/protocol/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![stars](https://img.shields.io/github/stars/OpenStrap/protocol?style=flat&color=e2825f)](https://github.com/OpenStrap/protocol/stargazers)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/dUXds5MWkd)
 [![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
@@ -171,10 +171,8 @@ an honest "not sure." If you're touching `records.dart`'s multi-version decode c
 check `FirmwareAwareR24Decoder` first — chances are your case fits the existing fallback
 shape rather than needing a new one.
 
-Cross-checking against other WHOOP reverse-engineering write-ups (e.g. the `noop`
-project, or bWanShiTong's `reverse-engineering-whoop-post`) for facts/techniques is
-fine; copying their code is not. These are external projects, not paths inside this
-repo — go find and clone them separately if you want to compare.
+The protocol documentation and decoders here are independently written for
+interoperability with devices you own. Don't copy third-party code into this repo.
 
 ## Contributing
 
@@ -195,6 +193,11 @@ life, a small tip genuinely helps:
 
 Nothing is gated behind paying, and nothing ever will be. Protocol findings and bug
 reports are worth more than money, though.
+
+## License
+
+AGPL-3.0. See [LICENSE](LICENSE). Contributions are licensed under the same terms. The
+OpenStrap name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
 
