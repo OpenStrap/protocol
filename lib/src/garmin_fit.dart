@@ -43,6 +43,24 @@ class FitMessage {
     final v = fields[field];
     return v is num ? v : null;
   }
+
+  // A field the profile types as an integer can still arrive declared as a
+  // float, and only the all-ones pattern counts as invalid there, so NaN and
+  // Inf get through. `.toInt()` on those throws UnsupportedError, which the
+  // caller does not catch, and the download queue would stall on that file.
+  // Such a sample is skipped instead.
+  int? int_(int field) {
+    final v = fields[field];
+    if (v is int) return v;
+    if (v is double && v.isFinite && v == v.truncateToDouble()) return v.toInt();
+    return null;
+  }
+
+  /// [num_] restricted to finite values, so NaN/Inf never reach a reading.
+  num? finite(int field) {
+    final v = num_(field);
+    return v != null && v.isFinite ? v : null;
+  }
 }
 
 class _Field {
@@ -238,8 +256,8 @@ List<(int, int)> fitMonitoringHr(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgMonitoring &&
             x.timestamp != null &&
-            (x.num_(27) ?? 0) > 0)
-          (x.timestamp!, x.num_(27)!.toInt()),
+            (x.int_(27) ?? 0) > 0)
+          (x.timestamp!, x.int_(27)!),
     ];
 
 /// Steps per local day: monitoring `cycles` (field 3) is a running count per
@@ -250,9 +268,9 @@ Map<DateTime, int> fitDailySteps(List<FitMessage> m) {
   final maxBy = <(DateTime, int), int>{};
   for (final x in m) {
     if (x.global != kFitMsgMonitoring || x.timestamp == null) continue;
-    final packed = x.num_(24)?.toInt();
-    final type = x.num_(5)?.toInt() ?? (packed == null ? null : packed & 0x1f);
-    final cycles = x.num_(3)?.toInt();
+    final packed = x.int_(24);
+    final type = x.int_(5) ?? (packed == null ? null : packed & 0x1f);
+    final cycles = x.int_(3);
     if (cycles == null || (type != 6 && type != 1)) continue;
     final t = DateTime.fromMillisecondsSinceEpoch(x.timestamp! * 1000);
     final key = (DateTime(t.year, t.month, t.day), type!);
@@ -273,7 +291,7 @@ List<(int, int, String)> fitSleepStages(List<FitMessage> m,
   final levels = [
     for (final x in m)
       if (x.global == kFitMsgSleepLevel && x.timestamp != null)
-        (x.timestamp!, x.num_(0)?.toInt() ?? -1),
+        (x.timestamp!, x.int_(0) ?? -1),
   ]..sort((a, b) => a.$1.compareTo(b.$1));
   final out = <(int, int, String)>[];
   for (var k = 0; k < levels.length; k++) {
@@ -297,8 +315,8 @@ List<(int, double)> fitHrvLastNight(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgHrvStatusSummary &&
             x.timestamp != null &&
-            x.num_(1) != null)
-          (x.timestamp!, x.num_(1)! / 128),
+            x.finite(1) != null)
+          (x.timestamp!, x.finite(1)! / 128),
     ];
 
 /// The watch's resting HR (field 1 current-day, else field 0).
@@ -306,8 +324,8 @@ List<(int, int)> fitRestingHr(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgMonitoringHrData &&
             x.timestamp != null &&
-            (x.num_(1) ?? x.num_(0)) != null)
-          (x.timestamp!, (x.num_(1) ?? x.num_(0))!.toInt()),
+            (x.int_(1) ?? x.int_(0)) != null)
+          (x.timestamp!, (x.int_(1) ?? x.int_(0))!),
     ];
 
 /// SpO2 readings in percent (field 0), positive only.
@@ -315,8 +333,8 @@ List<(int, int)> fitSpo2(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgSpo2Data &&
             x.timestamp != null &&
-            (x.num_(0) ?? 0) > 0)
-          (x.timestamp!, x.num_(0)!.toInt()),
+            (x.int_(0) ?? 0) > 0)
+          (x.timestamp!, x.int_(0)!),
     ];
 
 /// Respiration rate in breaths/min (field 0, stored /100), positive only.
@@ -324,15 +342,15 @@ List<(int, double)> fitRespiration(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgRespirationRate &&
             x.timestamp != null &&
-            (x.num_(0) ?? 0) > 0)
-          (x.timestamp!, x.num_(0)! / 100),
+            (x.finite(0) ?? 0) > 0)
+          (x.timestamp!, x.finite(0)! / 100),
     ];
 
 /// The watch's stress score 0-100 (field 0); negative values (no reading,
 /// activity) dropped. Its own time is field 1 when present.
 List<(int, int)> fitStress(List<FitMessage> m) => [
       for (final x in m)
-        if (x.global == kFitMsgStressLevel && (x.num_(0) ?? -1) >= 0)
-          if ((x.num_(1)?.toInt() ?? x.timestamp) case final t?)
-            (x.num_(1) != null ? t + kFitEpochOffset : t, x.num_(0)!.toInt()),
+        if (x.global == kFitMsgStressLevel && (x.int_(0) ?? -1) >= 0)
+          if ((x.int_(1) ?? x.timestamp) case final t?)
+            (x.int_(1) != null ? t + kFitEpochOffset : t, x.int_(0)!),
     ];

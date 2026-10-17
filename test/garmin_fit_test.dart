@@ -129,4 +129,29 @@ void main() {
       expect(() => parseFit(f), throwsFormatException);
     }
   });
+
+  test('a float NaN or Inf in an integer field skips the sample, never throws',
+      () {
+    const nan = [0x00, 0x00, 0xc0, 0x7f], inf = [0x00, 0x00, 0x80, 0x7f];
+    List<FitMessage> fit(int global, int field, List<int> bits) =>
+        parseFit((FitWriter()
+              ..define(0, global, [(253, 4, 0x86), (field, 4, 0x88)])
+              ..data(0, [...u32(fitTs(t0)), ...bits]))
+            .build());
+    for (final bits in [nan, inf]) {
+      expect(fitMonitoringHr(fit(kFitMsgMonitoring, 27, bits)), isEmpty);
+      expect(fitDailySteps(fit(kFitMsgMonitoring, 3, bits)), isEmpty);
+      expect(fitDailySteps(fit(kFitMsgMonitoring, 5, bits)), isEmpty);
+      expect(fitSleepStages(fit(kFitMsgSleepLevel, 0, bits)), isEmpty);
+      expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, bits)), isEmpty);
+      expect(fitSpo2(fit(kFitMsgSpo2Data, 0, bits)), isEmpty);
+      expect(fitRespiration(fit(kFitMsgRespirationRate, 0, bits)), isEmpty);
+      expect(fitHrvLastNight(fit(kFitMsgHrvStatusSummary, 1, bits)), isEmpty);
+      expect(fitStress(fit(kFitMsgStressLevel, 0, bits)), isEmpty);
+      expect(fitStress(fit(kFitMsgStressLevel, 1, bits)), isEmpty);
+    }
+    // A float that holds a whole number still reads (72.0 = 0x42900000).
+    expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, [0, 0, 0x90, 0x42])),
+        [(t0, 72)]);
+  });
 }
