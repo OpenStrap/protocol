@@ -143,11 +143,26 @@ List<int> colmiTemperatureRequest([int mode = 6]) =>
 /// complete reply (header included) once `len + 6` bytes have arrived, else
 /// null. A notification that does not start with 0xbc while nothing is
 /// pending is not a reply this decoder understands and is dropped.
+///
+/// A notification that starts a new reply (0xbc plus a known type) while one
+/// is still pending means the pending reply lost a notification. It is
+/// dropped and the new reply started instead: appending would fill the gap
+/// with the next reply's header and records (a nap reply read as the last
+/// night's stage/minute pairs) and lose the next reply entirely.
 class ColmiBigDataReassembler {
   List<int>? _pending;
   int _want = 0;
 
+  static bool _startsReply(List<int> chunk) =>
+      chunk.length >= kColmiBigHeaderLength &&
+      chunk[0] == kColmiCmdBigData &&
+      (chunk[1] == kColmiBigSleep ||
+          chunk[1] == kColmiBigNap ||
+          chunk[1] == kColmiBigSpo2 ||
+          chunk[1] == kColmiBigTemperature);
+
   List<int>? add(List<int> chunk) {
+    if (_pending != null && _startsReply(chunk)) _pending = null;
     if (_pending == null) {
       if (chunk.length < kColmiBigHeaderLength ||
           chunk[0] != kColmiCmdBigData) {
