@@ -206,7 +206,12 @@ void main() {
       expect(frames.length, 2);
       expect(frames.first.valid, isFalse,
           reason: 'the truncated frame must still count as a lost frame');
+      expect(frames.first.truncated, isTrue,
+          reason: 'the END that follows covers a record that never arrived, '
+              'so the caller has to be able to tell this apart from noise');
+      expect(re.truncations, 1);
       expect(frames.last.valid, isTrue);
+      expect(frames.last.truncated, isFalse);
       expect(frames.last.packetType, PacketType.metadata);
       expect(parseMetadata(frames.last.inner)!.token,
           [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57]);
@@ -222,6 +227,18 @@ void main() {
       final frames = re.feed(data.sublist(60));
       expect(frames.single.valid, isTrue);
       expect(re.resyncs, 0);
+      expect(re.truncations, 0);
+    });
+
+    test('a frame with a corrupt payload is not reported as truncated', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
+      data[20] ^= 0xFF;
+      final re = FrameReassembler();
+      final f = re.feed(data).single;
+      expect(f.valid, isFalse);
+      expect(f.truncated, isFalse);
+      expect(re.truncations, 0);
     });
   });
 

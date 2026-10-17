@@ -36,7 +36,19 @@ class Frame {
   /// whose revision byte is not rev-1 — surfacing it instead of mis-decoding.
   final bool frameRevOk;
 
-  Frame(this.inner, this.crc8Ok, this.crc32Ok, {this.frameRevOk = true});
+  /// Set only on a frame [FrameReassembler] gave up on because a lost
+  /// notification left it short (see [FrameReassembler.truncations]). Its
+  /// `inner` is just the bytes that did arrive, so [valid] is false.
+  ///
+  /// This is a lost record, not just a corrupt one: giving it up is what lets
+  /// the HISTORY_END queued behind it through, and that END covers the record
+  /// that never arrived. ACKing it trims that record from the band's flash
+  /// while it exists nowhere else, so the burst it belongs to must not be
+  /// trimmed.
+  final bool truncated;
+
+  Frame(this.inner, this.crc8Ok, this.crc32Ok,
+      {this.frameRevOk = true, this.truncated = false});
 
   /// Band-neutral alias for the header-integrity result.
   bool get headerCrcOk => crc8Ok;
@@ -121,6 +133,14 @@ class FrameReassembler {
   final List<int> _buf = [];
   final BandProfile profile;
   int _resyncs = 0;
+  int _truncations = 0;
+
+  /// Number of frames given up as truncated (each emitted with
+  /// [Frame.truncated]). A caller that saw this move during an offload burst
+  /// must not ACK that burst's HISTORY_END: before the give-up existed the END
+  /// stayed stuck behind the short frame and the burst was abandoned unACKed,
+  /// so the band offered it again.
+  int get truncations => _truncations;
 
   /// Number of times the reassembler skipped a byte because the envelope did
   /// not hold up (bad SOF, implausible length, or a length field whose crc8
@@ -183,13 +203,16 @@ class FrameReassembler {
         // watchdog aborts the burst. A complete frame passing both CRCs
         // inside the span means this one was truncated: give it up and
         // resume there. Emitted as a CRC failure so the loss is still
-        // counted. A payload that happened to contain a whole valid frame
+        // counted, and flagged truncated so a caller can refuse to trim the
+        // burst the END closes. A payload that happened to contain a whole valid frame
         // would need both an 8-bit and a 32-bit CRC to match by chance.
         final next = _completeFrameWithin(headerLen);
         if (next < 0) break; // wait for the rest of this frame
         out.add(Frame(
-            Uint8List.fromList(_buf.sublist(headerLen, next)), true, false));
+            Uint8List.fromList(_buf.sublist(headerLen, next)), true, false,
+            truncated: true));
         _resyncs++;
+        _truncations++;
         _buf.removeRange(0, next);
         continue;
       }
@@ -243,5 +266,6 @@ class FrameReassembler {
   void reset() {
     _buf.clear();
     _resyncs = 0;
+    _truncations = 0;
   }
 }
