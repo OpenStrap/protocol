@@ -60,8 +60,18 @@ class OuraFrame {
 /// length LONGER than the buffer is a truncated frame, and this returns null
 /// rather than handing back a short payload that every downstream length check
 /// would then treat as a real, complete record.
+///
+/// [kOuraEvtExtended] is framed as in [parseOuraFrames]: byte 1 is its CRC,
+/// not a length. Reading it as one dropped most extended events before they
+/// could be archived and sliced the rest to a CRC-dependent length.
 OuraFrame? parseOuraFrame(List<int> value) {
   if (value.length < 2) return null;
+  if (value[0] == kOuraEvtExtended) {
+    if (value.length < 4) return null;
+    final end = 4 + value[3];
+    if (value.length < end) return null;
+    return OuraFrame(value[0], Uint8List.fromList(value.sublist(1, end)));
+  }
   final len = value[1];
   if (value.length - 2 < len) return null;
   return OuraFrame(value[0], Uint8List.fromList(value.sublist(2, 2 + len)));
