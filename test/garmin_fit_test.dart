@@ -112,4 +112,21 @@ void main() {
     final bad = Uint8List.fromList(good)..[4] = good[4] - 2;
     expect(() => parseFit(bad), throwsFormatException);
   });
+
+  test('a timestamp that is not a single integer is a FormatException', () {
+    List<int> fit(int global, int field, int size, int base, List<int> bytes) =>
+        (FitWriter()
+              ..define(0, global, [(field, size, base)])
+              ..data(0, bytes))
+            .build();
+    // 253 declared as uint32[2], float32 NaN, and a string; 26 as uint16[2].
+    for (final f in [
+      fit(kFitMsgMonitoring, 253, 8, 0x86, [...u32(fitTs(t0)), ...u32(1)]),
+      fit(kFitMsgMonitoring, 253, 4, 0x88, [0x00, 0x00, 0xc0, 0x7f]),
+      fit(kFitMsgMonitoring, 253, 4, 7, 'abc\x00'.codeUnits),
+      fit(kFitMsgMonitoring, 26, 4, 0x84, [...u16(1), ...u16(2)]),
+    ]) {
+      expect(() => parseFit(f), throwsFormatException);
+    }
+  });
 }

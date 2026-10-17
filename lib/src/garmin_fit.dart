@@ -182,6 +182,16 @@ List<FitMessage> parseFit(List<int> bytes) {
   return out;
 }
 
+// A time field declared as an array, a string or a float decodes to a List,
+// String or double (NaN included). The caller only banks the file raw on a
+// FormatException, so any other error type here would stall the download
+// queue on this file for good.
+int? _timeField(Map<int, Object> fields, int num) {
+  final v = fields[num];
+  if (v == null || v is int) return v as int?;
+  throw FormatException('FIT: field $num is not an integer timestamp');
+}
+
 (FitMessage, int, int?) _data(ByteData d, int at, _Def def, int? lastTs) {
   final fields = <int, Object>{};
   var i = at;
@@ -210,12 +220,12 @@ List<FitMessage> parseFit(List<int> bytes) {
     i += f.size;
   }
   i += def.devBytes;
-  int? ts = (fields[253] as num?)?.toInt();
+  int? ts = _timeField(fields, 253);
   // timestamp_16 (monitoring field 26): low 16 bits relative to the last
   // full timestamp.
-  final ts16 = def.global == kFitMsgMonitoring ? fields[26] as num? : null;
+  final ts16 = def.global == kFitMsgMonitoring ? _timeField(fields, 26) : null;
   if (ts == null && ts16 != null && lastTs != null) {
-    ts = lastTs + ((ts16.toInt() - (lastTs & 0xffff)) & 0xffff);
+    ts = lastTs + ((ts16 - (lastTs & 0xffff)) & 0xffff);
   }
   final unix = (ts ?? lastTs) == null ? null : (ts ?? lastTs)! + kFitEpochOffset;
   return (FitMessage(def.global, fields, unix), i, ts);
