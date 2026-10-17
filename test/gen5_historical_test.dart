@@ -141,9 +141,6 @@ void main() {
       expect(sample.psnrBAvailable, isTrue);
       expect(sample.psnrAAvailable, isTrue);
       expect(sample.isOpticalAmpSentinel, isFalse); // not both-unavailable
-      // One compat assertion so the deprecated u16 view stays wired correctly.
-      // ignore: deprecated_member_use_from_same_package
-      expect(sample.opticalBaseline, 0x656F);
     });
 
     test('experimental fields exposed raw, not fabricated', () {
@@ -154,8 +151,6 @@ void main() {
       // frame-abs 82 is not SpO2 — zero in 99% of records and nonzero only
       // during band-declared sleep. This fixture is awake, so it reads 0.
       expect(sample.spo2CandidateRaw, 0);
-      // ignore: deprecated_member_use_from_same_package
-      expect(sample.spo2Candidate, isNull);
     });
 
     test('band sleep state: this fixture is awake', () {
@@ -205,8 +200,8 @@ void main() {
         final s = parseGen5Historical(inner) as Gen5HistorySample;
         expect(s.sleepStateRawNibble, (b >> 4) & 0x03);
         expect(s.sleepState, Gen5SleepState.values[(b >> 4) & 0x03]);
-        expect(s.onWristRaw, b & 0x03);
-        expect(s.wakeQualityRaw, (b >> 2) & 0x03);
+        expect(s.primaryFlagsBit8Raw, b & 0x03);
+        expect(s.strapFitStateRaw, (b >> 2) & 0x03);
       }
     });
   });

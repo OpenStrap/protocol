@@ -118,11 +118,6 @@ void main() {
       expect(s.psnrA, 0x1E);
       expect(s.psnrBAvailable, isTrue);
       expect(s.psnrAAvailable, isTrue);
-      // Compat: the deprecated u16 views reconstruct the old values exactly.
-      // ignore: deprecated_member_use_from_same_package
-      expect(s.opticalBaseline, 0x656F);
-      // ignore: deprecated_member_use_from_same_package
-      expect(s.opticalAmp, 0x1E1E);
     });
 
     test('0x80 is the per-detector -128 unavailable sentinel, not a value', () {
@@ -189,8 +184,8 @@ void main() {
       for (int b = 0; b <= 255; b++) {
         inner[73] = b;
         final s = parseGen5Historical(inner) as Gen5HistorySample;
-        expect(s.onWristRaw, b & 0x03);
-        expect(s.wakeQualityRaw, (b >> 2) & 0x03);
+        expect(s.primaryFlagsBit8Raw, b & 0x03);
+        expect(s.strapFitStateRaw, (b >> 2) & 0x03);
         expect(s.sleepStateRawNibble, (b >> 4) & 0x03);
         expect(s.bits67Raw, (b >> 6) & 0x03, reason: 'byte=$b');
       }

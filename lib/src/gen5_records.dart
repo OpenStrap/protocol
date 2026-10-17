@@ -96,9 +96,6 @@ class Gen5HistoricalHeader {
     required this.tsSubsec,
   });
 
-  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
-  int get layoutMarker => flags;
-
   /// Optical sample rate this record was captured at, in Hz — bit 7 of
   /// [flags].
   int get ppgSampleRateHz => (flags & 0x80) != 0 ? 25 : 50;
@@ -144,9 +141,6 @@ abstract class Gen5HistoricalRecord {
     required this.unix,
     required this.tsSubsec,
   });
-
-  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
-  int get layoutMarker => flags;
 
   /// Optical sample rate this record was captured at, in Hz — bit 7 of
   /// [flags] (set = 25 Hz, clear = 50 Hz).
@@ -407,15 +401,6 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   bool get psnrBAvailable => psnrB != -128;
   bool get psnrAAvailable => psnrA != -128;
 
-  /// COMPAT (deprecated): the old big-endian-u16 reads of these byte pairs.
-  /// Both conflated two independent fields; kept only so existing callers still
-  /// compile. `opticalBaseline` was `(pdMeanB<<8)|pdMeanA` and `opticalAmp` the
-  /// raw `(psnrB<<8)|psnrA` — the latter is the `0x8080` both-unavailable case.
-  @Deprecated('two independent u8 PD means, not a u16 — use pdMeanB/pdMeanA')
-  int get opticalBaseline => (pdMeanB << 8) | pdMeanA;
-  @Deprecated('two independent i8 pSNR values, not a u16 — use psnrB/psnrA')
-  int get opticalAmp => ((psnrB & 0xFF) << 8) | (psnrA & 0xFF);
-
   /// @ inner[105:109] f32 LE (frame-abs 113). A per-second signal-quality
   /// metric the band's own optical processing computes: the log-variance of
   /// the signal it measured this second. Range ~-5.3..0 on the reference
@@ -477,43 +462,20 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// heart-rate bytes, not a substitute HR — read [heartRate] for the value.
   int? get trustedHeartRateAlt => hrRrValidThisSecond ? heartRateAlt : null;
 
-  /// **Do not use.** The byte is zero in 99% of records and nonzero *only*
-  /// while [sleepState] is [Gen5SleepState.sleep], so this getter surfaces a
-  /// plausible-looking 95-99 on 0.6% of records and null on the rest — with no
-  /// validity signal to say which are real. See [spo2CandidateRaw].
-  @Deprecated(
-    'unsafe to surface: zero in 99% of records, nonzero only during '
-    'band-declared sleep, and with no validity flag. Read spo2CandidateRaw '
-    'if you need the byte.',
-  )
-  int? get spo2Candidate => (spo2CandidateRaw >= 70 && spo2CandidateRaw <= 100)
-      ? spo2CandidateRaw
-      : null;
-
   /// True when BOTH per-detector pSNR values read the -128 unavailable
-  /// sentinel — i.e. the old `opticalAmp == 0x8080` case, which was never a
-  /// real amplitude, just both detectors reporting unavailable at once.
+  /// sentinel — the `0x8080` that reading the pair as one big-endian u16 used
+  /// to report, which was never a real amplitude, just both detectors reporting unavailable at once.
   bool get isOpticalAmpSentinel => !psnrBAvailable && !psnrAAvailable;
 
-  /// bits 0-1 of [sleepStateByte] — the primary-flags bit-8 snapshot.
+  /// bits 0-1 of [sleepStateByte] — the primary-flags bit-8 snapshot. NOT a
+  /// wear indicator: nothing supports reading these bits as on-wrist. Wear
+  /// state comes from the HELLO body, the wrist on/off events, or the band
+  /// no longer emitting type-40 off-wrist.
   int get primaryFlagsBit8Raw => sleepStateByte & 0x03;
 
-  /// bits 2-3 of [sleepStateByte] — the passive strap-fit classifier state.
+  /// bits 2-3 of [sleepStateByte] — the passive strap-fit classifier state,
+  /// not a wake-quality score.
   int get strapFitStateRaw => (sleepStateByte >> 2) & 0x03;
-
-  /// **Deprecated: not a wear indicator.** Bits 0-1 are the primary-flags
-  /// bit-8 snapshot; nothing supports reading
-  /// them as on-wrist. Wear state comes from the HELLO body, the wrist
-  /// on/off events, or the fact that the band stops emitting type-40 off-wrist.
-  @Deprecated('bits 0-1 are the primary-flags bit-8 snapshot, not wear state — '
-      'use primaryFlagsBit8Raw (and do not treat it as on-wrist)')
-  int get onWristRaw => primaryFlagsBit8Raw;
-
-  /// **Deprecated: misnamed.** These bits are the passive strap-fit classifier
-  /// state, not a wake-quality score.
-  @Deprecated('bits 2-3 are the passive strap-fit classifier state — '
-      'use strapFitStateRaw')
-  int get wakeQualityRaw => strapFitStateRaw;
 
   /// bits 4-5 of [sleepStateByte], raw. Prefer [sleepState].
   int get sleepStateRawNibble => (sleepStateByte >> 4) & 0x03;
@@ -1290,7 +1252,7 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// record. Kept whole; [primaryFlagsBit8Raw] is the pinned two bits.
   ///
   /// NOTE the same caveat R18 carries: these bits are NOT a wear/on-wrist
-  /// reading — see [Gen5HistorySample.onWristRaw]'s deprecation.
+  /// reading — see [Gen5HistorySample.primaryFlagsBit8Raw].
   final int primaryFlagsByte;
 
   /// The low two bits of [primaryFlagsByte] — the part pinned to R18.
