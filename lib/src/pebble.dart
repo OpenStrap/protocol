@@ -100,11 +100,16 @@ class PebbleFrameReassembler {
   /// frame completes. Clearing on a gap instead would make a mid-frame
   /// payload the head of the buffer and misframe everything after it.
   ///
-  /// Returns null when the packet was dropped, so the caller does not ack it.
+  /// A repeat of the packet taken last returns an empty list, and the caller
+  /// must ack it again: the watch only re-sends a packet whose ack it never
+  /// saw, and without a fresh ack it keeps re-sending until its retry limit
+  /// resets the transport. Returns null only for a packet that is not the
+  /// next serial and not that repeat; the caller does not ack it.
   List<(int, Uint8List)>? addPacket(List<int> packet) {
     if (packet.isEmpty) return null;
     final serial = (packet[0] >> 3) & 0x1f;
     final last = _lastSerial;
+    if (last != null && serial == last) return const [];
     if (last != null && serial != (last + 1) & 0x1f) return null;
     _lastSerial = serial;
     return add(packet.sublist(1));

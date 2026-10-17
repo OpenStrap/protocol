@@ -46,9 +46,23 @@ void main() {
       final r = PebbleFrameReassembler();
       final ps = pebblePpogattPackets(b, 30);
       expect(r.addPacket(ps[0]), isEmpty);
-      expect(r.addPacket(ps[0]), isNull);
+      // Not null: the repeat still has to be acked.
+      expect(r.addPacket(ps[0]), isEmpty);
       final out = feed(r, ps.skip(1).toList());
       expect(out.single.$2, [2, 1, ...List.filled(30, 1)]);
+    });
+
+    test('a re-send of the frame-completing packet is acked, not re-emitted',
+        () {
+      final r = PebbleFrameReassembler();
+      final ps = pebblePpogattPackets(b, 6);
+      expect(feed(r, ps).single.$2, [2, 1, ...List.filled(30, 1)]);
+      // The ack for the last packet was lost, so the watch re-sends it.
+      for (var i = 0; i < 3; i++) {
+        expect(r.addPacket(ps.last), isEmpty);
+      }
+      final next = feed(r, pebblePpogattPackets(c, 6 + ps.length));
+      expect(next.single.$2[1], 2);
     });
 
     test('go-back-N re-send after lost acks keeps the frame intact', () {
