@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 
@@ -25,17 +27,17 @@ void main() {
     final b = pebbleFrame(kPebbleEndpointDatalog, [2, 1, ...List.filled(30, 1)]);
     final c = pebbleFrame(kPebbleEndpointDatalog, [2, 2, ...List.filled(30, 2)]);
 
+    List<(int, Uint8List)> feed(PebbleFrameReassembler r, List<List<int>> ps) =>
+        [for (final p in ps) ...?r.addPacket(p)];
+
     test('reset drops a partial frame cut by a transport reset', () {
       final r = PebbleFrameReassembler();
       expect(r.addPacket(pebblePpogattPackets(a, 0).first), isEmpty);
       r.reset();
-      final out = [
-        for (final p in [
-          ...pebblePpogattPackets(b, 0),
-          ...pebblePpogattPackets(c, 2),
-        ])
-          ...r.addPacket(p),
-      ];
+      final out = feed(r, [
+        ...pebblePpogattPackets(b, 0),
+        ...pebblePpogattPackets(c, 2),
+      ]);
       expect(out.map((f) => f.$2[1]), [1, 2]);
       expect(out.map((f) => f.$2.length), [32, 32]);
     });
@@ -43,24 +45,34 @@ void main() {
     test('a repeated serial is dropped, not appended twice', () {
       final r = PebbleFrameReassembler();
       final ps = pebblePpogattPackets(b, 30);
-      final out = [
-        ...r.addPacket(ps[0]),
-        ...r.addPacket(ps[0]),
-        for (final p in ps.skip(1)) ...r.addPacket(p),
-      ];
+      expect(r.addPacket(ps[0]), isEmpty);
+      expect(r.addPacket(ps[0]), isNull);
+      final out = feed(r, ps.skip(1).toList());
       expect(out.single.$2, [2, 1, ...List.filled(30, 1)]);
     });
 
-    test('a serial gap discards the partial frame', () {
+    test('go-back-N re-send after lost acks keeps the frame intact', () {
       final r = PebbleFrameReassembler();
-      final ps = pebblePpogattPackets(a, 0);
-      r.addPacket(ps[0]);
-      // ps[1] lost; the rest of the cut frame then a fresh frame on serial 9.
-      for (final p in ps.skip(2)) {
-        r.addPacket(p);
-      }
-      final out = [for (final p in pebblePpogattPackets(c, 9)) ...r.addPacket(p)];
-      expect(out.single.$2, [2, 2, ...List.filled(30, 2)]);
+      final pa = pebblePpogattPackets(a, 0); // serials 0..3
+      final pc = pebblePpogattPackets(c, pa.length);
+      // 0,1,2 arrive; the acks for 1 and 2 are lost, so the watch re-sends
+      // from 1 onward, then the next frame.
+      final out = feed(r, [pa[0], pa[1], pa[2], pa[1], pa[2], pa[3], ...pc]);
+      expect(out.map((f) => f.$2.length), [62, 32]);
+      expect(out.first.$2, [2, 1, ...List.filled(60, 0x5a)]);
+      expect(out.last.$2[1], 2);
+    });
+
+    test('a skipped packet is dropped until it is re-sent in order', () {
+      final r = PebbleFrameReassembler();
+      final pa = pebblePpogattPackets(a, 0);
+      // packet 1 is skipped; 2 and 3 arrive out of order and are dropped,
+      // then go-back-N re-sends 1, 2, 3.
+      expect(r.addPacket(pa[0]), isEmpty);
+      expect(r.addPacket(pa[2]), isNull);
+      expect(r.addPacket(pa[3]), isNull);
+      final out = feed(r, [pa[1], pa[2], pa[3]]);
+      expect(out.single.$2, [2, 1, ...List.filled(60, 0x5a)]);
     });
   });
 

@@ -79,8 +79,8 @@ List<List<int>> pebblePpogattPackets(List<int> frame, int firstSerial,
 /// the head of the buffer. A partial frame left behind by a transport reset,
 /// a re-sent packet appended twice, or a skipped packet shifts every later
 /// length and endpoint, and the rest of the session misframes (or waits
-/// forever on a garbage length). [reset] and [addPacket] exist so that state
-/// can be thrown away instead.
+/// forever on a garbage length). [reset] throws a cut frame away, and
+/// [addPacket] keeps re-sent and out-of-order packets out of the buffer.
 class PebbleFrameReassembler {
   final List<int> _buf = [];
   int? _lastSerial;
@@ -92,18 +92,20 @@ class PebbleFrameReassembler {
     _lastSerial = null;
   }
 
-  /// Feeds one whole PPoGATT data packet (header byte included). A repeat of
-  /// the last serial is a re-send and is dropped. Any other serial that is
-  /// not the next one means packets were lost, so the partial frame is
-  /// discarded and this packet starts a fresh buffer.
-  List<(int, Uint8List)> addPacket(List<int> packet) {
-    if (packet.isEmpty) return const [];
+  /// Feeds one whole PPoGATT data packet (header byte included). Only the
+  /// next serial in sequence is taken; anything else (a repeat, or a packet
+  /// that arrived after one was lost or skipped) is dropped without touching
+  /// the buffer. PPoGATT is go-back-N: the watch re-sends every unacked
+  /// packet in order from the oldest, so the missing one comes back and the
+  /// frame completes. Clearing on a gap instead would make a mid-frame
+  /// payload the head of the buffer and misframe everything after it.
+  ///
+  /// Returns null when the packet was dropped, so the caller does not ack it.
+  List<(int, Uint8List)>? addPacket(List<int> packet) {
+    if (packet.isEmpty) return null;
     final serial = (packet[0] >> 3) & 0x1f;
     final last = _lastSerial;
-    if (last != null) {
-      if (serial == last) return const [];
-      if (serial != (last + 1) & 0x1f) _buf.clear();
-    }
+    if (last != null && serial != (last + 1) & 0x1f) return null;
     _lastSerial = serial;
     return add(packet.sublist(1));
   }
