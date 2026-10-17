@@ -21,6 +21,17 @@ import 'records.dart';
 /// unrecognized version.
 const int kR10MinLength = 685;
 
+/// Whether a frame with packet type [pkt] and length [len] can carry an R10
+/// body. Only a live raw (0x2B) frame, at any length, or an archived
+/// historical (0x2F) frame of at least [kR10MinLength] qualifies. On every
+/// other packet type b[1] is the SEQUENCE byte, not a record type, so a
+/// console-log (0x32, up to 2 KB) or long command-response frame whose seq
+/// happened to be 10 would otherwise decode as R10: an "hr" read out of log
+/// text, plus R-R and IMU motion built from the payload bytes.
+bool _isR10Frame(int pkt, int len) =>
+    pkt == PacketType.realtimeRawData ||
+    (pkt == PacketType.historicalData && len >= kR10MinLength);
+
 /// A decoded HR/activity sample.
 class DecodedSample {
   final int ts; // unix seconds
@@ -141,7 +152,9 @@ ImuFrame? frameAccel(String hex) {
     return ts > 0 ? ImuFrame(ts, idx, mags, xs, ys, zs) : null;
   }
   // R10: rec 0x0A, ts@7, accel X@85/Y@285/Z@485 (100 int16 each).
-  if (rec == 0x0a && b.length >= kR10MinLength) {
+  if (rec == 0x0a &&
+      b.length >= kR10MinLength &&
+      _isR10Frame(pkt, b.length)) {
     final ts = view.getUint32(7, Endian.little);
     final mags = <double>[];
     final xs = <double>[];
@@ -234,8 +247,7 @@ RealtimeRrResult? realtimeRr(String hex) {
     // between the wearing flag and live HRV/breathing compute. Four slots
     // exist, so four is the ceiling.
     maxRr = 4;
-  } else if (rec == 10 &&
-      (pkt == PacketType.realtimeRawData || b.length >= kR10MinLength)) {
+  } else if (rec == 10 && _isR10Frame(pkt, b.length)) {
     tsOff = 7;
     cntOff = 18;
     // R10 declares its count at [18] and carries the values from [19], inside
@@ -493,8 +505,7 @@ DecodedSample? decodeRecord(String hex) {
   // the same byte offset, fabricated IMU/motion) instead of falling through
   // to `return null` below and getting archived like every other
   // unrecognized version.
-  if (recType == 10 &&
-      (pktType == PacketType.realtimeRawData || b.length >= kR10MinLength)) {
+  if (recType == 10 && _isR10Frame(pktType, b.length)) {
     final ts = view.getUint32(7, Endian.little);
     final hr = b[17];
     // Null motion = the frame carried no readable IMU window; propagate that
