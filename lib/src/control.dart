@@ -698,11 +698,16 @@ EventInfo? parseEvent(
       // [10], the byte that is always zero, so it was permanently false.
       if (body.length >= 12) {
         final soc = _round(u16(body, 1) / 10.0, 1);
+        // An out-of-range SoC means this body is not the layout being read,
+        // so the other fields from it are not trusted either. A millivolt
+        // reading outside a Li-ion cell's range is dropped on its own: hosts
+        // bank it, and one garbage value can pin a lifetime MAX.
         if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
           dec['battery_pct'] = soc;
+          final mv = u16(body, 5);
+          if (mv >= 2500 && mv <= 4500) dec['battery_mv'] = mv;
+          dec['charging'] = body[9] != 0;
         }
-        dec['battery_mv'] = u16(body, 5);
-        dec['charging'] = body[9] != 0;
       }
       break;
     case EventId.strapConditionReport:
