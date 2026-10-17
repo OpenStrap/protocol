@@ -165,6 +165,17 @@ class R10Lite {
 
 R10Lite? parseR10Lite(Uint8List inner) {
   if (inner.length < 18) return null;
+  // Same gate as every other R10 path: a live raw (0x2B) frame at any length,
+  // or a historical (0x2F) frame of at least [kR10MinLength]. 10 is not a
+  // known historical layout version, so a short 0x2F record whose layout byte
+  // happens to be 10 would otherwise have unrelated bytes read as HR@17 and
+  // R-R@19 — and on the historical ingest path that commits as decoded, skips
+  // the undecodable archive, and gets acked for trim.
+  final pkt = inner[0];
+  if (pkt != PacketType.realtimeRawData &&
+      !(pkt == PacketType.historicalData && inner.length >= kR10MinLength)) {
+    return null;
+  }
   return R10Lite(u32(inner, 7), inner[17], u32(inner, 3),
       rrIntervalsMs: _r10Rr(inner));
 }
