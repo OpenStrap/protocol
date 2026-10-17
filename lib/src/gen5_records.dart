@@ -706,13 +706,6 @@ class Gen5OpticalBlock {
       _view(channel0MetaRaw).getInt16(5, Endian.little);
   int get tia1OffsetCurrentNanoamps => tia1OffsetCurrentRaw * 10;
 
-  @Deprecated(
-    'This field is the TIA 1 offset CURRENT: a signed i16 in 10 nA/LSB, not an '
-    'unsigned ADC offset. Use tia1OffsetCurrentRaw / '
-    'tia1OffsetCurrentNanoamps.',
-  )
-  int get channel0AdcOffset => tia1OffsetCurrentRaw & 0xFFFF;
-
   /// TIA 2's, same three fields at the same relative offsets (descriptor
   /// relative 13/14/18).
   int get channel1Source => channel1MetaRaw[0];
@@ -724,13 +717,6 @@ class Gen5OpticalBlock {
   int get tia2OffsetCurrentRaw =>
       _view(channel1MetaRaw).getInt16(5, Endian.little);
   int get tia2OffsetCurrentNanoamps => tia2OffsetCurrentRaw * 10;
-
-  @Deprecated(
-    'This field is the TIA 2 offset CURRENT: a signed i16 in 10 nA/LSB, not an '
-    'unsigned ADC offset. Use tia2OffsetCurrentRaw / '
-    'tia2OffsetCurrentNanoamps.',
-  )
-  int get channel1AdcOffset => tia2OffsetCurrentRaw & 0xFFFF;
 }
 
 /// The raw optical deep buffer. Layout is confirmed: the body starts at inner

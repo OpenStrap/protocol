@@ -306,11 +306,6 @@ void main() {
         expect(blk.tia1OffsetCurrentNanoamps, -10000);
         expect(blk.tia2OffsetCurrentRaw, 2400);
         expect(blk.tia2OffsetCurrentNanoamps, 24000); // 24 µA
-        // The deprecated getters keep their old unsigned-u16 behaviour.
-        // ignore: deprecated_member_use_from_same_package
-        expect(blk.channel0AdcOffset, 64536);
-        // ignore: deprecated_member_use_from_same_package
-        expect(blk.channel1AdcOffset, 2400);
       }
     });
   });
