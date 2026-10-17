@@ -689,13 +689,15 @@ Iterable<_ProtoField> _protoFields(Uint8List data) sync* {
   var i = 0;
   int readVarint() {
     var result = 0, shift = 0;
-    while (i < data.length) {
+    // A varint is at most 10 bytes; past that the shift wraps and the value
+    // is garbage, so treat it as malformed rather than keep OR-ing.
+    while (i < data.length && shift < 64) {
       final b = data[i++];
       result |= (b & 0x7f) << shift;
       if (b & 0x80 == 0) return result;
       shift += 7;
     }
-    throw const FormatException('truncated varint');
+    throw const FormatException('truncated or overlong varint');
   }
 
   try {
@@ -711,7 +713,9 @@ Iterable<_ProtoField> _protoFields(Uint8List data) sync* {
           i += 8;
         case 2:
           final len = readVarint();
-          if (i + len > data.length) return;
+          // A 10-byte varint can come back negative, which would slip past
+          // an `i + len > length` check and throw out of sublistView.
+          if (len < 0 || len > data.length - i) return;
           yield _ProtoField(number, wireType,
               bytes: Uint8List.sublistView(data, i, i + len));
           i += len;
