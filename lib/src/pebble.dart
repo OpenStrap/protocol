@@ -74,8 +74,39 @@ List<List<int>> pebblePpogattPackets(List<int> frame, int firstSerial,
 }
 
 /// Reassembles inner frames from consecutive PPoGATT data payloads.
+///
+/// The inner framing has no sync marker: the only boundary is the length at
+/// the head of the buffer. A partial frame left behind by a transport reset,
+/// a re-sent packet appended twice, or a skipped packet shifts every later
+/// length and endpoint, and the rest of the session misframes (or waits
+/// forever on a garbage length). [reset] and [addPacket] exist so that state
+/// can be thrown away instead.
 class PebbleFrameReassembler {
   final List<int> _buf = [];
+  int? _lastSerial;
+
+  /// Drops any partial frame and forgets the serial sequence. Call it when
+  /// the PPoGATT transport resets.
+  void reset() {
+    _buf.clear();
+    _lastSerial = null;
+  }
+
+  /// Feeds one whole PPoGATT data packet (header byte included). A repeat of
+  /// the last serial is a re-send and is dropped. Any other serial that is
+  /// not the next one means packets were lost, so the partial frame is
+  /// discarded and this packet starts a fresh buffer.
+  List<(int, Uint8List)> addPacket(List<int> packet) {
+    if (packet.isEmpty) return const [];
+    final serial = (packet[0] >> 3) & 0x1f;
+    final last = _lastSerial;
+    if (last != null) {
+      if (serial == last) return const [];
+      if (serial != (last + 1) & 0x1f) _buf.clear();
+    }
+    _lastSerial = serial;
+    return add(packet.sublist(1));
+  }
 
   /// Feeds one data payload; returns every complete (endpoint, payload).
   List<(int, Uint8List)> add(List<int> payload) {

@@ -17,6 +17,53 @@ void main() {
     expect(out.single.$2, List.generate(40, (i) => i));
   });
 
+  group('reassembler recovery', () {
+    // A 66-byte datalog data frame split into 20-byte packets, and two small
+    // whole frames that follow it.
+    final a = pebbleFrame(kPebbleEndpointDatalog,
+        [2, 1, ...List.filled(60, 0x5a)]);
+    final b = pebbleFrame(kPebbleEndpointDatalog, [2, 1, ...List.filled(30, 1)]);
+    final c = pebbleFrame(kPebbleEndpointDatalog, [2, 2, ...List.filled(30, 2)]);
+
+    test('reset drops a partial frame cut by a transport reset', () {
+      final r = PebbleFrameReassembler();
+      expect(r.addPacket(pebblePpogattPackets(a, 0).first), isEmpty);
+      r.reset();
+      final out = [
+        for (final p in [
+          ...pebblePpogattPackets(b, 0),
+          ...pebblePpogattPackets(c, 2),
+        ])
+          ...r.addPacket(p),
+      ];
+      expect(out.map((f) => f.$2[1]), [1, 2]);
+      expect(out.map((f) => f.$2.length), [32, 32]);
+    });
+
+    test('a repeated serial is dropped, not appended twice', () {
+      final r = PebbleFrameReassembler();
+      final ps = pebblePpogattPackets(b, 30);
+      final out = [
+        ...r.addPacket(ps[0]),
+        ...r.addPacket(ps[0]),
+        for (final p in ps.skip(1)) ...r.addPacket(p),
+      ];
+      expect(out.single.$2, [2, 1, ...List.filled(30, 1)]);
+    });
+
+    test('a serial gap discards the partial frame', () {
+      final r = PebbleFrameReassembler();
+      final ps = pebblePpogattPackets(a, 0);
+      r.addPacket(ps[0]);
+      // ps[1] lost; the rest of the cut frame then a fresh frame on serial 9.
+      for (final p in ps.skip(2)) {
+        r.addPacket(p);
+      }
+      final out = [for (final p in pebblePpogattPackets(c, 9)) ...r.addPacket(p)];
+      expect(out.single.$2, [2, 2, ...List.filled(30, 2)]);
+    });
+  });
+
   test('phone version reply: 25 bytes, Android, LE capability mask', () {
     final v = pebblePhoneVersionReply();
     expect(v, hasLength(25));
