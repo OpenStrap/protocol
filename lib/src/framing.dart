@@ -176,7 +176,23 @@ class FrameReassembler {
         if (!resync()) break;
         continue;
       }
-      if (_buf.length < total) break; // wait for the rest of this frame
+      if (_buf.length < total) {
+        // A lost notification leaves this frame short, and the band sends
+        // HISTORY_END and then waits for the ACK — so no further bytes come
+        // to complete it, and the END sits inside the pending span until a
+        // watchdog aborts the burst. A complete frame passing both CRCs
+        // inside the span means this one was truncated: give it up and
+        // resume there. Emitted as a CRC failure so the loss is still
+        // counted. A payload that happened to contain a whole valid frame
+        // would need both an 8-bit and a 32-bit CRC to match by chance.
+        final next = _completeFrameWithin(headerLen);
+        if (next < 0) break; // wait for the rest of this frame
+        out.add(Frame(
+            Uint8List.fromList(_buf.sublist(headerLen, next)), true, false));
+        _resyncs++;
+        _buf.removeRange(0, next);
+        continue;
+      }
       final frame =
           parseFrame(Uint8List.fromList(_buf.sublist(0, total)), profile: profile);
       if (frame != null) out.add(frame);
@@ -204,6 +220,24 @@ class FrameReassembler {
     }
     if (_buf.length > 8192) _buf.clear(); // safety: never grow unbounded
     return out;
+  }
+
+  /// Offset of the first SOF after index 0 that starts a frame which is
+  /// fully buffered and passes both CRCs, or -1.
+  int _completeFrameWithin(int headerLen) {
+    for (int k = 1; k + headerLen + 4 <= _buf.length; k++) {
+      if (_buf[k] != sof) continue;
+      final header = _buf.sublist(k, k + headerLen);
+      final declared = profile.declaredLen(header);
+      if (declared < 4 || headerLen + declared > 4096) continue;
+      if (!profile.headerCrcValid(header)) continue;
+      final end = k + headerLen + declared;
+      if (end > _buf.length) continue;
+      final f = parseFrame(Uint8List.fromList(_buf.sublist(k, end)),
+          profile: profile);
+      if (f != null && f.valid) return k;
+    }
+    return -1;
   }
 
   void reset() {

@@ -177,6 +177,52 @@ void main() {
       expect(frames.map((f) => f.seq), contains(6));
       expect(frames.every((f) => f.valid), isTrue);
     });
+
+    // The band sends HISTORY_END and then waits for the ACK, so nothing
+    // arrives behind it to complete a truncated frame ahead of it.
+    List<int> historyEnd(int seq) {
+      final inner = List<int>.filled(21, 0)
+        ..[0] = PacketType.metadata
+        ..[1] = seq
+        ..[2] = SyncMeta.historyEnd;
+      for (int i = 0; i < 8; i++) {
+        inner[13 + i] = 0x50 + i;
+      }
+      return buildFrame(inner);
+    }
+
+    test('a lost notification does not hold the HISTORY_END behind it', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
+      expect(data.length, 104);
+      final end = historyEnd(2);
+
+      final re = FrameReassembler();
+      expect(re.feed(data).single.valid, isTrue);
+      // Only the first notification of the next data frame arrives.
+      expect(re.feed(data.sublist(0, 44)), isEmpty);
+      final frames = re.feed(end);
+
+      expect(frames.length, 2);
+      expect(frames.first.valid, isFalse,
+          reason: 'the truncated frame must still count as a lost frame');
+      expect(frames.last.valid, isTrue);
+      expect(frames.last.packetType, PacketType.metadata);
+      expect(parseMetadata(frames.last.inner)!.token,
+          [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57]);
+      expect(re.feed(historyEnd(3)).single.seq, 3,
+          reason: 'nothing stale is left in the buffer');
+    });
+
+    test('a partial frame still waits when nothing complete sits inside it', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0xAA)]);
+      final re = FrameReassembler();
+      expect(re.feed(data.sublist(0, 60)), isEmpty);
+      final frames = re.feed(data.sublist(60));
+      expect(frames.single.valid, isTrue);
+      expect(re.resyncs, 0);
+    });
   });
 
   group('dangerousCmds (enforced never-send set)', () {
