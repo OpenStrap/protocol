@@ -517,10 +517,6 @@ const int kGen5V18InnerLen = 112;
 /// A caller that wants the signal can compare against [kGen5V18InnerLen].
 const int kGen5V18MinReadableLen = 109;
 
-@Deprecated(
-    'v18 inner is exactly 112 bytes, not a floor — use kGen5V18InnerLen')
-const int kGen5V18MinInnerLen = kGen5V18InnerLen;
-
 class Gen5V18Decoder implements Gen5RecordDecoder {
   const Gen5V18Decoder();
 
@@ -1027,8 +1023,8 @@ class Gen5V21Decoder implements Gen5RecordDecoder {
 // This replaces an earlier reading of the same bytes (`burstIndex`@13,
 // `frontEndMetaRaw`@15:17, `subChannel`@17, 24 "AC samples", `signalMetric`
 // f32@67, `gainSetting`@71, `gainIndex`@72, `flagA`@73, `flagB`@74) which was
-// REFUTED on hardware. Every deprecated member below says which real field its
-// bytes actually belong to.
+// REFUTED on hardware. Those names are gone rather than kept as aliases: each
+// one returned a real field under a name that said something else.
 //
 // The pinning facts behind this layout, all exact (every R26 record has an
 // R18 twin on the shared (record_index, unix) key — zero orphans):
@@ -1145,13 +1141,6 @@ Gen5PpgReconstruction reconstructSaturatedDeltaWindow(
 }
 
 class Gen5PpgWaveform extends Gen5HistoricalRecord {
-  /// Low byte of the record's sub-second @ inner[11] (frame-abs 19).
-  ///
-  /// This offset is the shared u16 sub-second, not a byte: reading one byte
-  /// here discards its high half (nonzero on 99% of real records).
-  @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
-  final int rawByte19;
-
   /// u16 LE @ inner[11:13] (frame-abs 19) — the SAME field as [tsSubsec], the
   /// record's Q15 sub-second, kept under its historical name.
   ///
@@ -1281,81 +1270,12 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// so nobody has to guess whether it was decoded; it carries no field.
   final int alignedTailByte;
 
-  /// COMPAT (deprecated): inner[13] read as a standalone "per-burst counter".
-  /// It is the LOW BYTE of the u16 PIP state/segment counter, so it wraps every
-  /// 256 records and drops the high half.
-  @Deprecated('inner[13] is the low byte of the u16 PIP state/segment counter '
-      '— use pipStateCounter')
-  int get burstIndex => pipStateCounter & 0xFF;
-
-  /// COMPAT (deprecated): inner[15:17] read as a u16 of unestablished meaning.
-  /// Those two bytes are the LOW HALF of [firstSampleAdc], the window's first
-  /// optical ADC code — half of a number, not a field.
-  @Deprecated('inner[15:17] is the low half of the i32 first optical ADC code '
-      '— use firstSampleAdc')
-  int get frontEndMetaRaw => firstSampleAdc & 0xFFFF;
-
-  /// COMPAT (deprecated): inner[17] read as a 0..7 "acquisition channel index".
-  /// It is byte 2 of [firstSampleAdc]'s sign-extended i32 — 0x00..0x07 for a
-  /// positive first sample, 0xF8..0xFF for a negative one. The "~0.2% outliers
-  /// at 0xFD..0xFF" this field's old doc comment reported were negative codes,
-  /// and the band does NOT multiplex channels through this byte.
-  @Deprecated('inner[17] is byte 2 of the sign-extended i32 first optical ADC '
-      'code, not a channel index — use firstSampleAdc')
-  int get subChannel => (firstSampleAdc >> 16) & 0xFF;
-
-  /// COMPAT (deprecated): the 0..7 gate over [subChannel]. There is no channel
-  /// here to gate — it only ever answered "is the first sample positive?".
-  @Deprecated('there is no sub-channel in a v26 record — inner[17] is part of '
-      'the i32 first optical ADC code; use firstSampleAdcOrNull')
-  int? get subChannelKnown {
-    // ignore: deprecated_member_use_from_same_package
-    final b = subChannel;
-    return (b >= 0 && b <= 7) ? b : null;
-  }
-
-  /// COMPAT (deprecated): the f32 at inner[67:71] read as a signal-quality
-  /// metric. It is the max adjacent accel-magnitude delta in g — motion. For a
-  /// real per-second quality weight use R18's
-  /// [Gen5HistorySample.signalQualityLogVariance].
-  @Deprecated('inner[67:71] is the max adjacent accel-magnitude delta in g '
-      '(== R18 dynamicAccelerationG), not a quality metric — use accelDeltaG')
-  double? get signalMetric => accelDeltaG;
-
-  /// COMPAT (deprecated): the two halves of [channelStateWord] read as a gain
-  /// configuration. There is no gain field in a v26 record.
-  @Deprecated('inner[71] is the low byte of the u16 channel-0 processing-state '
-      'word (== R18 statusWord), not a gain — use channelStateWord')
-  int get gainSetting => channelStateWord & 0xFF;
-  @Deprecated(
-      'inner[72] is the high byte of the u16 channel-0 processing-state '
-      'word (== R18 statusWord), not a gain — use channelStateWord')
-  int get gainIndex => (channelStateWord >> 8) & 0xFF;
-
-  /// COMPAT (deprecated): the two trailing bytes read as unnamed flags.
-  @Deprecated('inner[73] is the primary-flags bit-8 snapshot — use '
-      'primaryFlagsByte / primaryFlagsBit8Raw')
-  int get flagA => primaryFlagsByte;
-  @Deprecated('inner[74] is the binary waveform-morphology acceptance result '
-      '(NOT a heartbeat) — use morphologyPass / morphologyByte')
-  int get flagB => morphologyByte;
-
-  /// COMPAT (deprecated): the 24 i16s read as AC-coupled SAMPLES. They are
-  /// DELTAS over a 25-sample window, so summing is required before anything
-  /// treats them as a waveform — which is also why their per-record mean sat
-  /// near zero and looked "DC-removed".
-  @Deprecated('inner[19:67] holds 24 saturated i16 DELTAS, not samples — use '
-      'opticalDeltas, or reconstructWindow() for absolute codes')
-  List<int> get ppgWaveform => opticalDeltas;
-
   const Gen5PpgWaveform({
     required super.histVersion,
     required super.flags,
     required super.recordIndex,
     required super.unix,
     required super.tsSubsec,
-    @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
-    required this.rawByte19,
     required this.segmentId,
     required this.pipStateCounter,
     required this.firstSampleAdc,
@@ -1379,12 +1299,6 @@ const int _kV26DeltasStart = 19; // frame-abs 27, body 6
 /// An exact gate, like v20/v21: a truncated record's trailing metadata would
 /// otherwise decode out of whatever bytes happened to follow.
 const int kGen5V26InnerLen = 76;
-
-@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
-const int kGen5V26MinInnerLen = kGen5V26InnerLen;
-
-@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
-const int kGen5V26MinInnerLenWithMeta = kGen5V26InnerLen;
 
 class Gen5V26Decoder implements Gen5RecordDecoder {
   const Gen5V26Decoder();
@@ -1420,8 +1334,6 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
       unix: hdr.unix,
       tsSubsec: v.getUint16(11, Endian.little),
       flags: hdr.flags,
-      // ignore: deprecated_member_use_from_same_package
-      rawByte19: inner[11],
       segmentId: v.getUint16(11, Endian.little),
       // Body offsets + 13. The trailing block (67/71/73) is byte-identical
       // to the twin R18 record's 33/67/73; see this section's header comment.

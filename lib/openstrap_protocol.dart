@@ -64,15 +64,10 @@ export 'src/gen5_records.dart'
         kGen5HistoricalDecoders,
         kGen5V22KnownTags,
         kGen5V22InnerLen,
-        // The exact lengths are the live names; the *MinInnerLen* aliases below
-        // are deprecated and exported only so existing callers still resolve.
         kGen5V18InnerLen,
         kGen5V26InnerLen,
-        kGen5V18MinInnerLen,
         kGen5V20InnerLen,
         kGen5V21InnerLen,
-        kGen5V26MinInnerLen,
-        kGen5V26MinInnerLenWithMeta,
         kGen5AccelScaleG,
         kGen5GyroScaleDps,
         isGen5ImuBuffer,

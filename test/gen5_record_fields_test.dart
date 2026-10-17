@@ -81,9 +81,6 @@ void main() {
       // the sub-second in hundredths.
       expect(w.segmentId, w.tsSubsec);
       expect(w.segmentIndex, 56);
-      // The deprecated byte read keeps only the low half.
-      // ignore: deprecated_member_use_from_same_package
-      expect(w.rawByte19, w.tsSubsec & 0xFF);
     });
 
     test('the Q15 scale holds for every verified raw value', () {

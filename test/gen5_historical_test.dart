@@ -229,8 +229,7 @@ void main() {
       // a separate field.
       expect(wf.recordIndex, 25444781);
       expect(wf.unix, 1780917232);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, 174);
+      expect(wf.segmentId & 0xFF, 174);
       expect(wf.pipStateCounter, 1);
       // These 24 i16s are DELTAS over a 25-sample window (body 6), not
       // samples — see `reconstructs a 25-sample window` below for the
@@ -286,12 +285,9 @@ void main() {
         () {
       final wf = decode(frame);
       expect(wf.segmentId, 18350);
-      // The deprecated byte read returns 18350 & 0xFF — the high byte (71)
-      // is discarded. On real records that byte is nonzero 99% of the time.
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, 174);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, wf.segmentId & 0xFF);
+      // A byte read would return 18350 & 0xFF = 174 and discard the high
+      // byte (71). On real records that byte is nonzero 99% of the time.
+      expect(wf.segmentId & 0xFF, 174);
       expect(wf.segmentId >> 8, isNonZero);
     });
 
@@ -348,8 +344,7 @@ void main() {
       final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
       expect(wf.firstSampleAdc, -148726);
       expect(wf.firstSampleAdcInRange, isTrue);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.subChannel, 0xFD); // the "outlier" the old reading saw
+      expect(inner[17], 0xFD); // the "outlier" the old reading saw
     });
 
     test('an impossible first sample is exposed raw, not fabricated', () {
@@ -431,23 +426,6 @@ void main() {
       expect(r.outOfRangeSampleIndices, [2, 3]); // 524500/524400 > 524287
       expect(r.divergenceProven, isTrue);
       expect(r.hasSaturatedDelta, isFalse); // independent of the clamp
-    });
-
-    test('the deprecated members map onto the real fields they misread', () {
-      // Every name below is deprecated; the package's analysis_options mutes
-      // deprecated_member_use_from_same_package precisely so these stay
-      // testable. See the class for what each byte really is.
-      final wf = decode(frame);
-      expect(wf.burstIndex, wf.pipStateCounter & 0xFF);
-      expect(wf.frontEndMetaRaw, wf.firstSampleAdc & 0xFFFF); // 50627
-      expect(wf.subChannel, (wf.firstSampleAdc >> 16) & 0xFF); // 5
-      expect(wf.subChannelKnown, 5); // "inside 0..7" only ever meant positive
-      expect(wf.signalMetric, wf.accelDeltaG);
-      expect(wf.gainSetting, wf.channelStateWord & 0xFF); // 80
-      expect(wf.gainIndex, (wf.channelStateWord >> 8) & 0xFF); // 8
-      expect(wf.flagA, wf.primaryFlagsByte);
-      expect(wf.flagB, wf.morphologyByte);
-      expect(wf.ppgWaveform, wf.opticalDeltas); // deltas, never samples
     });
 
     test('a record short of the exact 76-byte length is rejected outright', () {
