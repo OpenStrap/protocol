@@ -346,11 +346,15 @@ class Gen5HelloInfo {
 
   final int helloRevision; // body[0]
 
-  /// body[1..4] u32 LE, integer-divided by 10. **Null when the raw value is
-  /// outside 0..100** — a percentage is 0..100 by definition, so anything else
-  /// is a mis-read field, and this package's rule is to omit it rather than
-  /// report or clamp a number the bytes do not support.
-  final int? batteryPct;
+  /// body[1..4] u32 LE in tenths of a percent, rounded to 0.1% — the same
+  /// scale and rounding as the gen4 HELLO and BATTERY_LEVEL decoders, so the
+  /// value doesn't jump when the first battery event follows the hello.
+  /// **Null when the raw value is outside 0..1000** — a percentage is 0..100
+  /// by definition, so anything else is a mis-read field, and this package's
+  /// rule is to omit it rather than report or clamp a number the bytes do not
+  /// support. The raw value is checked, not a quotient: integer division let
+  /// 1001..1009 through as 100.
+  final double? batteryPct;
   final bool charging; // body[5] bit0
   final int tsSeconds; // body[6..9] u32 LE — whole seconds
   final int tsSubseconds; // body[10..13] u32 LE — 32768 units/s
@@ -453,10 +457,10 @@ class Gen5HelloInfo {
       return sb.toString();
     }
 
-    final batteryRaw = u32(body, 1) ~/ 10;
+    final batteryRaw = u32(body, 1);
     return Gen5HelloInfo(
       helloRevision: body[0],
-      batteryPct: batteryRaw <= 100 ? batteryRaw : null,
+      batteryPct: batteryRaw <= 1000 ? _round(batteryRaw / 10.0, 1) : null,
       charging: (body[5] & 0x01) != 0,
       tsSeconds: u32(body, 6),
       tsSubseconds: u32(body, 10),

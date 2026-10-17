@@ -709,7 +709,7 @@ void main() {
     test('Gen5HelloInfo.parse decodes the revision-1 body map', () {
       final h = Gen5HelloInfo.parse(gen5HelloBody())!;
       expect(h.helloRevision, 1);
-      expect(h.batteryPct, 90); // 901 ~/ 10
+      expect(h.batteryPct, closeTo(90.1, 1e-9)); // raw 901 = 90.1%
       expect(h.charging, isFalse);
       expect(h.tsSeconds, 1780000000);
       expect(h.tsSubseconds, 28835);
@@ -778,7 +778,7 @@ void main() {
       body[0] = 2; // some future revision
       final h = Gen5HelloInfo.parse(body)!;
       expect(h.helloRevision, 2);
-      expect(h.batteryPct, 90);
+      expect(h.batteryPct, closeTo(90.1, 1e-9));
       expect(h.serial, '5AG0000001');
       expect(h.firmwareVersion, '50.40.1.0');
       expect(h.wristOn, isTrue);
@@ -790,6 +790,29 @@ void main() {
       final h = Gen5HelloInfo.parse(body)!;
       expect(h.batteryPct, isNull);
       expect(h.serial, '5AG0000001'); // the rest of the record still decodes
+    });
+
+    test('battery keeps tenths and refuses raw values past 1000', () {
+      // Same scale and cap as the gen4 BATTERY_LEVEL event, so a WHOOP 5 at
+      // 19.9% doesn't read 19% on connect and 19.9% a few seconds later.
+      for (final e in {
+        199: 19.9,
+        99: 9.9,
+        9: 0.9,
+        0: 0.0,
+        1000: 100.0,
+      }.entries) {
+        final body = gen5HelloBody();
+        ByteData.sublistView(body).setUint32(1, e.key, Endian.little);
+        expect(Gen5HelloInfo.parse(body)!.batteryPct, closeTo(e.value, 1e-9),
+            reason: 'raw ${e.key}');
+      }
+      for (final raw in [1001, 1005, 1009, 1010]) {
+        final body = gen5HelloBody();
+        ByteData.sublistView(body).setUint32(1, raw, Endian.little);
+        expect(Gen5HelloInfo.parse(body)!.batteryPct, isNull,
+            reason: 'raw $raw');
+      }
     });
 
     test('gen5 GET_HELLO omits the hello when the body is too short', () {
