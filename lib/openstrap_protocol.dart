@@ -91,8 +91,7 @@ export 'src/live.dart'
         realtimeRr,
         decodeR10Imu,
         decodeR11Raw,
-        decodeRecord,
-        decodeBatch;
+        decodeRecord;
 
 // Source 2 — CRC, constants, framing, commands.
 export 'src/crc.dart' show crc8, crc32, crc16Modbus;

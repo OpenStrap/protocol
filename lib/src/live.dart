@@ -633,13 +633,3 @@ R11Raw? decodeR11Raw(String hex) {
     channelB: channel(236),
   );
 }
-
-/// Decode a batch of hex records, returning all surfaceable samples.
-List<DecodedSample> decodeBatch(List<String> records) {
-  final out = <DecodedSample>[];
-  for (final hex in records) {
-    final s = decodeRecord(hex);
-    if (s != null) out.add(s);
-  }
-  return out;
-}
