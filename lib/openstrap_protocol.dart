@@ -163,9 +163,7 @@ export 'src/commands.dart'
         cmdRawDataStart, // 81
         cmdRawDataStop, // 82
         cmdStopHaptics, // 122
-        // Filtered reading ("Labrador", R17). The wrong-bodied cmdEcgControl
-        // (124 as a bool) and the opcode-126 cmdEcgSendRaw stay deprecated
-        // and unexported.
+        // Filtered reading ("Labrador", R17).
         cmdLabradorDataGeneration, // 124 — R17 lifecycle
         cmdLabradorRawSave, // 125 — R17 lifecycle
         cmdLabradorFiltered, // 139 — R17 lifecycle
