@@ -514,6 +514,44 @@ void main() {
       expect(h.batteryPct!, inInclusiveRange(0.0, 100.0));
       expect(h.batteryPct, closeTo(89.9, 1e-9));
     });
+
+    test('parseHello reads a sub-1% battery instead of the next header field',
+        () {
+      // Below 1.0% the u16 at [3] is 0..9. The old scan rejected it, walked
+      // the u32's zero high bytes and took the counter at [8..11] instead.
+      const body =
+          'a001048303000000b196e201b0020000344332323438303932003865323738326237'
+          '346634303238346333663437363138623062613234373663356431366363303533'
+          '313862373532316431353635650600000002000000100000002900000011000000';
+      final cases = <List<int>, double>{
+        [5, 0x01, 0x96]: 0.5, // counter byte 1 used to read as 25.6%
+        [0, 0x2c, 0x01]: 0.0, // 0x012c at [8] used to read as 30.0%
+        [9, 0x00, 0x02]: 0.9, // [9]=0, [10]=2 used to read as 51.2%
+      };
+      cases.forEach((c, want) {
+        final b = hexToBytes(body);
+        b[3] = c[0];
+        b[4] = 0;
+        b[8] = c[1];
+        b[9] = c[2];
+        b[10] = 0x02;
+        expect(parseHello(b).batteryPct, closeTo(want, 1e-9),
+            reason: 'raw ${c[0]}');
+      });
+    });
+
+    test('parseHello leaves an out-of-range marked battery null', () {
+      // With the 0x04 marker present an impossible u32 at [3] is not
+      // rescued by scanning into the counter bytes that follow it.
+      const body =
+          'a001048303000000b196e201b0020000344332323438303932003865323738326237';
+      final b = hexToBytes(body);
+      b[3] = 0xed; // 0x03ed = 1005 → 100.5%
+      b[4] = 0x03;
+      b[8] = 0x2c;
+      b[9] = 0x01;
+      expect(parseHello(b).batteryPct, isNull);
+    });
   });
 
   // ── 8. cmdBuzz rejects an out-of-range pattern ───────────────────────────

@@ -519,7 +519,22 @@ HelloInfo parseHello(Uint8List payload) {
   // right before the battery u32 at [3]. Starting at 2 read 0x04 | lo << 8,
   // which for a battery low byte of 1..3 lands in range (26.0/51.6/77.2%) and
   // stopped the scan before the real field.
-  for (int off = 3; off < 10; off++) {
+  //
+  // When the 0x04 marker is there the layout is known, so the u32 at [3] is
+  // read directly and 0..9 (0.0-0.9%) is a real reading. The scan rejects
+  // anything below 10, walks over the u32's zero high bytes and lands on the
+  // next header field (payload[8..11] is a changing counter), so a band that
+  // is nearly flat could report 25.6% or 30.0%. A marked body whose u32 is
+  // out of range leaves batteryPct null rather than falling back to a scan
+  // over those same counter bytes.
+  if (payload[2] == 0x04) {
+    final v = u32(payload, 3);
+    if (v <= 1000) {
+      final pct = _round(v / 10.0, 1);
+      if (_validBatteryPct(pct)) info.batteryPct = pct;
+    }
+  }
+  for (int off = 3; payload[2] != 0x04 && off < 10; off++) {
     if (off + 2 <= payload.length) {
       final v = u16(payload, off);
       if (v >= 10 && v <= 1000) {
