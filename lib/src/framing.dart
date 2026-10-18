@@ -274,10 +274,15 @@ class FrameReassembler {
     return out;
   }
 
-  /// Offset of the first SOF after index 0 that starts a frame which is
-  /// fully buffered and passes both CRCs, or -1.
+  /// Offset of the first SOF after the pending frame's header that starts a
+  /// frame which is fully buffered and passes both CRCs, or -1.
+  ///
+  /// The scan starts past the header: that header already passed its check,
+  /// and its crc8 byte is 0xAA for about 1 in 256 lengths, so starting inside
+  /// it can match a frame at an offset shorter than the header and the caller's
+  /// payload slice runs backwards.
   int _completeFrameWithin(int headerLen) {
-    for (int k = 1; k + headerLen + 4 <= _buf.length; k++) {
+    for (int k = headerLen; k + headerLen + 4 <= _buf.length; k++) {
       if (_buf[k] != sof) continue;
       final header = _buf.sublist(k, k + headerLen);
       final declared = profile.declaredLen(header);

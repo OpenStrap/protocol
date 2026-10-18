@@ -244,6 +244,28 @@ void main() {
       expect(re.truncations, 0);
     });
 
+    test('give-up does not resume inside the truncated frame\'s own header',
+        () {
+      // A length pair whose crc8 is itself 0xAA, so the header's last byte
+      // reads as an SOF and a valid frame can start there.
+      late int lo, hi;
+      search:
+      for (hi = 0; hi < 16; hi++) {
+        for (lo = 0; lo < 256; lo++) {
+          if ((lo | hi << 8) >= 64 && crc8([lo, hi]) == 0xAA) break search;
+        }
+      }
+      final inner = buildFrame([PacketType.event, 1, 0x05, 0, 0, 0, 0, 0]);
+      expect(inner.first, 0xAA);
+      final re = FrameReassembler(giveUpTruncatedFrames: true);
+      expect(re.feed([0xAA, lo, hi, ...inner]), isEmpty,
+          reason: 'nothing complete sits after the header, so this waits');
+      final frames = re.feed(historyEnd(2));
+      expect(frames.first.truncated, isTrue);
+      expect(frames.last.packetType, PacketType.metadata);
+      expect(re.truncations, 1);
+    });
+
     test('a frame with a corrupt payload is not reported as truncated', () {
       final data = buildFrame(
           [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
