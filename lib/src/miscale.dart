@@ -144,9 +144,13 @@ List<int> miScaleHistoryRequest(int userId) => [
       (userId >> 24) & 0xff,
     ];
 
-/// The record count in the scale's `01 <count u16 LE>` answer, or null.
+/// The record count in the scale's `01 <count u16 LE>` answer, or null. The
+/// Mi Body Composition Scale 2 (XMTZC05HM) answers with 7 bytes: the same
+/// three, then the requested user id (u32 LE) echoed back.
 int? miScaleHistoryCount(List<int> b) =>
-    b.length == 3 && b[0] == 0x01 ? b[1] | (b[2] << 8) : null;
+    (b.length == 3 || b.length == 7) && b[0] == 0x01
+        ? b[1] | (b[2] << 8)
+        : null;
 
 const List<int> kMiScaleHistorySend = [0x02];
 
