@@ -141,8 +141,10 @@ void main() {
       expect(miScaleHistoryRequest(0x01020304), [1, 4, 3, 2, 1]);
       expect(miScaleHistoryCount([0x01, 0x02, 0x01]), 258);
       expect(miScaleHistoryCount([0x01, 0x02]), isNull);
-      // Captured from a real XMTZC05HM: count 2, user id 1 echoed.
+      // Captured from a real XMTZC05HM: counts 2, 3 and 4 (tail 01 00 00 00).
       expect(miScaleHistoryCount([1, 2, 0, 1, 0, 0, 0]), 2);
+      expect(miScaleHistoryCount([1, 3, 0, 1, 0, 0, 0]), 3);
+      expect(miScaleHistoryCount([1, 4, 0, 1, 0, 0, 0]), 4);
       expect(miScaleHistoryCount([1, 2, 0, 1, 0]), isNull);
       expect(miScaleHistoryDone([0x03]), isTrue);
       expect(miScaleHistoryDone([]), isTrue);

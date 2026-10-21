@@ -25,7 +25,9 @@
 //
 // STORED HISTORY (both scales) — on [kMiScaleHistoryChar], notify + write:
 //   host  `01 <user id u32 LE>`   how many records for this user
-//   scale `01 <count u16 LE>`
+//   scale `01 <count u16 LE>`      (the XMTZC05HM appends four more bytes,
+//                                  seen as `01 00 00 00` after a request for
+//                                  user 1; their meaning is not established)
 //   host  `02`                    send them (skipped when count is 0)
 //   scale records: 10-byte Scale 2 records, or 13-byte frames laid out as
 //         0x2A9C on the composition scale; a notification of one byte or
@@ -146,7 +148,8 @@ List<int> miScaleHistoryRequest(int userId) => [
 
 /// The record count in the scale's `01 <count u16 LE>` answer, or null. The
 /// Mi Body Composition Scale 2 (XMTZC05HM) answers with 7 bytes: the same
-/// three, then the requested user id (u32 LE) echoed back.
+/// three, then four more (seen as `01 00 00 00` after a request for user 1;
+/// whether that is the user id is not established, so it is not validated).
 int? miScaleHistoryCount(List<int> b) =>
     (b.length == 3 || b.length == 7) && b[0] == 0x01
         ? b[1] | (b[2] << 8)
