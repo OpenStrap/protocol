@@ -85,11 +85,17 @@ class PebbleFrameReassembler {
   final List<int> _buf = [];
   int? _lastSerial;
 
+  // Packets taken since the last reset, capped at [_repeatWindow]: a serial
+  // behind the last one only counts as a repeat if it was actually taken.
+  int _taken = 0;
+  static const int _repeatWindow = 16;
+
   /// Drops any partial frame and forgets the serial sequence. Call it when
   /// the PPoGATT transport resets.
   void reset() {
     _buf.clear();
     _lastSerial = null;
+    _taken = 0;
   }
 
   /// Feeds one whole PPoGATT data packet (header byte included). Only the
@@ -100,18 +106,28 @@ class PebbleFrameReassembler {
   /// frame completes. Clearing on a gap instead would make a mid-frame
   /// payload the head of the buffer and misframe everything after it.
   ///
-  /// A repeat of the packet taken last returns an empty list, and the caller
+  /// A repeat of a packet already taken returns an empty list, and the caller
   /// must ack it again: the watch only re-sends a packet whose ack it never
   /// saw, and without a fresh ack it keeps re-sending until its retry limit
-  /// resets the transport. Returns null only for a packet that is not the
-  /// next serial and not that repeat; the caller does not ack it.
+  /// resets the transport. After 0, 1, 2 with the acks for 1 and 2 lost, the
+  /// re-sent 1 is such a repeat even though 2 was taken last. Returns null
+  /// only for a packet that has not been taken and is not the next serial;
+  /// the caller does not ack it.
+  ///
+  /// Serials are 5-bit, so "behind" and "ahead" share one space: anything up
+  /// to [_repeatWindow] - 1 behind the last taken serial (and actually taken
+  /// since the last reset) is a repeat, anything else is unseen.
   List<(int, Uint8List)>? addPacket(List<int> packet) {
     if (packet.isEmpty) return null;
     final serial = (packet[0] >> 3) & 0x1f;
     final last = _lastSerial;
-    if (last != null && serial == last) return const [];
-    if (last != null && serial != (last + 1) & 0x1f) return null;
+    if (last != null) {
+      final behind = (last - serial) & 0x1f;
+      if (behind < _repeatWindow && behind < _taken) return const [];
+      if (serial != (last + 1) & 0x1f) return null;
+    }
     _lastSerial = serial;
+    if (_taken < _repeatWindow) _taken++;
     return add(packet.sublist(1));
   }
 
