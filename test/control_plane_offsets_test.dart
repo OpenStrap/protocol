@@ -478,6 +478,16 @@ void main() {
       expect(badMv.decoded['battery_pct'], closeTo(85.5, 1e-9));
       expect(badMv.decoded.containsKey('battery_mv'), isFalse);
       expect(badMv.decoded['charging'], isTrue);
+
+      // The fields are u32s: a nonzero high half is out of range even when the
+      // low half alone would pass.
+      final highSoc = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 0x10000 + 855, mv: 3900)))!;
+      expect(highSoc.decoded.containsKey('battery_pct'), isFalse);
+      final highMv = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 855, mv: 0x10000 + 3900)))!;
+      expect(highMv.decoded['battery_pct'], closeTo(85.5, 1e-9));
+      expect(highMv.decoded.containsKey('battery_mv'), isFalse);
     });
   });
 

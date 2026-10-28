@@ -689,10 +689,10 @@ EventInfo? parseEvent(
       dec['double_tap'] = true; // no payload beyond event+timestamp, confirmed
       break;
     case EventId.batteryLevel:
-      // Byte-verified on a real BATTERY_LEVEL fixture: soc @ body[1] (u16,
+      // Byte-verified on a real BATTERY_LEVEL fixture: soc @ body[1] (u32,
       // DECI-percent — divide by 10; this is a DIFFERENT convention from
       // COMMAND_RESPONSE's GET_BATTERY_LEVEL, which is direct-percent on
-      // gen5. Don't conflate the two.), battery_mV @ body[5] (u16),
+      // gen5. Don't conflate the two.), battery_mV @ body[5] (u32),
       // charging @ body[9]. Shared across gen4/gen5 — these are
       // inner-relative offsets, identical across generations.
       //
@@ -701,14 +701,16 @@ EventInfo? parseEvent(
       // packed pairs at [11:15] and [15:19]. `charging` used to be read from
       // [10], the byte that is always zero, so it was permanently false.
       if (body.length >= 12) {
-        final soc = _round(u16(body, 1) / 10.0, 1);
+        // Read as the u32s they are: a nonzero high half is a different
+        // layout, and reading only the low half let it pass the range gates.
+        final soc = _round(u32(body, 1) / 10.0, 1);
         // An out-of-range SoC means this body is not the layout being read,
         // so the other fields from it are not trusted either. A millivolt
         // reading outside a Li-ion cell's range is dropped on its own: hosts
         // bank it, and one garbage value can pin a lifetime MAX.
         if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
           dec['battery_pct'] = soc;
-          final mv = u16(body, 5);
+          final mv = u32(body, 5);
           if (mv >= 2500 && mv <= 4500) dec['battery_mv'] = mv;
           dec['charging'] = body[9] != 0;
         }
