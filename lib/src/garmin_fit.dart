@@ -49,8 +49,11 @@ class FitMessage {
   // Inf get through. `.toInt()` on those throws UnsupportedError, which the
   // caller does not catch, and the download queue would stall on that file.
   // Such a sample is skipped instead.
+  // On the web `double.infinity is int` holds, so finiteness is checked
+  // before the int test too.
   int? int_(int field) {
     final v = fields[field];
+    if (v is! num || !v.isFinite) return null;
     if (v is int) return v;
     if (v is double && v.isFinite && v == v.truncateToDouble()) return v.toInt();
     return null;
@@ -206,7 +209,9 @@ List<FitMessage> parseFit(List<int> bytes) {
 // queue on this file for good.
 int? _timeField(Map<int, Object> fields, int num) {
   final v = fields[num];
-  if (v == null || v is int) return v as int?;
+  if (v == null) return null;
+  // `double.infinity is int` holds on the web.
+  if (v is int && v.isFinite) return v;
   throw FormatException('FIT: field $num is not an integer timestamp');
 }
 

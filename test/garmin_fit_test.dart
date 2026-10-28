@@ -123,6 +123,7 @@ void main() {
     for (final f in [
       fit(kFitMsgMonitoring, 253, 8, 0x86, [...u32(fitTs(t0)), ...u32(1)]),
       fit(kFitMsgMonitoring, 253, 4, 0x88, [0x00, 0x00, 0xc0, 0x7f]),
+      fit(kFitMsgMonitoring, 253, 4, 0x88, [0x00, 0x00, 0x80, 0x7f]),
       fit(kFitMsgMonitoring, 253, 4, 7, 'abc\x00'.codeUnits),
       fit(kFitMsgMonitoring, 26, 4, 0x84, [...u16(1), ...u16(2)]),
     ]) {
@@ -149,6 +150,10 @@ void main() {
       expect(fitHrvLastNight(fit(kFitMsgHrvStatusSummary, 1, bits)), isEmpty);
       expect(fitStress(fit(kFitMsgStressLevel, 0, bits)), isEmpty);
       expect(fitStress(fit(kFitMsgStressLevel, 1, bits)), isEmpty);
+    }
+    // Directly, since on the web `double.infinity is int` holds.
+    for (final v in [double.infinity, double.negativeInfinity, double.nan]) {
+      expect(FitMessage(0, {1: v}, null).int_(1), isNull);
     }
     // A float that holds a whole number still reads (72.0 = 0x42900000).
     expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, [0, 0, 0x90, 0x42])),
