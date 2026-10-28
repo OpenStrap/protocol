@@ -693,6 +693,11 @@ Iterable<_ProtoField> _protoFields(Uint8List data) sync* {
     // is garbage, so treat it as malformed rather than keep OR-ing.
     while (i < data.length && shift < 64) {
       final b = data[i++];
+      // The 10th byte holds only bit 63; anything above it would wrap into a
+      // small value instead of being rejected.
+      if (shift == 63 && (b & 0x7e) != 0) {
+        throw const FormatException('overlong varint');
+      }
       result |= (b & 0x7f) << shift;
       if (b & 0x80 == 0) return result;
       shift += 7;

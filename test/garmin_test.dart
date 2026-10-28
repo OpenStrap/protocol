@@ -331,6 +331,17 @@ void main() {
           isNull);
     });
 
+    test('a 10-byte varint with bits past 63 is rejected, not wrapped', () {
+      // The length 0x06 | (0x02 << 63) wraps to 6 in 64 bits and used to frame
+      // a valid-looking battery message out of a malformed length.
+      final inner = [8, 1, 16, 73];
+      final service = [26, inner.length, ...inner];
+      final len = [0x80 | service.length, ...List.filled(8, 0x80), 0x02];
+      final smart = [66, ...len, ...service];
+      expect(garminParseBatteryResponseProto(Uint8List.fromList(smart)),
+          isNull);
+    });
+
     test('random bytes never throw', () {
       // Fixed seed so a failure reproduces.
       var s = 0x2545f491;
