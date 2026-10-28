@@ -101,6 +101,19 @@ void main() {
       expect(r.add(temp.sublist(20)), temp);
     });
 
+    test('a continuation that looks like a header does not drop the reply', () {
+      // The second notification's payload bytes happen to read bc 27 len len,
+      // a sleep header. Restarting on that shape discarded a valid reply.
+      final payload = List.generate(40, (i) => i);
+      payload.setRange(14, 18, [0xbc, kColmiBigSleep, 0x05, 0x00]);
+      final whole = big(kColmiBigSleep, payload);
+      final r = ColmiBigDataReassembler();
+      expect(r.add(whole.sublist(0, 20)), isNull);
+      expect(r.add(whole.sublist(20, 30)), isNull);
+      expect(r.add(whole.sublist(30)), whole);
+      expect(colmiBigDataCrcOk(whole), isTrue);
+    });
+
     test('a non-0xbc chunk with nothing pending is dropped', () {
       expect(ColmiBigDataReassembler().add([0x01, 2, 3, 4, 5, 6, 7]), isNull);
     });

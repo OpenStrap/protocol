@@ -144,14 +144,21 @@ List<int> colmiTemperatureRequest([int mode = 6]) =>
 /// null. A notification that does not start with 0xbc while nothing is
 /// pending is not a reply this decoder understands and is dropped.
 ///
-/// A notification that starts a new reply (0xbc plus a known type) while one
-/// is still pending means the pending reply lost a notification. It is
-/// dropped and the new reply started instead: appending would fill the gap
-/// with the next reply's header and records (a nap reply read as the last
-/// night's stage/minute pairs) and lose the next reply entirely.
+/// A notification that looks like the start of a new reply (0xbc plus a known
+/// type) while one is still pending is ambiguous: either the pending reply
+/// lost a notification and this is the next reply, or the pending reply's own
+/// payload happens to start with those bytes. It is appended either way and
+/// its offset remembered. The pending reply is given up for the one starting
+/// there only when the evidence says so: the pending reply completes and fails
+/// its CRC, or the later reply completes on its own with a valid CRC before
+/// the pending one does. Restarting on the header shape alone discarded valid
+/// replies whose payload resembled a header; appending blindly filled a lost
+/// notification's gap with the next reply and lost that reply too.
 class ColmiBigDataReassembler {
   List<int>? _pending;
   int _want = 0;
+  // Offsets inside [_pending] where a header-shaped notification began.
+  List<int> _restarts = <int>[];
 
   static bool _startsReply(List<int> chunk) =>
       chunk.length >= kColmiBigHeaderLength &&
@@ -161,21 +168,60 @@ class ColmiBigDataReassembler {
           chunk[1] == kColmiBigSpo2 ||
           chunk[1] == kColmiBigTemperature);
 
+  static int _wantOf(List<int> header) =>
+      kColmiBigHeaderLength + (header[2] | (header[3] << 8));
+
+  void _start(List<int> bytes, List<int> restarts) {
+    _want = _wantOf(bytes);
+    _pending = <int>[...bytes];
+    _restarts = restarts;
+  }
+
+  /// Restart from the header at [_restarts]`[idx]`, keeping later offsets.
+  void _restartAt(int idx) {
+    final p = _pending!;
+    final from = _restarts[idx];
+    _start(p.sublist(from),
+        [for (final o in _restarts.skip(idx + 1)) o - from]);
+  }
+
   List<int>? add(List<int> chunk) {
-    if (_pending != null && _startsReply(chunk)) _pending = null;
     if (_pending == null) {
       if (chunk.length < kColmiBigHeaderLength ||
           chunk[0] != kColmiCmdBigData) {
         return null;
       }
-      _want = kColmiBigHeaderLength + (chunk[2] | (chunk[3] << 8));
-      _pending = <int>[];
+      _start(chunk, <int>[]);
+    } else {
+      if (_startsReply(chunk)) _restarts.add(_pending!.length);
+      _pending!.addAll(chunk);
     }
-    _pending!.addAll(chunk);
-    if (_pending!.length < _want) return null;
-    final whole = _pending!.sublist(0, _want);
-    _pending = null;
-    return whole;
+    while (true) {
+      final p = _pending!;
+      if (p.length >= _want) {
+        final whole = p.sublist(0, _want);
+        if (_restarts.isEmpty || colmiBigDataCrcOk(whole)) {
+          _pending = null;
+          _restarts = <int>[];
+          return whole;
+        }
+        _restartAt(0);
+        continue;
+      }
+      // Still short: a later reply that is already whole and checks out means
+      // the pending one lost a notification and will never complete on its
+      // own bytes.
+      var done = -1;
+      for (var k = 0; k < _restarts.length && done < 0; k++) {
+        final o = _restarts[k];
+        final w = _wantOf(p.sublist(o, o + kColmiBigHeaderLength));
+        if (p.length - o >= w && colmiBigDataCrcOk(p.sublist(o, o + w))) {
+          done = k;
+        }
+      }
+      if (done < 0) return null;
+      _restartAt(done);
+    }
   }
 
   bool get pending => _pending != null;
