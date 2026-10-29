@@ -161,4 +161,23 @@ void main() {
     expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, [0, 0, 0x90, 0x42])),
         [(t0, 72)]);
   });
+
+  test('a stress sample whose own time is unreadable is dropped, not refiled',
+      () {
+    List<FitMessage> fit(List<(int, int, int)> f, List<int> bytes) =>
+        parseFit((FitWriter()
+              ..define(0, kFitMsgStressLevel, f)
+              ..data(0, bytes))
+            .build());
+    // Field 1 NaN next to a good running timestamp and score.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x88)],
+            [...u32(fitTs(t0)), ...u16(40), 0x00, 0x00, 0xc0, 0x7f])),
+        isEmpty);
+    // No field 1 at all: the running timestamp is the sample's time.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83)],
+            [...u32(fitTs(t0)), ...u16(40)])),
+        [(t0, 40)]);
+  });
 }

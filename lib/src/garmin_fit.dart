@@ -360,10 +360,15 @@ List<(int, double)> fitRespiration(List<FitMessage> m) => [
     ];
 
 /// The watch's stress score 0-100 (field 0); negative values (no reading,
-/// activity) dropped. Its own time is field 1 when present.
+/// activity) dropped. Its own time is field 1 when present. A field 1 that is
+/// present but unreadable (NaN, a fraction, an array) drops the sample: the
+/// running timestamp may belong to another record, so falling back to it
+/// would file the score at the wrong time.
 List<(int, int)> fitStress(List<FitMessage> m) => [
       for (final x in m)
-        if (x.global == kFitMsgStressLevel && (x.int_(0) ?? -1) >= 0)
+        if (x.global == kFitMsgStressLevel &&
+            (x.int_(0) ?? -1) >= 0 &&
+            (!x.fields.containsKey(1) || x.int_(1) != null))
           if ((x.int_(1) ?? x.timestamp) case final t?)
             (x.int_(1) != null ? t + kFitEpochOffset : t, x.int_(0)!),
     ];
