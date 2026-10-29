@@ -96,9 +96,6 @@ class Gen5HistoricalHeader {
     required this.tsSubsec,
   });
 
-  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
-  int get layoutMarker => flags;
-
   /// Optical sample rate this record was captured at, in Hz — bit 7 of
   /// [flags].
   int get ppgSampleRateHz => (flags & 0x80) != 0 ? 25 : 50;
@@ -144,9 +141,6 @@ abstract class Gen5HistoricalRecord {
     required this.unix,
     required this.tsSubsec,
   });
-
-  @Deprecated('inner[2] is a flags byte, not an opaque marker — use flags')
-  int get layoutMarker => flags;
 
   /// Optical sample rate this record was captured at, in Hz — bit 7 of
   /// [flags] (set = 25 Hz, clear = 50 Hz).
@@ -407,15 +401,6 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   bool get psnrBAvailable => psnrB != -128;
   bool get psnrAAvailable => psnrA != -128;
 
-  /// COMPAT (deprecated): the old big-endian-u16 reads of these byte pairs.
-  /// Both conflated two independent fields; kept only so existing callers still
-  /// compile. `opticalBaseline` was `(pdMeanB<<8)|pdMeanA` and `opticalAmp` the
-  /// raw `(psnrB<<8)|psnrA` — the latter is the `0x8080` both-unavailable case.
-  @Deprecated('two independent u8 PD means, not a u16 — use pdMeanB/pdMeanA')
-  int get opticalBaseline => (pdMeanB << 8) | pdMeanA;
-  @Deprecated('two independent i8 pSNR values, not a u16 — use psnrB/psnrA')
-  int get opticalAmp => ((psnrB & 0xFF) << 8) | (psnrA & 0xFF);
-
   /// @ inner[105:109] f32 LE (frame-abs 113). A per-second signal-quality
   /// metric the band's own optical processing computes: the log-variance of
   /// the signal it measured this second. Range ~-5.3..0 on the reference
@@ -477,43 +462,20 @@ class Gen5HistorySample extends Gen5HistoricalRecord {
   /// heart-rate bytes, not a substitute HR — read [heartRate] for the value.
   int? get trustedHeartRateAlt => hrRrValidThisSecond ? heartRateAlt : null;
 
-  /// **Do not use.** The byte is zero in 99% of records and nonzero *only*
-  /// while [sleepState] is [Gen5SleepState.sleep], so this getter surfaces a
-  /// plausible-looking 95-99 on 0.6% of records and null on the rest — with no
-  /// validity signal to say which are real. See [spo2CandidateRaw].
-  @Deprecated(
-    'unsafe to surface: zero in 99% of records, nonzero only during '
-    'band-declared sleep, and with no validity flag. Read spo2CandidateRaw '
-    'if you need the byte.',
-  )
-  int? get spo2Candidate => (spo2CandidateRaw >= 70 && spo2CandidateRaw <= 100)
-      ? spo2CandidateRaw
-      : null;
-
   /// True when BOTH per-detector pSNR values read the -128 unavailable
-  /// sentinel — i.e. the old `opticalAmp == 0x8080` case, which was never a
-  /// real amplitude, just both detectors reporting unavailable at once.
+  /// sentinel — the `0x8080` that reading the pair as one big-endian u16 used
+  /// to report, which was never a real amplitude, just both detectors reporting unavailable at once.
   bool get isOpticalAmpSentinel => !psnrBAvailable && !psnrAAvailable;
 
-  /// bits 0-1 of [sleepStateByte] — the primary-flags bit-8 snapshot.
+  /// bits 0-1 of [sleepStateByte] — the primary-flags bit-8 snapshot. NOT a
+  /// wear indicator: nothing supports reading these bits as on-wrist. Wear
+  /// state comes from the HELLO body, the wrist on/off events, or the band
+  /// no longer emitting type-40 off-wrist.
   int get primaryFlagsBit8Raw => sleepStateByte & 0x03;
 
-  /// bits 2-3 of [sleepStateByte] — the passive strap-fit classifier state.
+  /// bits 2-3 of [sleepStateByte] — the passive strap-fit classifier state,
+  /// not a wake-quality score.
   int get strapFitStateRaw => (sleepStateByte >> 2) & 0x03;
-
-  /// **Deprecated: not a wear indicator.** Bits 0-1 are the primary-flags
-  /// bit-8 snapshot; nothing supports reading
-  /// them as on-wrist. Wear state comes from the HELLO body, the wrist
-  /// on/off events, or the fact that the band stops emitting type-40 off-wrist.
-  @Deprecated('bits 0-1 are the primary-flags bit-8 snapshot, not wear state — '
-      'use primaryFlagsBit8Raw (and do not treat it as on-wrist)')
-  int get onWristRaw => primaryFlagsBit8Raw;
-
-  /// **Deprecated: misnamed.** These bits are the passive strap-fit classifier
-  /// state, not a wake-quality score.
-  @Deprecated('bits 2-3 are the passive strap-fit classifier state — '
-      'use strapFitStateRaw')
-  int get wakeQualityRaw => strapFitStateRaw;
 
   /// bits 4-5 of [sleepStateByte], raw. Prefer [sleepState].
   int get sleepStateRawNibble => (sleepStateByte >> 4) & 0x03;
@@ -554,10 +516,6 @@ const int kGen5V18InnerLen = 112;
 /// different real length.
 /// A caller that wants the signal can compare against [kGen5V18InnerLen].
 const int kGen5V18MinReadableLen = 109;
-
-@Deprecated(
-    'v18 inner is exactly 112 bytes, not a floor — use kGen5V18InnerLen')
-const int kGen5V18MinInnerLen = kGen5V18InnerLen;
 
 class Gen5V18Decoder implements Gen5RecordDecoder {
   const Gen5V18Decoder();
@@ -748,13 +706,6 @@ class Gen5OpticalBlock {
       _view(channel0MetaRaw).getInt16(5, Endian.little);
   int get tia1OffsetCurrentNanoamps => tia1OffsetCurrentRaw * 10;
 
-  @Deprecated(
-    'This field is the TIA 1 offset CURRENT: a signed i16 in 10 nA/LSB, not an '
-    'unsigned ADC offset. Use tia1OffsetCurrentRaw / '
-    'tia1OffsetCurrentNanoamps.',
-  )
-  int get channel0AdcOffset => tia1OffsetCurrentRaw & 0xFFFF;
-
   /// TIA 2's, same three fields at the same relative offsets (descriptor
   /// relative 13/14/18).
   int get channel1Source => channel1MetaRaw[0];
@@ -766,13 +717,6 @@ class Gen5OpticalBlock {
   int get tia2OffsetCurrentRaw =>
       _view(channel1MetaRaw).getInt16(5, Endian.little);
   int get tia2OffsetCurrentNanoamps => tia2OffsetCurrentRaw * 10;
-
-  @Deprecated(
-    'This field is the TIA 2 offset CURRENT: a signed i16 in 10 nA/LSB, not an '
-    'unsigned ADC offset. Use tia2OffsetCurrentRaw / '
-    'tia2OffsetCurrentNanoamps.',
-  )
-  int get channel1AdcOffset => tia2OffsetCurrentRaw & 0xFFFF;
 }
 
 /// The raw optical deep buffer. Layout is confirmed: the body starts at inner
@@ -1065,8 +1009,8 @@ class Gen5V21Decoder implements Gen5RecordDecoder {
 // This replaces an earlier reading of the same bytes (`burstIndex`@13,
 // `frontEndMetaRaw`@15:17, `subChannel`@17, 24 "AC samples", `signalMetric`
 // f32@67, `gainSetting`@71, `gainIndex`@72, `flagA`@73, `flagB`@74) which was
-// REFUTED on hardware. Every deprecated member below says which real field its
-// bytes actually belong to.
+// REFUTED on hardware. Those names are gone rather than kept as aliases: each
+// one returned a real field under a name that said something else.
 //
 // The pinning facts behind this layout, all exact (every R26 record has an
 // R18 twin on the shared (record_index, unix) key — zero orphans):
@@ -1183,13 +1127,6 @@ Gen5PpgReconstruction reconstructSaturatedDeltaWindow(
 }
 
 class Gen5PpgWaveform extends Gen5HistoricalRecord {
-  /// Low byte of the record's sub-second @ inner[11] (frame-abs 19).
-  ///
-  /// This offset is the shared u16 sub-second, not a byte: reading one byte
-  /// here discards its high half (nonzero on 99% of real records).
-  @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
-  final int rawByte19;
-
   /// u16 LE @ inner[11:13] (frame-abs 19) — the SAME field as [tsSubsec], the
   /// record's Q15 sub-second, kept under its historical name.
   ///
@@ -1290,7 +1227,7 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// record. Kept whole; [primaryFlagsBit8Raw] is the pinned two bits.
   ///
   /// NOTE the same caveat R18 carries: these bits are NOT a wear/on-wrist
-  /// reading — see [Gen5HistorySample.onWristRaw]'s deprecation.
+  /// reading — see [Gen5HistorySample.primaryFlagsBit8Raw].
   final int primaryFlagsByte;
 
   /// The low two bits of [primaryFlagsByte] — the part pinned to R18.
@@ -1319,81 +1256,12 @@ class Gen5PpgWaveform extends Gen5HistoricalRecord {
   /// so nobody has to guess whether it was decoded; it carries no field.
   final int alignedTailByte;
 
-  /// COMPAT (deprecated): inner[13] read as a standalone "per-burst counter".
-  /// It is the LOW BYTE of the u16 PIP state/segment counter, so it wraps every
-  /// 256 records and drops the high half.
-  @Deprecated('inner[13] is the low byte of the u16 PIP state/segment counter '
-      '— use pipStateCounter')
-  int get burstIndex => pipStateCounter & 0xFF;
-
-  /// COMPAT (deprecated): inner[15:17] read as a u16 of unestablished meaning.
-  /// Those two bytes are the LOW HALF of [firstSampleAdc], the window's first
-  /// optical ADC code — half of a number, not a field.
-  @Deprecated('inner[15:17] is the low half of the i32 first optical ADC code '
-      '— use firstSampleAdc')
-  int get frontEndMetaRaw => firstSampleAdc & 0xFFFF;
-
-  /// COMPAT (deprecated): inner[17] read as a 0..7 "acquisition channel index".
-  /// It is byte 2 of [firstSampleAdc]'s sign-extended i32 — 0x00..0x07 for a
-  /// positive first sample, 0xF8..0xFF for a negative one. The "~0.2% outliers
-  /// at 0xFD..0xFF" this field's old doc comment reported were negative codes,
-  /// and the band does NOT multiplex channels through this byte.
-  @Deprecated('inner[17] is byte 2 of the sign-extended i32 first optical ADC '
-      'code, not a channel index — use firstSampleAdc')
-  int get subChannel => (firstSampleAdc >> 16) & 0xFF;
-
-  /// COMPAT (deprecated): the 0..7 gate over [subChannel]. There is no channel
-  /// here to gate — it only ever answered "is the first sample positive?".
-  @Deprecated('there is no sub-channel in a v26 record — inner[17] is part of '
-      'the i32 first optical ADC code; use firstSampleAdcOrNull')
-  int? get subChannelKnown {
-    // ignore: deprecated_member_use_from_same_package
-    final b = subChannel;
-    return (b >= 0 && b <= 7) ? b : null;
-  }
-
-  /// COMPAT (deprecated): the f32 at inner[67:71] read as a signal-quality
-  /// metric. It is the max adjacent accel-magnitude delta in g — motion. For a
-  /// real per-second quality weight use R18's
-  /// [Gen5HistorySample.signalQualityLogVariance].
-  @Deprecated('inner[67:71] is the max adjacent accel-magnitude delta in g '
-      '(== R18 dynamicAccelerationG), not a quality metric — use accelDeltaG')
-  double? get signalMetric => accelDeltaG;
-
-  /// COMPAT (deprecated): the two halves of [channelStateWord] read as a gain
-  /// configuration. There is no gain field in a v26 record.
-  @Deprecated('inner[71] is the low byte of the u16 channel-0 processing-state '
-      'word (== R18 statusWord), not a gain — use channelStateWord')
-  int get gainSetting => channelStateWord & 0xFF;
-  @Deprecated(
-      'inner[72] is the high byte of the u16 channel-0 processing-state '
-      'word (== R18 statusWord), not a gain — use channelStateWord')
-  int get gainIndex => (channelStateWord >> 8) & 0xFF;
-
-  /// COMPAT (deprecated): the two trailing bytes read as unnamed flags.
-  @Deprecated('inner[73] is the primary-flags bit-8 snapshot — use '
-      'primaryFlagsByte / primaryFlagsBit8Raw')
-  int get flagA => primaryFlagsByte;
-  @Deprecated('inner[74] is the binary waveform-morphology acceptance result '
-      '(NOT a heartbeat) — use morphologyPass / morphologyByte')
-  int get flagB => morphologyByte;
-
-  /// COMPAT (deprecated): the 24 i16s read as AC-coupled SAMPLES. They are
-  /// DELTAS over a 25-sample window, so summing is required before anything
-  /// treats them as a waveform — which is also why their per-record mean sat
-  /// near zero and looked "DC-removed".
-  @Deprecated('inner[19:67] holds 24 saturated i16 DELTAS, not samples — use '
-      'opticalDeltas, or reconstructWindow() for absolute codes')
-  List<int> get ppgWaveform => opticalDeltas;
-
   const Gen5PpgWaveform({
     required super.histVersion,
     required super.flags,
     required super.recordIndex,
     required super.unix,
     required super.tsSubsec,
-    @Deprecated('frame-abs 19 is the u16 sub-second — use tsSubsec / subSecond')
-    required this.rawByte19,
     required this.segmentId,
     required this.pipStateCounter,
     required this.firstSampleAdc,
@@ -1417,12 +1285,6 @@ const int _kV26DeltasStart = 19; // frame-abs 27, body 6
 /// An exact gate, like v20/v21: a truncated record's trailing metadata would
 /// otherwise decode out of whatever bytes happened to follow.
 const int kGen5V26InnerLen = 76;
-
-@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
-const int kGen5V26MinInnerLen = kGen5V26InnerLen;
-
-@Deprecated('v26 inner is exactly 76 bytes, not a floor — use kGen5V26InnerLen')
-const int kGen5V26MinInnerLenWithMeta = kGen5V26InnerLen;
 
 class Gen5V26Decoder implements Gen5RecordDecoder {
   const Gen5V26Decoder();
@@ -1458,8 +1320,6 @@ class Gen5V26Decoder implements Gen5RecordDecoder {
       unix: hdr.unix,
       tsSubsec: v.getUint16(11, Endian.little),
       flags: hdr.flags,
-      // ignore: deprecated_member_use_from_same_package
-      rawByte19: inner[11],
       segmentId: v.getUint16(11, Endian.little),
       // Body offsets + 13. The trailing block (67/71/73) is byte-identical
       // to the twin R18 record's 33/67/73; see this section's header comment.

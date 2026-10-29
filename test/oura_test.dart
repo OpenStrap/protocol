@@ -361,6 +361,24 @@ void main() {
       expect(parseOuraExtendedEvent(parseOuraFrames(bytes).single), isNull);
     });
 
+    test('parseOuraFrame frames an extended event by its own length byte', () {
+      // Byte 1 is a CRC. 0x5f read as a length would exceed the buffer and
+      // the notification would be dropped before reaching the archive.
+      final bytes = <int>[0xfd, 0x5f, 0x50, 8, 1, 2, 3, 4, 0, 0, 0, 0];
+      final f = parseOuraFrame(bytes)!;
+      expect(f.tag, kOuraEvtExtended);
+      expect(f.payload, bytes.sublist(1));
+      expect(f.payload, parseOuraFrames(bytes).single.payload);
+      // Trailing bytes are the next bundled frame, not this one's payload.
+      expect(parseOuraFrame([...bytes, 0x61, 0x00])!.payload, bytes.sublist(1));
+      // A small CRC no longer decides the slice length either.
+      final small = <int>[0xfd, 0x02, 0x50, 8, 1, 2, 3, 4, 0, 0, 0, 0];
+      expect(parseOuraFrame(small)!.payload, small.sublist(1));
+      // Truncated header or body is null, never a short payload.
+      expect(parseOuraFrame(const <int>[0xfd, 0x00, 0x50]), isNull);
+      expect(parseOuraFrame(bytes.sublist(0, 11)), isNull);
+    });
+
     test('the ring rejecting a command as unsupported is told apart', () {
       expect(ouraIsUnsupported(parseOuraFrame(_hex('300110'))!, 0x10), isTrue);
       expect(ouraIsUnsupported(parseOuraFrame(_hex('300110'))!, 0x2f), isFalse);

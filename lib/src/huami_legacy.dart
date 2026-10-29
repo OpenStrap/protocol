@@ -3,7 +3,8 @@
 // band's AES auth (which lives with the edge adapter).
 //
 // CLOCK — Current Time (0x2A2B), 11 bytes: year u16 LE, month, day, hour,
-// minute, second, day of week (0 = Sunday … 6 = Saturday), milliseconds / 4,
+// minute, second, day of week (1 = Monday … 7 = Sunday; 0 means unknown, so
+// Sunday must not wrap to 0), milliseconds / 4,
 // adjust reason (8 while daylight saving time is in effect, else 0), then the
 // UTC offset (DST included) as a signed byte in 15-minute units.
 //
@@ -48,7 +49,7 @@ List<int> huamiTimeValue(DateTime local) => [
       local.hour,
       local.minute,
       local.second,
-      local.weekday % 7,
+      local.weekday,
       local.millisecond ~/ 4,
       _inDst(local) ? 8 : 0,
       _tzQuarters(local),

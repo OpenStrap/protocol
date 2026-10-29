@@ -146,8 +146,9 @@ Uint8List cmdGetClock(int seq, {BandProfile profile = BandProfile.gen4}) =>
 /// SHARED ACROSS GENERATIONS — this is the correct builder for WHOOP 5 too:
 /// gen5 takes `SET_CLOCK(10)` carrying
 /// `<whole_seconds:u32le><subseconds:u32le>`, and a real gen5 strap answers
-/// `SUCCESS` for exactly this 8-byte form. Prefer this over
-/// [cmdSetClockGen5], whose opcode 146 is not an established WHOOP opcode.
+/// `SUCCESS` for exactly this 8-byte form. There is no separate gen5 clock
+/// builder: opcode 146 ("SET_CLOCK_MAVERICK") is not an established WHOOP
+/// opcode, and a set the strap ignores fails silently with the RTC unlatched.
 ///
 /// [now] defaults to `DateTime.now()`; pass a fixed instant for tests.
 Uint8List cmdSetClock(int seq,
@@ -616,56 +617,6 @@ Uint8List cmdDisableAlarm(int seq,
 Uint8List gen5ClientHello({int seq = 1}) =>
     buildCommand(seq, Cmd.getHello, const [0x01], BandProfile.gen5);
 
-// ── gen5 clock (SET_CLOCK_MAVERICK=146 / GET_CLOCK_GEN5=147) ───────────────
-//
-// gen5 replaces gen4's SET_CLOCK(0x0A)/GET_CLOCK(0x0B) with distinct opcode
-// VALUES (§1.4). The bodies are NOT gen4's 8-byte two-u32 form — see each
-// builder's own doc for the shape it sends. Still unverified against a real
-// strap end to end: the bytes are right, but nothing here has watched an RTC
-// actually latch.
-
-/// gen5 SET_CLOCK_MAVERICK (146) — **UNVERIFIED; prefer [cmdSetClock] (10).**
-///
-/// Body is `[0x01][u32 epoch][u16 subsec]`.
-///
-/// Opcode **146 is not an established WHOOP opcode**, and no "Maverick clock"
-/// command is known to exist. What IS established for gen5: `SET_CLOCK(10)`
-/// with `<u32 sec><u32 subsec>`, for which a real gen5 strap answers
-/// `SUCCESS` while `GET_CLOCK(11)` reads the time back.
-///
-/// So this builder sends a guess where a confirmed command exists. That is
-/// especially dangerous for the clock: a rejected or no-op'd set is silent —
-/// the RTC simply never latches, and every absolute timestamp afterwards
-/// (alarms above all) is armed against a clock that was never set.
-///
-/// Kept only for source compatibility. Do NOT send it to "find out what it
-/// does": a clock write is a mutation, not a read.
-@Deprecated('opcode 146 is not an established opcode; gen5 '
-    'uses SET_CLOCK(10) — use cmdSetClock(seq, profile: BandProfile.gen5)')
-Uint8List cmdSetClockGen5(int seq, {DateTime? now}) {
-  final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
-  final sec = ms ~/ 1000;
-  final subsec = ((ms % 1000) * 32768) ~/ 1000;
-  final payload = <int>[
-    revision1,
-    ..._leTimestamp(sec, subsec),
-    0,
-    0,
-  ];
-  return buildCommand(seq, Cmd.setClockMaverick, payload, BandProfile.gen5);
-}
-
-/// gen5 GET_CLOCK_GEN5 (147) — **UNVERIFIED; prefer [cmdGetClock] (11).**
-///
-/// Takes a `[0x01]` revision body. Same problem as [cmdSetClockGen5]: opcode
-/// 147 is not an established WHOOP opcode, while `GET_CLOCK(11)` with an
-/// EMPTY body is hardware-confirmed to answer on a real gen5 strap. Kept for
-/// source compatibility only.
-@Deprecated('opcode 147 is not an established opcode; gen5 '
-    'uses GET_CLOCK(11) — use cmdGetClock(seq, profile: BandProfile.gen5)')
-Uint8List cmdGetClockGen5(int seq) =>
-    buildCommand(seq, Cmd.getClockGen5, const [revision1], BandProfile.gen5);
-
 // ── gen5 Maverick haptics (RUN_HAPTIC_PATTERN_MAVERICK = 0x13/19) ──────────
 
 /// gen5's Maverick haptic-buzz command — a DIFFERENT opcode from gen4's
@@ -990,10 +941,8 @@ Uint8List cmdStopHaptics(int seq, {BandProfile profile = BandProfile.gen4}) =>
 //   125 TOGGLE_LABRADOR_RAW_SAVE         00=disable  01=enable
 //   139 TOGGLE_LABRADOR_FILTERED         00=disable  01=enable
 //
-// The old `cmdEcg*` builders below modelled 124 as a boolean arm/disarm. That
-// is wrong at the byte level, not just in naming: `01 01` — what the old
-// builder sent to "arm" — is the STOP operation, and `01 00` is not an
-// operation the strap defines at all.
+// The bytes matter: sending `01 01` to 124 as an "arm" flag is the STOP
+// operation, and `01 00` is not an operation the strap defines at all.
 
 /// The operation byte of TOGGLE_LABRADOR_DATA_GENERATION (124) — the
 /// filtered-reading (R17) lifecycle. It is an operation selector, not a
@@ -1064,47 +1013,3 @@ Uint8List cmdLabradorFiltered(int seq, bool on,
     buildCommand(seq, Cmd.toggleLabradorFiltered, [revision1, on ? 0x01 : 0x00],
         profile);
 
-/// Arm / disarm an ECG reading (ECG main control, 0x7C) — `[0x01][0|1]`.
-///
-/// **Wrong bytes, kept only for source compatibility.** Opcode 124 is
-/// TOGGLE_LABRADOR_DATA_GENERATION and its second byte is an operation, not a
-/// flag: `cmdEcgControl(seq,
-/// true)` emits `01 01`, which is the **STOP** operation, and
-/// `cmdEcgControl(seq, false)` emits `01 00`, which is not a defined
-/// operation at all. Use [cmdLabradorDataGeneration].
-@Deprecated('opcode 124 takes an OPERATION byte, not a bool: this builder\'s '
-    '`true` sends 01 01 = the STOP operation, and `false` sends the undefined '
-    '01 00 — use cmdLabradorDataGeneration(seq, LabradorOperation.start)')
-Uint8List cmdEcgControl(int seq, bool on,
-        {BandProfile profile = BandProfile.gen4}) =>
-    buildCommand(seq, Cmd.toggleLabradorDataGeneration,
-        [revision1, on ? 0x01 : 0x00], profile);
-
-/// Start/stop the raw ECG trace (0x7E) — `[0x01][on]`.
-///
-/// **Wrong opcode, kept only for source compatibility.** 0x7E (126) is not
-/// an established WHOOP 5 opcode — origin unknown, most likely gen4 or
-/// third-party lore. The raw save of a filtered
-/// reading is TOGGLE_LABRADOR_RAW_SAVE (125): use [cmdLabradorRawSave], which
-/// emits the identical `01 00` / `01 01` body on the opcode the strap
-/// actually implements.
-@Deprecated('opcode 126 (0x7E) is not an established WHOOP 5 opcode '
-    '— the raw save is TOGGLE_LABRADOR_RAW_SAVE (125): use '
-    'cmdLabradorRawSave(seq, on)')
-Uint8List cmdEcgSendRaw(int seq, bool on,
-        {BandProfile profile = BandProfile.gen4}) =>
-    // ignore: deprecated_member_use_from_same_package
-    buildCommand(
-        seq, Cmd.ecgSendRawData, [revision1, on ? 0x01 : 0x00], profile);
-
-/// Start/stop the filtered ECG trace (0x8B) — `[0x01][on]`.
-///
-/// Body-correct: this is TOGGLE_LABRADOR_FILTERED (139) under its old name,
-/// and the bytes are unchanged. Renamed only, so [cmdLabradorFiltered] is a
-/// drop-in replacement.
-@Deprecated('renamed: opcode 139 is TOGGLE_LABRADOR_FILTERED and the trace is '
-    'a filtered reading, not an ECG — use cmdLabradorFiltered(seq, on) '
-    '(identical bytes)')
-Uint8List cmdEcgSendFiltered(int seq, bool on,
-        {BandProfile profile = BandProfile.gen4}) =>
-    cmdLabradorFiltered(seq, on, profile: profile);

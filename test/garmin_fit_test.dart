@@ -112,4 +112,87 @@ void main() {
     final bad = Uint8List.fromList(good)..[4] = good[4] - 2;
     expect(() => parseFit(bad), throwsFormatException);
   });
+
+  test('a timestamp that is not a single integer is a FormatException', () {
+    List<int> fit(int global, int field, int size, int base, List<int> bytes) =>
+        (FitWriter()
+              ..define(0, global, [(field, size, base)])
+              ..data(0, bytes))
+            .build();
+    // 253 declared as uint32[2], float32 NaN, a whole float32 (1e9), and a
+    // string; 26 as uint16[2].
+    for (final f in [
+      fit(kFitMsgMonitoring, 253, 8, 0x86, [...u32(fitTs(t0)), ...u32(1)]),
+      fit(kFitMsgMonitoring, 253, 4, 0x88, [0x00, 0x00, 0xc0, 0x7f]),
+      fit(kFitMsgMonitoring, 253, 4, 0x88, [0x28, 0x6b, 0x6e, 0x4e]),
+      fit(kFitMsgMonitoring, 253, 4, 0x88, [0x00, 0x00, 0x80, 0x7f]),
+      fit(kFitMsgMonitoring, 253, 4, 7, 'abc\x00'.codeUnits),
+      fit(kFitMsgMonitoring, 26, 4, 0x84, [...u16(1), ...u16(2)]),
+    ]) {
+      expect(() => parseFit(f), throwsFormatException);
+    }
+  });
+
+  test('a float NaN or Inf in an integer field skips the sample, never throws',
+      () {
+    const nan = [0x00, 0x00, 0xc0, 0x7f], inf = [0x00, 0x00, 0x80, 0x7f];
+    List<FitMessage> fit(int global, int field, List<int> bits) =>
+        parseFit((FitWriter()
+              ..define(0, global, [(253, 4, 0x86), (field, 4, 0x88)])
+              ..data(0, [...u32(fitTs(t0)), ...bits]))
+            .build());
+    for (final bits in [nan, inf]) {
+      expect(fitMonitoringHr(fit(kFitMsgMonitoring, 27, bits)), isEmpty);
+      expect(fitDailySteps(fit(kFitMsgMonitoring, 3, bits)), isEmpty);
+      expect(fitDailySteps(fit(kFitMsgMonitoring, 5, bits)), isEmpty);
+      expect(fitSleepStages(fit(kFitMsgSleepLevel, 0, bits)), isEmpty);
+      expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, bits)), isEmpty);
+      expect(fitSpo2(fit(kFitMsgSpo2Data, 0, bits)), isEmpty);
+      expect(fitRespiration(fit(kFitMsgRespirationRate, 0, bits)), isEmpty);
+      expect(fitHrvLastNight(fit(kFitMsgHrvStatusSummary, 1, bits)), isEmpty);
+      expect(fitStress(fit(kFitMsgStressLevel, 0, bits)), isEmpty);
+      expect(fitStress(fit(kFitMsgStressLevel, 1, bits)), isEmpty);
+    }
+    // Directly, since on the web `double.infinity is int` holds.
+    for (final v in [double.infinity, double.negativeInfinity, double.nan]) {
+      expect(FitMessage(0, {1: v}, null).int_(1), isNull);
+    }
+    // A float that holds a whole number still reads (72.0 = 0x42900000).
+    expect(fitRestingHr(fit(kFitMsgMonitoringHrData, 1, [0, 0, 0x90, 0x42])),
+        [(t0, 72)]);
+  });
+
+  test('a stress sample whose own time is unreadable is dropped, not refiled',
+      () {
+    List<FitMessage> fit(List<(int, int, int)> f, List<int> bytes) =>
+        parseFit((FitWriter()
+              ..define(0, kFitMsgStressLevel, f)
+              ..data(0, bytes))
+            .build());
+    // Field 1 NaN next to a good running timestamp and score.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x88)],
+            [...u32(fitTs(t0)), ...u16(40), 0x00, 0x00, 0xc0, 0x7f])),
+        isEmpty);
+    // Field 1 sent as the uint32 invalid value.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x86)],
+            [...u32(fitTs(t0)), ...u16(40), 0xff, 0xff, 0xff, 0xff])),
+        isEmpty);
+    // Field 1 declared float32 holding a whole number (1e9).
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x88)],
+            [...u32(fitTs(t0)), ...u16(40), 0x28, 0x6b, 0x6e, 0x4e])),
+        isEmpty);
+    // A good field 1 is the sample's own time.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x86)],
+            [...u32(fitTs(t0)), ...u16(40), ...u32(fitTs(t0 + 60))])),
+        [(t0 + 60, 40)]);
+    // No field 1 at all: the running timestamp is the sample's time.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83)],
+            [...u32(fitTs(t0)), ...u16(40)])),
+        [(t0, 40)]);
+  });
 }

@@ -141,9 +141,6 @@ void main() {
       expect(sample.psnrBAvailable, isTrue);
       expect(sample.psnrAAvailable, isTrue);
       expect(sample.isOpticalAmpSentinel, isFalse); // not both-unavailable
-      // One compat assertion so the deprecated u16 view stays wired correctly.
-      // ignore: deprecated_member_use_from_same_package
-      expect(sample.opticalBaseline, 0x656F);
     });
 
     test('experimental fields exposed raw, not fabricated', () {
@@ -154,8 +151,6 @@ void main() {
       // frame-abs 82 is not SpO2 — zero in 99% of records and nonzero only
       // during band-declared sleep. This fixture is awake, so it reads 0.
       expect(sample.spo2CandidateRaw, 0);
-      // ignore: deprecated_member_use_from_same_package
-      expect(sample.spo2Candidate, isNull);
     });
 
     test('band sleep state: this fixture is awake', () {
@@ -205,8 +200,8 @@ void main() {
         final s = parseGen5Historical(inner) as Gen5HistorySample;
         expect(s.sleepStateRawNibble, (b >> 4) & 0x03);
         expect(s.sleepState, Gen5SleepState.values[(b >> 4) & 0x03]);
-        expect(s.onWristRaw, b & 0x03);
-        expect(s.wakeQualityRaw, (b >> 2) & 0x03);
+        expect(s.primaryFlagsBit8Raw, b & 0x03);
+        expect(s.strapFitStateRaw, (b >> 2) & 0x03);
       }
     });
   });
@@ -234,8 +229,7 @@ void main() {
       // a separate field.
       expect(wf.recordIndex, 25444781);
       expect(wf.unix, 1780917232);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, 174);
+      expect(wf.segmentId & 0xFF, 174);
       expect(wf.pipStateCounter, 1);
       // These 24 i16s are DELTAS over a 25-sample window (body 6), not
       // samples — see `reconstructs a 25-sample window` below for the
@@ -291,12 +285,9 @@ void main() {
         () {
       final wf = decode(frame);
       expect(wf.segmentId, 18350);
-      // The deprecated byte read returns 18350 & 0xFF — the high byte (71)
-      // is discarded. On real records that byte is nonzero 99% of the time.
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, 174);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.rawByte19, wf.segmentId & 0xFF);
+      // A byte read would return 18350 & 0xFF = 174 and discard the high
+      // byte (71). On real records that byte is nonzero 99% of the time.
+      expect(wf.segmentId & 0xFF, 174);
       expect(wf.segmentId >> 8, isNonZero);
     });
 
@@ -353,8 +344,7 @@ void main() {
       final wf = parseGen5Historical(inner) as Gen5PpgWaveform;
       expect(wf.firstSampleAdc, -148726);
       expect(wf.firstSampleAdcInRange, isTrue);
-      // ignore: deprecated_member_use_from_same_package
-      expect(wf.subChannel, 0xFD); // the "outlier" the old reading saw
+      expect(inner[17], 0xFD); // the "outlier" the old reading saw
     });
 
     test('an impossible first sample is exposed raw, not fabricated', () {
@@ -436,23 +426,6 @@ void main() {
       expect(r.outOfRangeSampleIndices, [2, 3]); // 524500/524400 > 524287
       expect(r.divergenceProven, isTrue);
       expect(r.hasSaturatedDelta, isFalse); // independent of the clamp
-    });
-
-    test('the deprecated members map onto the real fields they misread', () {
-      // Every name below is deprecated; the package's analysis_options mutes
-      // deprecated_member_use_from_same_package precisely so these stay
-      // testable. See the class for what each byte really is.
-      final wf = decode(frame);
-      expect(wf.burstIndex, wf.pipStateCounter & 0xFF);
-      expect(wf.frontEndMetaRaw, wf.firstSampleAdc & 0xFFFF); // 50627
-      expect(wf.subChannel, (wf.firstSampleAdc >> 16) & 0xFF); // 5
-      expect(wf.subChannelKnown, 5); // "inside 0..7" only ever meant positive
-      expect(wf.signalMetric, wf.accelDeltaG);
-      expect(wf.gainSetting, wf.channelStateWord & 0xFF); // 80
-      expect(wf.gainIndex, (wf.channelStateWord >> 8) & 0xFF); // 8
-      expect(wf.flagA, wf.primaryFlagsByte);
-      expect(wf.flagB, wf.morphologyByte);
-      expect(wf.ppgWaveform, wf.opticalDeltas); // deltas, never samples
     });
 
     test('a record short of the exact 76-byte length is rejected outright', () {
@@ -736,7 +709,7 @@ void main() {
     test('Gen5HelloInfo.parse decodes the revision-1 body map', () {
       final h = Gen5HelloInfo.parse(gen5HelloBody())!;
       expect(h.helloRevision, 1);
-      expect(h.batteryPct, 90); // 901 ~/ 10
+      expect(h.batteryPct, closeTo(90.1, 1e-9)); // raw 901 = 90.1%
       expect(h.charging, isFalse);
       expect(h.tsSeconds, 1780000000);
       expect(h.tsSubseconds, 28835);
@@ -805,7 +778,7 @@ void main() {
       body[0] = 2; // some future revision
       final h = Gen5HelloInfo.parse(body)!;
       expect(h.helloRevision, 2);
-      expect(h.batteryPct, 90);
+      expect(h.batteryPct, closeTo(90.1, 1e-9));
       expect(h.serial, '5AG0000001');
       expect(h.firmwareVersion, '50.40.1.0');
       expect(h.wristOn, isTrue);
@@ -817,6 +790,29 @@ void main() {
       final h = Gen5HelloInfo.parse(body)!;
       expect(h.batteryPct, isNull);
       expect(h.serial, '5AG0000001'); // the rest of the record still decodes
+    });
+
+    test('battery keeps tenths and refuses raw values past 1000', () {
+      // Same scale and cap as the gen4 BATTERY_LEVEL event, so a WHOOP 5 at
+      // 19.9% doesn't read 19% on connect and 19.9% a few seconds later.
+      for (final e in {
+        199: 19.9,
+        99: 9.9,
+        9: 0.9,
+        0: 0.0,
+        1000: 100.0,
+      }.entries) {
+        final body = gen5HelloBody();
+        ByteData.sublistView(body).setUint32(1, e.key, Endian.little);
+        expect(Gen5HelloInfo.parse(body)!.batteryPct, closeTo(e.value, 1e-9),
+            reason: 'raw ${e.key}');
+      }
+      for (final raw in [1001, 1005, 1009, 1010]) {
+        final body = gen5HelloBody();
+        ByteData.sublistView(body).setUint32(1, raw, Endian.little);
+        expect(Gen5HelloInfo.parse(body)!.batteryPct, isNull,
+            reason: 'raw $raw');
+      }
     });
 
     test('gen5 GET_HELLO omits the hello when the body is too short', () {

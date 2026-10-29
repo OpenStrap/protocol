@@ -64,15 +64,10 @@ export 'src/gen5_records.dart'
         kGen5HistoricalDecoders,
         kGen5V22KnownTags,
         kGen5V22InnerLen,
-        // The exact lengths are the live names; the *MinInnerLen* aliases below
-        // are deprecated and exported only so existing callers still resolve.
         kGen5V18InnerLen,
         kGen5V26InnerLen,
-        kGen5V18MinInnerLen,
         kGen5V20InnerLen,
         kGen5V21InnerLen,
-        kGen5V26MinInnerLen,
-        kGen5V26MinInnerLenWithMeta,
         kGen5AccelScaleG,
         kGen5GyroScaleDps,
         isGen5ImuBuffer,
@@ -96,8 +91,7 @@ export 'src/live.dart'
         realtimeRr,
         decodeR10Imu,
         decodeR11Raw,
-        decodeRecord,
-        decodeBatch;
+        decodeRecord;
 
 // Source 2 — CRC, constants, framing, commands.
 export 'src/crc.dart' show crc8, crc32, crc16Modbus;
@@ -141,8 +135,6 @@ export 'src/commands.dart'
         cmdDisableAlarm,
         kDefaultAlarmHaptics,
         gen5ClientHello,
-        cmdSetClockGen5,
-        cmdGetClockGen5,
         cmdBuzzGen5Maverick,
         cmdSetConfigGen5,
         cmdSetDeviceConfigValueGen5,
@@ -170,9 +162,7 @@ export 'src/commands.dart'
         cmdRawDataStart, // 81
         cmdRawDataStop, // 82
         cmdStopHaptics, // 122
-        // Filtered reading ("Labrador", R17). The wrong-bodied cmdEcgControl
-        // (124 as a bool) and the opcode-126 cmdEcgSendRaw stay deprecated
-        // and unexported.
+        // Filtered reading ("Labrador", R17).
         cmdLabradorDataGeneration, // 124 — R17 lifecycle
         cmdLabradorRawSave, // 125 — R17 lifecycle
         cmdLabradorFiltered, // 139 — R17 lifecycle

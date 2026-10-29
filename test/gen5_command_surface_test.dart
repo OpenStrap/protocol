@@ -540,38 +540,6 @@ void main() {
         expect(enabled.inner.sublist(3, 5), [0x01, 0x01]);
       }
     });
-
-    // The deprecated builders keep their exact old bytes: existing callers are
-    // flagged, not silently re-pointed. Two of the three are wrong on the wire
-    // — that is what the deprecation says, and this pins it.
-    test('deprecated ECG builders still emit their old (wrong) bytes', () {
-      // ignore: deprecated_member_use_from_same_package
-      final armed = parseFrame(cmdEcgControl(1, true, profile: gen5),
-          profile: gen5)!;
-      expect(armed.opcode, 0x7C);
-      expect(armed.inner.sublist(3, 5), [0x01, 0x01],
-          reason: 'the old "arm" is the STOP operation');
-      // ignore: deprecated_member_use_from_same_package
-      final disarmed = parseFrame(cmdEcgControl(1, false, profile: gen5),
-          profile: gen5)!;
-      expect(disarmed.inner.sublist(3, 5), [0x01, 0x00],
-          reason: 'the old "disarm" is an undefined operation byte');
-
-      // ignore: deprecated_member_use_from_same_package
-      final raw =
-          parseFrame(cmdEcgSendRaw(1, true, profile: gen5), profile: gen5)!;
-      expect(raw.opcode, 0x7E,
-          reason: '126 is not an established WHOOP opcode');
-      expect(raw.inner.sublist(3, 5), [0x01, 0x01]);
-
-      // 139 was only misnamed — same bytes as the replacement.
-      // ignore: deprecated_member_use_from_same_package
-      final filtered = cmdEcgSendFiltered(1, true, profile: gen5);
-      expect(filtered, cmdLabradorFiltered(1, true, profile: gen5));
-      final f = parseFrame(filtered, profile: gen5)!;
-      expect(f.opcode, 0x8B);
-      expect(f.inner.sublist(3, 5), [0x01, 0x01]);
-    });
   });
 
   group('constants', () {

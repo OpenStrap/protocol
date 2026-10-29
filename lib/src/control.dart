@@ -165,6 +165,17 @@ class R10Lite {
 
 R10Lite? parseR10Lite(Uint8List inner) {
   if (inner.length < 18) return null;
+  // Same gate as every other R10 path: a live raw (0x2B) frame at any length,
+  // or a historical (0x2F) frame of at least [kR10MinLength]. 10 is not a
+  // known historical layout version, so a short 0x2F record whose layout byte
+  // happens to be 10 would otherwise have unrelated bytes read as HR@17 and
+  // R-R@19 — and on the historical ingest path that commits as decoded, skips
+  // the undecodable archive, and gets acked for trim.
+  final pkt = inner[0];
+  if (pkt != PacketType.realtimeRawData &&
+      !(pkt == PacketType.historicalData && inner.length >= kR10MinLength)) {
+    return null;
+  }
   return R10Lite(u32(inner, 7), inner[17], u32(inner, 3),
       rrIntervalsMs: _r10Rr(inner));
 }
@@ -335,11 +346,15 @@ class Gen5HelloInfo {
 
   final int helloRevision; // body[0]
 
-  /// body[1..4] u32 LE, integer-divided by 10. **Null when the raw value is
-  /// outside 0..100** — a percentage is 0..100 by definition, so anything else
-  /// is a mis-read field, and this package's rule is to omit it rather than
-  /// report or clamp a number the bytes do not support.
-  final int? batteryPct;
+  /// body[1..4] u32 LE in tenths of a percent, rounded to 0.1% — the same
+  /// scale and rounding as the gen4 HELLO and BATTERY_LEVEL decoders, so the
+  /// value doesn't jump when the first battery event follows the hello.
+  /// **Null when the raw value is outside 0..1000** — a percentage is 0..100
+  /// by definition, so anything else is a mis-read field, and this package's
+  /// rule is to omit it rather than report or clamp a number the bytes do not
+  /// support. The raw value is checked, not a quotient: integer division let
+  /// 1001..1009 through as 100.
+  final double? batteryPct;
   final bool charging; // body[5] bit0
   final int tsSeconds; // body[6..9] u32 LE — whole seconds
   final int tsSubseconds; // body[10..13] u32 LE — 32768 units/s
@@ -442,10 +457,10 @@ class Gen5HelloInfo {
       return sb.toString();
     }
 
-    final batteryRaw = u32(body, 1) ~/ 10;
+    final batteryRaw = u32(body, 1);
     return Gen5HelloInfo(
       helloRevision: body[0],
-      batteryPct: batteryRaw <= 100 ? batteryRaw : null,
+      batteryPct: batteryRaw <= 1000 ? _round(batteryRaw / 10.0, 1) : null,
       charging: (body[5] & 0x01) != 0,
       tsSeconds: u32(body, 6),
       tsSubseconds: u32(body, 10),
@@ -508,7 +523,22 @@ HelloInfo parseHello(Uint8List payload) {
   // right before the battery u32 at [3]. Starting at 2 read 0x04 | lo << 8,
   // which for a battery low byte of 1..3 lands in range (26.0/51.6/77.2%) and
   // stopped the scan before the real field.
-  for (int off = 3; off < 10; off++) {
+  //
+  // When the 0x04 marker is there the layout is known, so the u32 at [3] is
+  // read directly and 0..9 (0.0-0.9%) is a real reading. The scan rejects
+  // anything below 10, walks over the u32's zero high bytes and lands on the
+  // next header field (payload[8..11] is a changing counter), so a band that
+  // is nearly flat could report 25.6% or 30.0%. A marked body whose u32 is
+  // out of range leaves batteryPct null rather than falling back to a scan
+  // over those same counter bytes.
+  if (payload[2] == 0x04) {
+    final v = u32(payload, 3);
+    if (v <= 1000) {
+      final pct = _round(v / 10.0, 1);
+      if (_validBatteryPct(pct)) info.batteryPct = pct;
+    }
+  }
+  for (int off = 3; payload[2] != 0x04 && off < 10; off++) {
     if (off + 2 <= payload.length) {
       final v = u16(payload, off);
       if (v >= 10 && v <= 1000) {
@@ -659,10 +689,10 @@ EventInfo? parseEvent(
       dec['double_tap'] = true; // no payload beyond event+timestamp, confirmed
       break;
     case EventId.batteryLevel:
-      // Byte-verified on a real BATTERY_LEVEL fixture: soc @ body[1] (u16,
+      // Byte-verified on a real BATTERY_LEVEL fixture: soc @ body[1] (u32,
       // DECI-percent — divide by 10; this is a DIFFERENT convention from
       // COMMAND_RESPONSE's GET_BATTERY_LEVEL, which is direct-percent on
-      // gen5. Don't conflate the two.), battery_mV @ body[5] (u16),
+      // gen5. Don't conflate the two.), battery_mV @ body[5] (u32),
       // charging @ body[9]. Shared across gen4/gen5 — these are
       // inner-relative offsets, identical across generations.
       //
@@ -671,12 +701,19 @@ EventInfo? parseEvent(
       // packed pairs at [11:15] and [15:19]. `charging` used to be read from
       // [10], the byte that is always zero, so it was permanently false.
       if (body.length >= 12) {
-        final soc = _round(u16(body, 1) / 10.0, 1);
+        // Read as the u32s they are: a nonzero high half is a different
+        // layout, and reading only the low half let it pass the range gates.
+        final soc = _round(u32(body, 1) / 10.0, 1);
+        // An out-of-range SoC means this body is not the layout being read,
+        // so the other fields from it are not trusted either. A millivolt
+        // reading outside a Li-ion cell's range is dropped on its own: hosts
+        // bank it, and one garbage value can pin a lifetime MAX.
         if (soc.isFinite && soc >= 0.0 && soc <= 100.0) {
           dec['battery_pct'] = soc;
+          final mv = u32(body, 5);
+          if (mv >= 2500 && mv <= 4500) dec['battery_mv'] = mv;
+          dec['charging'] = body[9] != 0;
         }
-        dec['battery_mv'] = u16(body, 5);
-        dec['charging'] = body[9] != 0;
       }
       break;
     case EventId.strapConditionReport:

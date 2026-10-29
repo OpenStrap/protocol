@@ -454,6 +454,41 @@ void main() {
           envelopePacket(0x30, EventId.batteryLevel, batteryBody(0)))!;
       expect(off.decoded['charging'], isFalse);
     });
+
+    test('BATTERY_LEVEL with a garbage body emits no millivolts or charging',
+        () {
+      List<int> body({required int soc, required int mv}) => [
+            9, // not the documented revision
+            ...le32(soc),
+            ...le32(mv),
+            1, // [9]
+            0,
+            ...List<int>.filled(8, 0),
+          ];
+      // SoC rejected: nothing else from the same body is trusted either.
+      final junk = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 0xFFFF, mv: 60000)))!;
+      expect(junk.decoded.containsKey('battery_pct'), isFalse);
+      expect(junk.decoded.containsKey('battery_mv'), isFalse);
+      expect(junk.decoded.containsKey('charging'), isFalse);
+
+      // Plausible SoC but a voltage no Li-ion cell reports: drop only mV.
+      final badMv = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 855, mv: 60000)))!;
+      expect(badMv.decoded['battery_pct'], closeTo(85.5, 1e-9));
+      expect(badMv.decoded.containsKey('battery_mv'), isFalse);
+      expect(badMv.decoded['charging'], isTrue);
+
+      // The fields are u32s: a nonzero high half is out of range even when the
+      // low half alone would pass.
+      final highSoc = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 0x10000 + 855, mv: 3900)))!;
+      expect(highSoc.decoded.containsKey('battery_pct'), isFalse);
+      final highMv = parseEvent(envelopePacket(
+          0x30, EventId.batteryLevel, body(soc: 855, mv: 0x10000 + 3900)))!;
+      expect(highMv.decoded['battery_pct'], closeTo(85.5, 1e-9));
+      expect(highMv.decoded.containsKey('battery_mv'), isFalse);
+    });
   });
 
   // Field-level bodies exist for four event ids the

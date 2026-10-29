@@ -36,7 +36,20 @@ class Frame {
   /// whose revision byte is not rev-1 — surfacing it instead of mis-decoding.
   final bool frameRevOk;
 
-  Frame(this.inner, this.crc8Ok, this.crc32Ok, {this.frameRevOk = true});
+  /// Set only on a frame [FrameReassembler] gave up on because a lost
+  /// notification left it short and a complete frame was already buffered
+  /// behind it (see [FrameReassembler.giveUpTruncatedFrames]). Its `inner` is
+  /// just the bytes that did arrive, so [valid] is false.
+  ///
+  /// This says how the frame was lost, not whether it was. Every frame that is
+  /// not [valid] is a record that did not arrive intact — a notification lost
+  /// in the middle of a frame shows up as a plain CRC failure with this flag
+  /// false — so the trim decision must key on [valid] (or
+  /// [FrameReassembler.lostFrames]), never on this flag alone.
+  final bool truncated;
+
+  Frame(this.inner, this.crc8Ok, this.crc32Ok,
+      {this.frameRevOk = true, this.truncated = false});
 
   /// Band-neutral alias for the header-integrity result.
   bool get headerCrcOk => crc8Ok;
@@ -121,6 +134,34 @@ class FrameReassembler {
   final List<int> _buf = [];
   final BandProfile profile;
   int _resyncs = 0;
+  int _truncations = 0;
+  int _lostFrames = 0;
+
+  /// Whether a frame left short by a lost notification is given up as soon as
+  /// a complete frame passing both CRCs is buffered behind it.
+  ///
+  /// Off by default, and only safe to turn on for a caller that refuses to
+  /// trim any offload burst in which [lostFrames] moved. With it off, the
+  /// HISTORY_END the band sends after a burst whose last frame lost a
+  /// notification stays stuck behind that frame: nothing is ACKed, the idle
+  /// watchdog abandons the burst, and the band offers the record again. With
+  /// it on, that END is delivered — and a caller that ACKs it trims a record
+  /// that exists nowhere else.
+  final bool giveUpTruncatedFrames;
+
+  /// Number of frames given up as truncated (each emitted with
+  /// [Frame.truncated]). Always 0 unless [giveUpTruncatedFrames] is on. A
+  /// subset of [lostFrames]; use that for the trim decision.
+  int get truncations => _truncations;
+
+  /// Number of frames emitted that are not [Frame.valid]: a payload CRC
+  /// failure (including a notification lost in the middle of a frame) or a
+  /// frame given up as truncated. Each one is a record that did not arrive
+  /// intact. A caller that saw this move during an offload burst must not ACK
+  /// that burst's HISTORY_END, whichever way the frame was lost, or the band
+  /// trims records that were never banked. Bytes skipped by a resync never
+  /// become a frame at all, so watch [resyncs] alongside this.
+  int get lostFrames => _lostFrames;
 
   /// Number of times the reassembler skipped a byte because the envelope did
   /// not hold up (bad SOF, implausible length, or a length field whose crc8
@@ -128,7 +169,8 @@ class FrameReassembler {
   /// length is discarded here, so it never reaches [Frame.valid].
   int get resyncs => _resyncs;
 
-  FrameReassembler({this.profile = BandProfile.gen4});
+  FrameReassembler(
+      {this.profile = BandProfile.gen4, this.giveUpTruncatedFrames = false});
 
   List<Frame> feed(List<int> chunk) {
     final out = <Frame>[];
@@ -176,10 +218,36 @@ class FrameReassembler {
         if (!resync()) break;
         continue;
       }
-      if (_buf.length < total) break; // wait for the rest of this frame
+      if (_buf.length < total) {
+        // A lost notification leaves this frame short, and the band sends
+        // HISTORY_END and then waits for the ACK — so no further bytes come
+        // to complete it, and the END sits inside the pending span until a
+        // watchdog aborts the burst. Holding it there is what keeps the band
+        // from trimming the lost record, so the give-up below is opt-in (see
+        // [giveUpTruncatedFrames]).
+        //
+        // A complete frame passing both CRCs inside the span means this one
+        // was truncated: give it up and resume there. Emitted as a CRC failure
+        // and counted in [lostFrames] so the caller can refuse to trim the
+        // burst the END closes. A payload that happened to contain a whole
+        // valid frame would need both an 8-bit and a 32-bit CRC to match by
+        // chance.
+        if (!giveUpTruncatedFrames) break; // wait for the rest of this frame
+        final next = _completeFrameWithin(headerLen);
+        if (next < 0) break; // wait for the rest of this frame
+        out.add(Frame(
+            Uint8List.fromList(_buf.sublist(headerLen, next)), true, false,
+            truncated: true));
+        _resyncs++;
+        _truncations++;
+        _lostFrames++;
+        _buf.removeRange(0, next);
+        continue;
+      }
       final frame =
           parseFrame(Uint8List.fromList(_buf.sublist(0, total)), profile: profile);
       if (frame != null) out.add(frame);
+      if (frame != null && !frame.valid) _lostFrames++;
       if (frame != null && !frame.crc32Ok) {
         // The length field is covered only by the header check — 8 bits on
         // gen4 — so roughly 1 in 254 corrupt length pairs still passes it. A
@@ -206,8 +274,33 @@ class FrameReassembler {
     return out;
   }
 
+  /// Offset of the first SOF after the pending frame's header that starts a
+  /// frame which is fully buffered and passes both CRCs, or -1.
+  ///
+  /// The scan starts past the header: that header already passed its check,
+  /// and its crc8 byte is 0xAA for about 1 in 256 lengths, so starting inside
+  /// it can match a frame at an offset shorter than the header and the caller's
+  /// payload slice runs backwards.
+  int _completeFrameWithin(int headerLen) {
+    for (int k = headerLen; k + headerLen + 4 <= _buf.length; k++) {
+      if (_buf[k] != sof) continue;
+      final header = _buf.sublist(k, k + headerLen);
+      final declared = profile.declaredLen(header);
+      if (declared < 4 || headerLen + declared > 4096) continue;
+      if (!profile.headerCrcValid(header)) continue;
+      final end = k + headerLen + declared;
+      if (end > _buf.length) continue;
+      final f = parseFrame(Uint8List.fromList(_buf.sublist(k, end)),
+          profile: profile);
+      if (f != null && f.valid) return k;
+    }
+    return -1;
+  }
+
   void reset() {
     _buf.clear();
     _resyncs = 0;
+    _truncations = 0;
+    _lostFrames = 0;
   }
 }

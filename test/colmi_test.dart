@@ -79,6 +79,56 @@ void main() {
       expect(colmiBigDataCrcOk(whole), isTrue);
     });
 
+    test('a new reply while one is pending drops the truncated one', () {
+      // Sleep reply whose last notification never arrived, then the nap
+      // reply the ring sends right after it.
+      final sleep = big(kColmiBigSleep, List.generate(60, (i) => 2 + i % 4));
+      final nap = big(kColmiBigNap, [1, 2, 3, 4, 5]);
+      final r = ColmiBigDataReassembler();
+      expect(r.add(sleep.sublist(0, 30)), isNull);
+      expect(r.add(sleep.sublist(30, 50)), isNull);
+      expect(r.add(nap), nap);
+      expect(r.pending, isFalse);
+      expect(colmiBigDataCrcOk(nap), isTrue);
+    });
+
+    test('a new reply split over notifications after a truncated one', () {
+      final spo2 = big(kColmiBigSpo2, List.generate(40, (i) => 90 + i % 8));
+      final temp = big(kColmiBigTemperature, List.generate(30, (i) => i));
+      final r = ColmiBigDataReassembler();
+      expect(r.add(spo2.sublist(0, 20)), isNull);
+      expect(r.add(temp.sublist(0, 20)), isNull);
+      expect(r.add(temp.sublist(20)), temp);
+    });
+
+    test('a continuation that looks like a header does not drop the reply', () {
+      // The second notification's payload bytes happen to read bc 27 len len,
+      // a sleep header. Restarting on that shape discarded a valid reply.
+      final payload = List.generate(40, (i) => i);
+      payload.setRange(14, 18, [0xbc, kColmiBigSleep, 0x05, 0x00]);
+      final whole = big(kColmiBigSleep, payload);
+      final r = ColmiBigDataReassembler();
+      expect(r.add(whole.sublist(0, 20)), isNull);
+      expect(r.add(whole.sublist(20, 30)), isNull);
+      expect(r.add(whole.sublist(30)), whole);
+      expect(colmiBigDataCrcOk(whole), isTrue);
+    });
+
+    test('a header-shaped continuation that completes with a bad crc is kept',
+        () {
+      // Same embedded header, but this notification carries all 11 bytes the
+      // header claims, so it completes as a candidate reply and fails its crc.
+      // The pending reply still finishes on the last chunk.
+      final payload = List.generate(40, (i) => i);
+      payload.setRange(14, 18, [0xbc, kColmiBigSleep, 0x05, 0x00]);
+      final whole = big(kColmiBigSleep, payload);
+      expect(colmiBigDataCrcOk(whole.sublist(20, 31)), isFalse);
+      final r = ColmiBigDataReassembler();
+      expect(r.add(whole.sublist(0, 20)), isNull);
+      expect(r.add(whole.sublist(20, 31)), isNull);
+      expect(r.add(whole.sublist(31)), whole);
+    });
+
     test('a non-0xbc chunk with nothing pending is dropped', () {
       expect(ColmiBigDataReassembler().add([0x01, 2, 3, 4, 5, 6, 7]), isNull);
     });

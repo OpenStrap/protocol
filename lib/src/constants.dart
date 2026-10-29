@@ -163,30 +163,6 @@ class Cmd {
   static const int toggleLabradorDataGeneration = 0x7C; // 124
   static const int toggleLabradorRawSave = 0x7D; // 125
   static const int toggleLabradorFiltered = 0x8B; // 139
-  // ── Deprecated "ECG" spellings of the three above ─────────────────────────
-  // The feature was previously modelled as an ECG arm/save/send matrix. The
-  // opcode NUMBERS 124/125/139 are right; the names and the arm/disarm mental
-  // model are not (see the operation table above).
-  @Deprecated('this is TOGGLE_LABRADOR_DATA_GENERATION (124): its body is an '
-      'operation byte (01=stop, 02=start, 03=restart), not an on/off flag — '
-      'use Cmd.toggleLabradorDataGeneration')
-  static const int ecgMainControl = 0x7C;
-  @Deprecated('this is TOGGLE_LABRADOR_RAW_SAVE (125), 01 00 / 01 01 — '
-      'use Cmd.toggleLabradorRawSave')
-  static const int ecgSaveRawData = 0x7D;
-  @Deprecated('opcode 126 (0x7E) is NOT an established WHOOP 5 opcode '
-      '— origin unknown, most likely gen4 '
-      'or third-party lore. The raw trace is TOGGLE_LABRADOR_RAW_SAVE (125): '
-      'use Cmd.toggleLabradorRawSave')
-  static const int ecgSendRawData = 0x7E;
-  @Deprecated('opcode 127 (0x7F) is NOT an established WHOOP 5 opcode '
-      '— origin unknown, most likely gen4 '
-      'or third-party lore. The filtered trace is TOGGLE_LABRADOR_FILTERED '
-      '(139): use Cmd.toggleLabradorFiltered')
-  static const int ecgSaveFilteredData = 0x7F;
-  @Deprecated('this is TOGGLE_LABRADOR_FILTERED (139), 01 00 / 01 01 — '
-      'use Cmd.toggleLabradorFiltered')
-  static const int ecgSendFilteredData = 0x8B;
   // Signal-processing configuration. Advanced/diagnostic: it retunes the
   // on-strap algorithms, so it can change what the strap itself reports.
   static const int setSignalConfig = 0x8A;
