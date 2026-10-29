@@ -114,6 +114,21 @@ void main() {
       expect(colmiBigDataCrcOk(whole), isTrue);
     });
 
+    test('a header-shaped continuation that completes with a bad crc is kept',
+        () {
+      // Same embedded header, but this notification carries all 11 bytes the
+      // header claims, so it completes as a candidate reply and fails its crc.
+      // The pending reply still finishes on the last chunk.
+      final payload = List.generate(40, (i) => i);
+      payload.setRange(14, 18, [0xbc, kColmiBigSleep, 0x05, 0x00]);
+      final whole = big(kColmiBigSleep, payload);
+      expect(colmiBigDataCrcOk(whole.sublist(20, 31)), isFalse);
+      final r = ColmiBigDataReassembler();
+      expect(r.add(whole.sublist(0, 20)), isNull);
+      expect(r.add(whole.sublist(20, 31)), isNull);
+      expect(r.add(whole.sublist(31)), whole);
+    });
+
     test('a non-0xbc chunk with nothing pending is dropped', () {
       expect(ColmiBigDataReassembler().add([0x01, 2, 3, 4, 5, 6, 7]), isNull);
     });
