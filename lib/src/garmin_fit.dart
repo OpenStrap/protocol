@@ -207,11 +207,17 @@ List<FitMessage> parseFit(List<int> bytes) {
 // String or double (NaN included). The caller only banks the file raw on a
 // FormatException, so any other error type here would stall the download
 // queue on this file for good.
-int? _timeField(Map<int, Object> fields, int num) {
+//
+// The declared base type is checked too: on the web an integral double is an
+// `int`, so a float32 timestamp would pass the value check after rounding to
+// float precision (tens of seconds at current FIT dates).
+int? _timeField(Map<int, Object> fields, List<_Field> definition, int num) {
   final v = fields[num];
   if (v == null) return null;
+  final declaredFloat = definition
+      .any((f) => f.num == num && f.base < _bases.length && _bases[f.base].$3);
   // `double.infinity is int` holds on the web.
-  if (v is int && v.isFinite) return v;
+  if (!declaredFloat && v is int && v.isFinite) return v;
   throw FormatException('FIT: field $num is not an integer timestamp');
 }
 
@@ -243,10 +249,12 @@ int? _timeField(Map<int, Object> fields, int num) {
     i += f.size;
   }
   i += def.devBytes;
-  int? ts = _timeField(fields, 253);
+  int? ts = _timeField(fields, def.fields, 253);
   // timestamp_16 (monitoring field 26): low 16 bits relative to the last
   // full timestamp.
-  final ts16 = def.global == kFitMsgMonitoring ? _timeField(fields, 26) : null;
+  final ts16 = def.global == kFitMsgMonitoring
+      ? _timeField(fields, def.fields, 26)
+      : null;
   if (ts == null && ts16 != null && lastTs != null) {
     ts = lastTs + ((ts16 - (lastTs & 0xffff)) & 0xffff);
   }
