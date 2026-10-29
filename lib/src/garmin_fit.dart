@@ -32,12 +32,25 @@ const int kFitMsgHrvStatusSummary = 370;
 
 /// One decoded data message: its global number, its fields by field number
 /// (scalars as num, arrays as List, strings as String; invalid values are
-/// absent), and its timestamp in Unix seconds when it has one.
+/// absent), and its timestamp in Unix seconds when it has one. [bases] is the
+/// declared base type of every field in the message's definition, invalid or
+/// not, so a reader can tell "not sent" from "sent but unusable".
 class FitMessage {
   final int global;
   final Map<int, Object> fields;
   final int? timestamp;
-  const FitMessage(this.global, this.fields, this.timestamp);
+  final Map<int, int> bases;
+  const FitMessage(this.global, this.fields, this.timestamp,
+      {this.bases = const {}});
+
+  /// [int_] for a field the profile types as a date_time: null when the
+  /// field was declared as a float, since a float32 time is rounded by tens
+  /// of seconds at current dates.
+  int? time_(int field) {
+    final b = bases[field];
+    if (b != null && b < _bases.length && _bases[b].$3) return null;
+    return int_(field);
+  }
 
   num? num_(int field) {
     final v = fields[field];
@@ -259,7 +272,12 @@ int? _timeField(Map<int, Object> fields, List<_Field> definition, int num) {
     ts = lastTs + ((ts16 - (lastTs & 0xffff)) & 0xffff);
   }
   final unix = (ts ?? lastTs) == null ? null : (ts ?? lastTs)! + kFitEpochOffset;
-  return (FitMessage(def.global, fields, unix), i, ts);
+  return (
+    FitMessage(def.global, fields, unix,
+        bases: {for (final f in def.fields) f.num: f.base}),
+    i,
+    ts
+  );
 }
 
 // ── typed views ─────────────────────────────────────────────────────────
@@ -360,15 +378,21 @@ List<(int, double)> fitRespiration(List<FitMessage> m) => [
     ];
 
 /// The watch's stress score 0-100 (field 0); negative values (no reading,
-/// activity) dropped. Its own time is field 1 when present. A field 1 that is
-/// present but unreadable (NaN, a fraction, an array) drops the sample: the
-/// running timestamp may belong to another record, so falling back to it
-/// would file the score at the wrong time.
+/// activity) dropped. Its own time is field 1 when the definition carries
+/// it. A field 1 that is declared but unusable (the invalid value, NaN, a
+/// fraction, an array, a float) drops the sample: the running timestamp may
+/// belong to another record, so falling back to it would file the score at
+/// the wrong time.
 List<(int, int)> fitStress(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgStressLevel &&
             (x.int_(0) ?? -1) >= 0 &&
-            (!x.fields.containsKey(1) || x.int_(1) != null))
-          if ((x.int_(1) ?? x.timestamp) case final t?)
-            (x.int_(1) != null ? t + kFitEpochOffset : t, x.int_(0)!),
+            (!_declares(x, 1) || x.time_(1) != null))
+          if ((x.time_(1) ?? x.timestamp) case final t?)
+            (x.time_(1) != null ? t + kFitEpochOffset : t, x.int_(0)!),
     ];
+
+// A message built without a definition (bases empty) falls back to whether
+// the field holds a value at all.
+bool _declares(FitMessage x, int field) =>
+    x.bases.isEmpty ? x.fields.containsKey(field) : x.bases.containsKey(field);

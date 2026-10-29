@@ -174,6 +174,21 @@ void main() {
         fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x88)],
             [...u32(fitTs(t0)), ...u16(40), 0x00, 0x00, 0xc0, 0x7f])),
         isEmpty);
+    // Field 1 sent as the uint32 invalid value.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x86)],
+            [...u32(fitTs(t0)), ...u16(40), 0xff, 0xff, 0xff, 0xff])),
+        isEmpty);
+    // Field 1 declared float32 holding a whole number (1e9).
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x88)],
+            [...u32(fitTs(t0)), ...u16(40), 0x28, 0x6b, 0x6e, 0x4e])),
+        isEmpty);
+    // A good field 1 is the sample's own time.
+    expect(
+        fitStress(fit([(253, 4, 0x86), (0, 2, 0x83), (1, 4, 0x86)],
+            [...u32(fitTs(t0)), ...u16(40), ...u32(fitTs(t0 + 60))])),
+        [(t0 + 60, 40)]);
     // No field 1 at all: the running timestamp is the sample's time.
     expect(
         fitStress(fit([(253, 4, 0x86), (0, 2, 0x83)],
