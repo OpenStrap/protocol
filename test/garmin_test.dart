@@ -313,6 +313,46 @@ void main() {
     test('a response with no battery field parses to null', () {
       expect(garminParseBatteryResponseProto(Uint8List.fromList([])), isNull);
     });
+
+    test('a negative length varint stops the walk instead of throwing', () {
+      final ff9 = List.filled(9, 0xff);
+      // ff×9 01 decodes to -1 as a 64-bit varint.
+      final top = [0x42, ...ff9, 0x01, 0, 0, 0];
+      expect(garminParseBatteryResponseProto(Uint8List.fromList(top)), isNull);
+      // Same garbage one level down, inside the service sub-message.
+      final nested = [0x42, 0x0d, 0x1a, 0x0b, 0x12, ...ff9, 0x01];
+      expect(
+          garminParseBatteryResponseProto(Uint8List.fromList(nested)), isNull);
+    });
+
+    test('an overlong varint stops the walk instead of throwing', () {
+      final overlong = [0x42, ...List.filled(12, 0xff), 0x01, 0, 0];
+      expect(garminParseBatteryResponseProto(Uint8List.fromList(overlong)),
+          isNull);
+    });
+
+    test('a 10-byte varint with bits past 63 is rejected, not wrapped', () {
+      // The length 0x06 | (0x02 << 63) wraps to 6 in 64 bits and used to frame
+      // a valid-looking battery message out of a malformed length.
+      final inner = [8, 1, 16, 73];
+      final service = [26, inner.length, ...inner];
+      final len = [0x80 | service.length, ...List.filled(8, 0x80), 0x02];
+      final smart = [66, ...len, ...service];
+      expect(garminParseBatteryResponseProto(Uint8List.fromList(smart)),
+          isNull);
+    });
+
+    test('random bytes never throw', () {
+      // Fixed seed so a failure reproduces.
+      var s = 0x2545f491;
+      int next() => s = (s * 1103515245 + 12345) & 0x7fffffff;
+      for (var n = 0; n < 20000; n++) {
+        final len = next() % 24;
+        final bytes = Uint8List.fromList(
+            List.generate(len, (i) => i == 0 ? 0x42 : (next() >> 8) & 0xff));
+        expect(() => garminParseBatteryResponseProto(bytes), returnsNormally);
+      }
+    });
   });
 
   group('protobuf request/response GFDI envelope', () {

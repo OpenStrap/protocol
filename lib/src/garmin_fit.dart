@@ -32,16 +32,50 @@ const int kFitMsgHrvStatusSummary = 370;
 
 /// One decoded data message: its global number, its fields by field number
 /// (scalars as num, arrays as List, strings as String; invalid values are
-/// absent), and its timestamp in Unix seconds when it has one.
+/// absent), and its timestamp in Unix seconds when it has one. [bases] is the
+/// declared base type of every field in the message's definition, invalid or
+/// not, so a reader can tell "not sent" from "sent but unusable".
 class FitMessage {
   final int global;
   final Map<int, Object> fields;
   final int? timestamp;
-  const FitMessage(this.global, this.fields, this.timestamp);
+  final Map<int, int> bases;
+  const FitMessage(this.global, this.fields, this.timestamp,
+      {this.bases = const {}});
+
+  /// [int_] for a field the profile types as a date_time: null when the
+  /// field was declared as a float, since a float32 time is rounded by tens
+  /// of seconds at current dates.
+  int? time_(int field) {
+    final b = bases[field];
+    if (b != null && b < _bases.length && _bases[b].$3) return null;
+    return int_(field);
+  }
 
   num? num_(int field) {
     final v = fields[field];
     return v is num ? v : null;
+  }
+
+  // A field the profile types as an integer can still arrive declared as a
+  // float, and only the all-ones pattern counts as invalid there, so NaN and
+  // Inf get through. `.toInt()` on those throws UnsupportedError, which the
+  // caller does not catch, and the download queue would stall on that file.
+  // Such a sample is skipped instead.
+  // On the web `double.infinity is int` holds, so finiteness is checked
+  // before the int test too.
+  int? int_(int field) {
+    final v = fields[field];
+    if (v is! num || !v.isFinite) return null;
+    if (v is int) return v;
+    if (v is double && v.isFinite && v == v.truncateToDouble()) return v.toInt();
+    return null;
+  }
+
+  /// [num_] restricted to finite values, so NaN/Inf never reach a reading.
+  num? finite(int field) {
+    final v = num_(field);
+    return v != null && v.isFinite ? v : null;
   }
 }
 
@@ -182,6 +216,24 @@ List<FitMessage> parseFit(List<int> bytes) {
   return out;
 }
 
+// A time field declared as an array, a string or a float decodes to a List,
+// String or double (NaN included). The caller only banks the file raw on a
+// FormatException, so any other error type here would stall the download
+// queue on this file for good.
+//
+// The declared base type is checked too: on the web an integral double is an
+// `int`, so a float32 timestamp would pass the value check after rounding to
+// float precision (tens of seconds at current FIT dates).
+int? _timeField(Map<int, Object> fields, List<_Field> definition, int num) {
+  final v = fields[num];
+  if (v == null) return null;
+  final declaredFloat = definition
+      .any((f) => f.num == num && f.base < _bases.length && _bases[f.base].$3);
+  // `double.infinity is int` holds on the web.
+  if (!declaredFloat && v is int && v.isFinite) return v;
+  throw FormatException('FIT: field $num is not an integer timestamp');
+}
+
 (FitMessage, int, int?) _data(ByteData d, int at, _Def def, int? lastTs) {
   final fields = <int, Object>{};
   var i = at;
@@ -210,15 +262,22 @@ List<FitMessage> parseFit(List<int> bytes) {
     i += f.size;
   }
   i += def.devBytes;
-  int? ts = (fields[253] as num?)?.toInt();
+  int? ts = _timeField(fields, def.fields, 253);
   // timestamp_16 (monitoring field 26): low 16 bits relative to the last
   // full timestamp.
-  final ts16 = def.global == kFitMsgMonitoring ? fields[26] as num? : null;
+  final ts16 = def.global == kFitMsgMonitoring
+      ? _timeField(fields, def.fields, 26)
+      : null;
   if (ts == null && ts16 != null && lastTs != null) {
-    ts = lastTs + ((ts16.toInt() - (lastTs & 0xffff)) & 0xffff);
+    ts = lastTs + ((ts16 - (lastTs & 0xffff)) & 0xffff);
   }
   final unix = (ts ?? lastTs) == null ? null : (ts ?? lastTs)! + kFitEpochOffset;
-  return (FitMessage(def.global, fields, unix), i, ts);
+  return (
+    FitMessage(def.global, fields, unix,
+        bases: {for (final f in def.fields) f.num: f.base}),
+    i,
+    ts
+  );
 }
 
 // ── typed views ─────────────────────────────────────────────────────────
@@ -228,8 +287,8 @@ List<(int, int)> fitMonitoringHr(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgMonitoring &&
             x.timestamp != null &&
-            (x.num_(27) ?? 0) > 0)
-          (x.timestamp!, x.num_(27)!.toInt()),
+            (x.int_(27) ?? 0) > 0)
+          (x.timestamp!, x.int_(27)!),
     ];
 
 /// Steps per local day: monitoring `cycles` (field 3) is a running count per
@@ -240,9 +299,9 @@ Map<DateTime, int> fitDailySteps(List<FitMessage> m) {
   final maxBy = <(DateTime, int), int>{};
   for (final x in m) {
     if (x.global != kFitMsgMonitoring || x.timestamp == null) continue;
-    final packed = x.num_(24)?.toInt();
-    final type = x.num_(5)?.toInt() ?? (packed == null ? null : packed & 0x1f);
-    final cycles = x.num_(3)?.toInt();
+    final packed = x.int_(24);
+    final type = x.int_(5) ?? (packed == null ? null : packed & 0x1f);
+    final cycles = x.int_(3);
     if (cycles == null || (type != 6 && type != 1)) continue;
     final t = DateTime.fromMillisecondsSinceEpoch(x.timestamp! * 1000);
     final key = (DateTime(t.year, t.month, t.day), type!);
@@ -263,7 +322,7 @@ List<(int, int, String)> fitSleepStages(List<FitMessage> m,
   final levels = [
     for (final x in m)
       if (x.global == kFitMsgSleepLevel && x.timestamp != null)
-        (x.timestamp!, x.num_(0)?.toInt() ?? -1),
+        (x.timestamp!, x.int_(0) ?? -1),
   ]..sort((a, b) => a.$1.compareTo(b.$1));
   final out = <(int, int, String)>[];
   for (var k = 0; k < levels.length; k++) {
@@ -287,8 +346,8 @@ List<(int, double)> fitHrvLastNight(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgHrvStatusSummary &&
             x.timestamp != null &&
-            x.num_(1) != null)
-          (x.timestamp!, x.num_(1)! / 128),
+            x.finite(1) != null)
+          (x.timestamp!, x.finite(1)! / 128),
     ];
 
 /// The watch's resting HR (field 1 current-day, else field 0).
@@ -296,8 +355,8 @@ List<(int, int)> fitRestingHr(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgMonitoringHrData &&
             x.timestamp != null &&
-            (x.num_(1) ?? x.num_(0)) != null)
-          (x.timestamp!, (x.num_(1) ?? x.num_(0))!.toInt()),
+            (x.int_(1) ?? x.int_(0)) != null)
+          (x.timestamp!, (x.int_(1) ?? x.int_(0))!),
     ];
 
 /// SpO2 readings in percent (field 0), positive only.
@@ -305,8 +364,8 @@ List<(int, int)> fitSpo2(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgSpo2Data &&
             x.timestamp != null &&
-            (x.num_(0) ?? 0) > 0)
-          (x.timestamp!, x.num_(0)!.toInt()),
+            (x.int_(0) ?? 0) > 0)
+          (x.timestamp!, x.int_(0)!),
     ];
 
 /// Respiration rate in breaths/min (field 0, stored /100), positive only.
@@ -314,15 +373,26 @@ List<(int, double)> fitRespiration(List<FitMessage> m) => [
       for (final x in m)
         if (x.global == kFitMsgRespirationRate &&
             x.timestamp != null &&
-            (x.num_(0) ?? 0) > 0)
-          (x.timestamp!, x.num_(0)! / 100),
+            (x.finite(0) ?? 0) > 0)
+          (x.timestamp!, x.finite(0)! / 100),
     ];
 
 /// The watch's stress score 0-100 (field 0); negative values (no reading,
-/// activity) dropped. Its own time is field 1 when present.
+/// activity) dropped. Its own time is field 1 when the definition carries
+/// it. A field 1 that is declared but unusable (the invalid value, NaN, a
+/// fraction, an array, a float) drops the sample: the running timestamp may
+/// belong to another record, so falling back to it would file the score at
+/// the wrong time.
 List<(int, int)> fitStress(List<FitMessage> m) => [
       for (final x in m)
-        if (x.global == kFitMsgStressLevel && (x.num_(0) ?? -1) >= 0)
-          if ((x.num_(1)?.toInt() ?? x.timestamp) case final t?)
-            (x.num_(1) != null ? t + kFitEpochOffset : t, x.num_(0)!.toInt()),
+        if (x.global == kFitMsgStressLevel &&
+            (x.int_(0) ?? -1) >= 0 &&
+            (!_declares(x, 1) || x.time_(1) != null))
+          if ((x.time_(1) ?? x.timestamp) case final t?)
+            (x.time_(1) != null ? t + kFitEpochOffset : t, x.int_(0)!),
     ];
+
+// A message built without a definition (bases empty) falls back to whether
+// the field holds a value at all.
+bool _declares(FitMessage x, int field) =>
+    x.bases.isEmpty ? x.fields.containsKey(field) : x.bases.containsKey(field);

@@ -74,8 +74,62 @@ List<List<int>> pebblePpogattPackets(List<int> frame, int firstSerial,
 }
 
 /// Reassembles inner frames from consecutive PPoGATT data payloads.
+///
+/// The inner framing has no sync marker: the only boundary is the length at
+/// the head of the buffer. A partial frame left behind by a transport reset,
+/// a re-sent packet appended twice, or a skipped packet shifts every later
+/// length and endpoint, and the rest of the session misframes (or waits
+/// forever on a garbage length). [reset] throws a cut frame away, and
+/// [addPacket] keeps re-sent and out-of-order packets out of the buffer.
 class PebbleFrameReassembler {
   final List<int> _buf = [];
+  int? _lastSerial;
+
+  // Packets taken since the last reset, capped at [_repeatWindow]: a serial
+  // behind the last one only counts as a repeat if it was actually taken.
+  int _taken = 0;
+  static const int _repeatWindow = 16;
+
+  /// Drops any partial frame and forgets the serial sequence. Call it when
+  /// the PPoGATT transport resets.
+  void reset() {
+    _buf.clear();
+    _lastSerial = null;
+    _taken = 0;
+  }
+
+  /// Feeds one whole PPoGATT data packet (header byte included). Only the
+  /// next serial in sequence is taken; anything else (a repeat, or a packet
+  /// that arrived after one was lost or skipped) is dropped without touching
+  /// the buffer. PPoGATT is go-back-N: the watch re-sends every unacked
+  /// packet in order from the oldest, so the missing one comes back and the
+  /// frame completes. Clearing on a gap instead would make a mid-frame
+  /// payload the head of the buffer and misframe everything after it.
+  ///
+  /// A repeat of a packet already taken returns an empty list, and the caller
+  /// must ack it again: the watch only re-sends a packet whose ack it never
+  /// saw, and without a fresh ack it keeps re-sending until its retry limit
+  /// resets the transport. After 0, 1, 2 with the acks for 1 and 2 lost, the
+  /// re-sent 1 is such a repeat even though 2 was taken last. Returns null
+  /// only for a packet that has not been taken and is not the next serial;
+  /// the caller does not ack it.
+  ///
+  /// Serials are 5-bit, so "behind" and "ahead" share one space: anything up
+  /// to [_repeatWindow] - 1 behind the last taken serial (and actually taken
+  /// since the last reset) is a repeat, anything else is unseen.
+  List<(int, Uint8List)>? addPacket(List<int> packet) {
+    if (packet.isEmpty) return null;
+    final serial = (packet[0] >> 3) & 0x1f;
+    final last = _lastSerial;
+    if (last != null) {
+      final behind = (last - serial) & 0x1f;
+      if (behind < _repeatWindow && behind < _taken) return const [];
+      if (serial != (last + 1) & 0x1f) return null;
+    }
+    _lastSerial = serial;
+    if (_taken < _repeatWindow) _taken++;
+    return add(packet.sublist(1));
+  }
 
   /// Feeds one data payload; returns every complete (endpoint, payload).
   List<(int, Uint8List)> add(List<int> payload) {

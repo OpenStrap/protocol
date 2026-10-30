@@ -81,9 +81,6 @@ void main() {
       // the sub-second in hundredths.
       expect(w.segmentId, w.tsSubsec);
       expect(w.segmentIndex, 56);
-      // The deprecated byte read keeps only the low half.
-      // ignore: deprecated_member_use_from_same_package
-      expect(w.rawByte19, w.tsSubsec & 0xFF);
     });
 
     test('the Q15 scale holds for every verified raw value', () {
@@ -118,11 +115,6 @@ void main() {
       expect(s.psnrA, 0x1E);
       expect(s.psnrBAvailable, isTrue);
       expect(s.psnrAAvailable, isTrue);
-      // Compat: the deprecated u16 views reconstruct the old values exactly.
-      // ignore: deprecated_member_use_from_same_package
-      expect(s.opticalBaseline, 0x656F);
-      // ignore: deprecated_member_use_from_same_package
-      expect(s.opticalAmp, 0x1E1E);
     });
 
     test('0x80 is the per-detector -128 unavailable sentinel, not a value', () {
@@ -189,8 +181,8 @@ void main() {
       for (int b = 0; b <= 255; b++) {
         inner[73] = b;
         final s = parseGen5Historical(inner) as Gen5HistorySample;
-        expect(s.onWristRaw, b & 0x03);
-        expect(s.wakeQualityRaw, (b >> 2) & 0x03);
+        expect(s.primaryFlagsBit8Raw, b & 0x03);
+        expect(s.strapFitStateRaw, (b >> 2) & 0x03);
         expect(s.sleepStateRawNibble, (b >> 4) & 0x03);
         expect(s.bits67Raw, (b >> 6) & 0x03, reason: 'byte=$b');
       }
@@ -314,11 +306,6 @@ void main() {
         expect(blk.tia1OffsetCurrentNanoamps, -10000);
         expect(blk.tia2OffsetCurrentRaw, 2400);
         expect(blk.tia2OffsetCurrentNanoamps, 24000); // 24 µA
-        // The deprecated getters keep their old unsigned-u16 behaviour.
-        // ignore: deprecated_member_use_from_same_package
-        expect(blk.channel0AdcOffset, 64536);
-        // ignore: deprecated_member_use_from_same_package
-        expect(blk.channel1AdcOffset, 2400);
       }
     });
   });

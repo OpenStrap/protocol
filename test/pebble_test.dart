@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 
@@ -15,6 +17,91 @@ void main() {
     final out = [for (final p in packets) ...r.add(p.sublist(1))];
     expect(out.single.$1, kPebbleEndpointDatalog);
     expect(out.single.$2, List.generate(40, (i) => i));
+  });
+
+  group('reassembler recovery', () {
+    // A 66-byte datalog data frame split into 20-byte packets, and two small
+    // whole frames that follow it.
+    final a = pebbleFrame(kPebbleEndpointDatalog,
+        [2, 1, ...List.filled(60, 0x5a)]);
+    final b = pebbleFrame(kPebbleEndpointDatalog, [2, 1, ...List.filled(30, 1)]);
+    final c = pebbleFrame(kPebbleEndpointDatalog, [2, 2, ...List.filled(30, 2)]);
+
+    List<(int, Uint8List)> feed(PebbleFrameReassembler r, List<List<int>> ps) =>
+        [for (final p in ps) ...?r.addPacket(p)];
+
+    test('reset drops a partial frame cut by a transport reset', () {
+      final r = PebbleFrameReassembler();
+      expect(r.addPacket(pebblePpogattPackets(a, 0).first), isEmpty);
+      r.reset();
+      final out = feed(r, [
+        ...pebblePpogattPackets(b, 0),
+        ...pebblePpogattPackets(c, 2),
+      ]);
+      expect(out.map((f) => f.$2[1]), [1, 2]);
+      expect(out.map((f) => f.$2.length), [32, 32]);
+    });
+
+    test('a repeated serial is dropped, not appended twice', () {
+      final r = PebbleFrameReassembler();
+      final ps = pebblePpogattPackets(b, 30);
+      expect(r.addPacket(ps[0]), isEmpty);
+      // Not null: the repeat still has to be acked.
+      expect(r.addPacket(ps[0]), isEmpty);
+      final out = feed(r, ps.skip(1).toList());
+      expect(out.single.$2, [2, 1, ...List.filled(30, 1)]);
+    });
+
+    test('a re-send of the frame-completing packet is acked, not re-emitted',
+        () {
+      final r = PebbleFrameReassembler();
+      final ps = pebblePpogattPackets(b, 6);
+      expect(feed(r, ps).single.$2, [2, 1, ...List.filled(30, 1)]);
+      // The ack for the last packet was lost, so the watch re-sends it.
+      for (var i = 0; i < 3; i++) {
+        expect(r.addPacket(ps.last), isEmpty);
+      }
+      final next = feed(r, pebblePpogattPackets(c, 6 + ps.length));
+      expect(next.single.$2[1], 2);
+    });
+
+    test('go-back-N re-send after lost acks keeps the frame intact', () {
+      final r = PebbleFrameReassembler();
+      final pa = pebblePpogattPackets(a, 0); // serials 0..3
+      final pc = pebblePpogattPackets(c, pa.length);
+      // 0,1,2 arrive; the acks for 1 and 2 are lost, so the watch re-sends
+      // from 1 onward, then the next frame.
+      for (final p in [pa[0], pa[1], pa[2]]) {
+        expect(r.addPacket(p), isEmpty);
+      }
+      // Both re-sends were already taken: acked (not null), not re-appended.
+      expect(r.addPacket(pa[1]), isEmpty);
+      expect(r.addPacket(pa[2]), isEmpty);
+      final out = feed(r, [pa[3], ...pc]);
+      expect(out.map((f) => f.$2.length), [62, 32]);
+      expect(out.first.$2, [2, 1, ...List.filled(60, 0x5a)]);
+      expect(out.last.$2[1], 2);
+    });
+
+    test('a serial behind the last one is not acked unless it was taken', () {
+      final r = PebbleFrameReassembler();
+      final pa = pebblePpogattPackets(a, 5);
+      expect(r.addPacket(pa[0]), isEmpty);
+      // Serial 4 was never taken in this session, so it is not a repeat.
+      expect(r.addPacket(pebblePpogattPackets(b, 4).first), isNull);
+    });
+
+    test('a skipped packet is dropped until it is re-sent in order', () {
+      final r = PebbleFrameReassembler();
+      final pa = pebblePpogattPackets(a, 0);
+      // packet 1 is skipped; 2 and 3 arrive out of order and are dropped,
+      // then go-back-N re-sends 1, 2, 3.
+      expect(r.addPacket(pa[0]), isEmpty);
+      expect(r.addPacket(pa[2]), isNull);
+      expect(r.addPacket(pa[3]), isNull);
+      final out = feed(r, [pa[1], pa[2], pa[3]]);
+      expect(out.single.$2, [2, 1, ...List.filled(60, 0x5a)]);
+    });
   });
 
   test('phone version reply: 25 bytes, Android, LE capability mask', () {

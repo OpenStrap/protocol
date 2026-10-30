@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:openstrap_protocol/openstrap_protocol.dart';
+import 'package:openstrap_protocol/src/live.dart' show kR10MinLength;
 import 'package:test/test.dart';
 
 void main() {
@@ -688,6 +689,45 @@ void main() {
       expect(decoded.fields['ts_epoch'], 1780840486);
       expect(decoded.fields['hr'], 0);
       expect(decoded.fields['wearing'], isFalse);
+    });
+  });
+
+  group('parseR10Lite applies the R10 packet/length gate', () {
+    Uint8List r10Body(int pkt, int len) {
+      final b = Uint8List(len);
+      final bd = b.buffer.asByteData();
+      b[0] = pkt;
+      b[1] = Record.r10;
+      bd.setUint32(3, 42, Endian.little); // counter
+      bd.setUint32(7, 1790000000, Endian.little); // ts
+      b[17] = 0x48; // hr 72
+      b[18] = 2; // rr count
+      bd.setInt16(19, 0x0320, Endian.little);
+      bd.setInt16(21, 0x0330, Endian.little);
+      return b;
+    }
+
+    test('a short historical (0x2F) record with layout byte 10 is refused', () {
+      expect(parseR10Lite(r10Body(0x2F, 96)), isNull);
+      expect(parseR10Lite(r10Body(0x2F, kR10MinLength - 1)), isNull);
+    });
+
+    test('a full-length historical R10 still decodes', () {
+      final r = parseR10Lite(r10Body(0x2F, kR10MinLength))!;
+      expect(r.hr, 72);
+      expect(r.tsEpoch, 1790000000);
+      expect(r.rrIntervalsMs, [800, 816]);
+    });
+
+    test('a live raw (0x2B) R10 decodes at any length', () {
+      final r = parseR10Lite(r10Body(0x2B, 96))!;
+      expect(r.hr, 72);
+      expect(r.rrIntervalsMs, [800, 816]);
+    });
+
+    test('other packet types whose seq byte is 10 are refused', () {
+      expect(parseR10Lite(r10Body(0x32, 2000)), isNull);
+      expect(parseR10Lite(r10Body(0x24, 96)), isNull);
     });
   });
 }

@@ -177,6 +177,128 @@ void main() {
       expect(frames.map((f) => f.seq), contains(6));
       expect(frames.every((f) => f.valid), isTrue);
     });
+
+    // The band sends HISTORY_END and then waits for the ACK, so nothing
+    // arrives behind it to complete a truncated frame ahead of it.
+    List<int> historyEnd(int seq) {
+      final inner = List<int>.filled(21, 0)
+        ..[0] = PacketType.metadata
+        ..[1] = seq
+        ..[2] = SyncMeta.historyEnd;
+      for (int i = 0; i < 8; i++) {
+        inner[13 + i] = 0x50 + i;
+      }
+      return buildFrame(inner);
+    }
+
+    test('by default a HISTORY_END behind a truncated frame stays held', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
+      final re = FrameReassembler();
+      expect(re.feed(data).single.valid, isTrue);
+      expect(re.feed(data.sublist(0, 44)), isEmpty);
+      expect(re.feed(historyEnd(2)), isEmpty,
+          reason: 'delivering the END would let it be ACKed, and the band '
+              'would trim the record that never arrived');
+      expect(re.truncations, 0);
+    });
+
+    test('a lost notification does not hold the HISTORY_END behind it '
+        'when give-up is on', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
+      expect(data.length, 104);
+      final end = historyEnd(2);
+
+      final re = FrameReassembler(giveUpTruncatedFrames: true);
+      expect(re.feed(data).single.valid, isTrue);
+      // Only the first notification of the next data frame arrives.
+      expect(re.feed(data.sublist(0, 44)), isEmpty);
+      final frames = re.feed(end);
+
+      expect(frames.length, 2);
+      expect(frames.first.valid, isFalse,
+          reason: 'the truncated frame must still count as a lost frame');
+      expect(frames.first.truncated, isTrue,
+          reason: 'the END that follows covers a record that never arrived, '
+              'so the caller has to be able to tell this apart from noise');
+      expect(re.truncations, 1);
+      expect(re.lostFrames, 1);
+      expect(frames.last.valid, isTrue);
+      expect(frames.last.truncated, isFalse);
+      expect(frames.last.packetType, PacketType.metadata);
+      expect(parseMetadata(frames.last.inner)!.token,
+          [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57]);
+      expect(re.feed(historyEnd(3)).single.seq, 3,
+          reason: 'nothing stale is left in the buffer');
+    });
+
+    test('a partial frame still waits when nothing complete sits inside it', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0xAA)]);
+      final re = FrameReassembler(giveUpTruncatedFrames: true);
+      expect(re.feed(data.sublist(0, 60)), isEmpty);
+      final frames = re.feed(data.sublist(60));
+      expect(frames.single.valid, isTrue);
+      expect(re.resyncs, 0);
+      expect(re.truncations, 0);
+    });
+
+    test('give-up does not resume inside the truncated frame\'s own header',
+        () {
+      // A length pair whose crc8 is itself 0xAA, so the header's last byte
+      // reads as an SOF and a valid frame can start there.
+      late int lo, hi;
+      search:
+      for (hi = 0; hi < 16; hi++) {
+        for (lo = 0; lo < 256; lo++) {
+          if ((lo | hi << 8) >= 64 && crc8([lo, hi]) == 0xAA) break search;
+        }
+      }
+      final inner = buildFrame([PacketType.event, 1, 0x05, 0, 0, 0, 0, 0]);
+      expect(inner.first, 0xAA);
+      final re = FrameReassembler(giveUpTruncatedFrames: true);
+      expect(re.feed([0xAA, lo, hi, ...inner]), isEmpty,
+          reason: 'nothing complete sits after the header, so this waits');
+      final frames = re.feed(historyEnd(2));
+      expect(frames.first.truncated, isTrue);
+      expect(frames.last.packetType, PacketType.metadata);
+      expect(re.truncations, 1);
+    });
+
+    test('a frame with a corrupt payload is not reported as truncated', () {
+      final data = buildFrame(
+          [PacketType.historicalData, 1, 0x18, ...List<int>.filled(93, 0x33)]);
+      data[20] ^= 0xFF;
+      final re = FrameReassembler();
+      final f = re.feed(data).single;
+      expect(f.valid, isFalse);
+      expect(f.truncated, isFalse);
+      expect(re.truncations, 0);
+      expect(re.lostFrames, 1,
+          reason: 'a corrupt record is just as lost as a truncated one');
+    });
+
+    test('a notification lost inside a non-final frame counts as lost', () {
+      List<int> rec(int seq) => buildFrame([
+            PacketType.historicalData,
+            seq,
+            0x18,
+            ...List<int>.filled(93, 0x30 + seq)
+          ]);
+      final a = rec(1), b = rec(2), c = rec(3);
+      final stream = <int>[...a, ...b.sublist(0, 44), ...b.sublist(64), ...c,
+          ...historyEnd(4)];
+      final re = FrameReassembler();
+      final frames = re.feed(stream);
+      expect(frames.where((f) => !f.valid), isNotEmpty);
+      expect(frames.any((f) => f.truncated), isFalse);
+      expect(re.lostFrames, greaterThan(0),
+          reason: 'the END after this burst covers a record that never '
+              'arrived, so the caller must be able to see the loss');
+      re.reset();
+      expect(re.lostFrames, 0);
+    });
   });
 
   group('dangerousCmds (enforced never-send set)', () {

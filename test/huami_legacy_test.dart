@@ -2,13 +2,14 @@ import 'package:openstrap_protocol/openstrap_protocol.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('clock value: Sunday is 0, ms/4, then the UTC offset in quarters', () {
+  test('clock value: Sunday is 7, ms/4, then the UTC offset in quarters', () {
     final t = DateTime(2026, 10, 4, 7, 5, 9, 500); // a Sunday
     final v = huamiTimeValue(t);
-    expect(v.sublist(0, 9), [0xea, 0x07, 10, 4, 7, 5, 9, 0, 125]);
+    expect(v.sublist(0, 9), [0xea, 0x07, 10, 4, 7, 5, 9, 7, 125]);
     expect(v[9], anyOf(0, 8));
     expect(v.last, (t.timeZoneOffset.inMinutes ~/ 15) & 0xff);
     expect(huamiTimeValue(DateTime(2026, 10, 10))[7], 6, reason: 'Saturday');
+    expect(huamiTimeValue(DateTime(2026, 10, 5))[7], 1, reason: 'Monday');
   });
 
   test('fetch start: type 1, minute-resolution since, 0, tz', () {

@@ -264,42 +264,6 @@ void main() {
             reason: 'status $bad must not publish a clock');
       }
     });
-
-    test(
-        'the deprecated Maverick clock builders still emit their documented '
-        'bytes (kept only for a guarded experiment)',
-        () {
-      // ignore: deprecated_member_use_from_same_package
-      final setFrame = cmdSetClockGen5(1, now: DateTime.utc(2026, 1, 1));
-      final setParsed = parseFrame(setFrame, profile: BandProfile.gen5)!;
-      expect(setParsed.valid, isTrue);
-      expect(setParsed.inner[2], Cmd.setClockMaverick);
-      expect(Cmd.setClockMaverick, 146);
-
-      // ignore: deprecated_member_use_from_same_package
-      final getFrame = cmdGetClockGen5(1);
-      final getParsed = parseFrame(getFrame, profile: BandProfile.gen5)!;
-      expect(getParsed.valid, isTrue);
-      expect(getParsed.inner[2], Cmd.getClockGen5);
-      expect(Cmd.getClockGen5, 147);
-    });
-
-    test('the gen5 clock bodies carry the leading revision byte', () {
-      // Without it the strap reads the epoch's low byte as the revision and
-      // refuses the command, so the RTC never latches.
-      final setParsed = parseFrame(
-        cmdSetClockGen5(1, now: DateTime.utc(2026, 1, 1)),
-        profile: BandProfile.gen5,
-      )!;
-      expect(setParsed.inner[3], revision1);
-      final epoch =
-          ByteData.sublistView(setParsed.inner).getUint32(4, Endian.little);
-      expect(epoch, DateTime.utc(2026, 1, 1).millisecondsSinceEpoch ~/ 1000);
-
-      final getParsed =
-          parseFrame(cmdGetClockGen5(1), profile: BandProfile.gen5)!;
-      expect(getParsed.inner[3], revision1);
-    });
   });
 
   group('OpcodeSafety', () {

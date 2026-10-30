@@ -403,6 +403,61 @@ void main() {
     });
   });
 
+  group('R10 decoders only accept 0x2B / 0x2F frames', () {
+    // A long non-data frame whose b[1] (the SEQUENCE byte on control frames)
+    // happens to be 10. Console logs run up to 2 KB, so length alone does not
+    // tell it apart from an archived R10.
+    String controlFrameWithSeq10(int pkt) {
+      final b = Uint8List(700);
+      for (int i = 2; i < b.length; i++) {
+        b[i] = 0x61 + (i % 26); // ASCII log text
+      }
+      b[0] = pkt;
+      b[1] = 10;
+      b[17] = 0x65; // 'e' = 101 at the R10 hr offset
+      return _hex(b);
+    }
+
+    // Binary command response with seq 10 and a plausible R-R layout at
+    // [18..], which ASCII text cannot satisfy.
+    String responseWithRrLayout() {
+      final b = Uint8List(700);
+      final v = ByteData.sublistView(b);
+      b[0] = PacketType.commandResponse;
+      b[1] = 10;
+      v.setUint32(7, 1775395266, Endian.little);
+      b[17] = 60;
+      b[18] = 2;
+      v.setInt16(19, 900, Endian.little);
+      v.setInt16(21, 950, Endian.little);
+      return _hex(b);
+    }
+
+    for (final pkt in [PacketType.consoleLogs, PacketType.commandResponse]) {
+      test('0x${pkt.toRadixString(16)} seq 10 is not an R10 sample', () {
+        expect(decodeRecord(controlFrameWithSeq10(pkt)), isNull);
+        expect(frameAccel(controlFrameWithSeq10(pkt)), isNull);
+      });
+    }
+
+    test('realtimeRr ignores a command response with seq 10', () {
+      expect(realtimeRr(responseWithRrLayout()), isNull);
+    });
+
+    test('the same bytes framed as 0x2B / 0x2F still decode as R10', () {
+      for (final pkt in [
+        PacketType.realtimeRawData,
+        PacketType.historicalData,
+      ]) {
+        final hex = '${pkt.toRadixString(16).padLeft(2, '0')}'
+            '${responseWithRrLayout().substring(2)}';
+        expect(decodeRecord(hex)?.recType, 10);
+        expect(frameAccel(hex), isNotNull);
+        expect(realtimeRr(hex), isNotNull);
+      }
+    });
+  });
+
   // ── 7. Battery percentages are bounded to 0..100 ─────────────────────────
   group('battery level is bounded', () {
     test('GET_BATTERY_LEVEL with 0xffff emits nothing, not 6553.5%', () {
@@ -458,6 +513,44 @@ void main() {
       expect(h.batteryPct, isNotNull);
       expect(h.batteryPct!, inInclusiveRange(0.0, 100.0));
       expect(h.batteryPct, closeTo(89.9, 1e-9));
+    });
+
+    test('parseHello reads a sub-1% battery instead of the next header field',
+        () {
+      // Below 1.0% the u16 at [3] is 0..9. The old scan rejected it, walked
+      // the u32's zero high bytes and took the counter at [8..11] instead.
+      const body =
+          'a001048303000000b196e201b0020000344332323438303932003865323738326237'
+          '346634303238346333663437363138623062613234373663356431366363303533'
+          '313862373532316431353635650600000002000000100000002900000011000000';
+      final cases = <List<int>, double>{
+        [5, 0x01, 0x96]: 0.5, // counter byte 1 used to read as 25.6%
+        [0, 0x2c, 0x01]: 0.0, // 0x012c at [8] used to read as 30.0%
+        [9, 0x00, 0x02]: 0.9, // [9]=0, [10]=2 used to read as 51.2%
+      };
+      cases.forEach((c, want) {
+        final b = hexToBytes(body);
+        b[3] = c[0];
+        b[4] = 0;
+        b[8] = c[1];
+        b[9] = c[2];
+        b[10] = 0x02;
+        expect(parseHello(b).batteryPct, closeTo(want, 1e-9),
+            reason: 'raw ${c[0]}');
+      });
+    });
+
+    test('parseHello leaves an out-of-range marked battery null', () {
+      // With the 0x04 marker present an impossible u32 at [3] is not
+      // rescued by scanning into the counter bytes that follow it.
+      const body =
+          'a001048303000000b196e201b0020000344332323438303932003865323738326237';
+      final b = hexToBytes(body);
+      b[3] = 0xed; // 0x03ed = 1005 → 100.5%
+      b[4] = 0x03;
+      b[8] = 0x2c;
+      b[9] = 0x01;
+      expect(parseHello(b).batteryPct, isNull);
     });
   });
 
