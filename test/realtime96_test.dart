@@ -65,6 +65,10 @@ void main() {
     test('crc32WhoopStream differs from the framed-packet crc32 (different xor-out)', () {
       final body = List<int>.generate(92, (i) => i);
       expect(crc32WhoopStream(body), isNot(crc32(body)));
+      // Known-answer vector, computed independently of the implementation:
+      // standard CRC-32 of "123456789" is 0xCBF43926; with this stream's
+      // xor-out 0xF43F44AC it becomes 0xC0348275.
+      expect(crc32WhoopStream('123456789'.codeUnits), 0xC0348275);
     });
   });
 }
