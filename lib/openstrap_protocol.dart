@@ -93,6 +93,10 @@ export 'src/live.dart'
         decodeR11Raw,
         decodeRecord;
 
+// Unframed 96-byte realtime sensor packet (raw data-stream characteristic).
+export 'src/realtime96.dart'
+    show Realtime96, parseRealtime96, crc32WhoopStream, kRealtime96PacketSize;
+
 // Source 2 — CRC, constants, framing, commands.
 export 'src/crc.dart' show crc8, crc32, crc16Modbus;
 export 'src/constants.dart';
