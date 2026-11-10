@@ -2,9 +2,9 @@
 // WHOOP 4 data-stream characteristic delivers as raw BLE notifications
 // (unlike the framed 0xAA… packets, which go through framing.dart).
 //
-// Layout (community reverse engineering; HR/RR framing cross-checked against
-// multiple independent sources, SpO2/temperature single-source and NOT
-// validated against a reference device):
+// Layout (HR/RR fields agree across more than one independent source; the
+// SpO2 and temperature bytes are single-source and NOT validated against a
+// reference device):
 //   [0]    u8    sequence / packet type
 //   [1:3]  u16LE heart rate * 100
 //   [3:5]  u16LE RR interval ms
@@ -23,8 +23,8 @@ const int kRealtime96PacketSize = 96;
 /// CRC-32 over the first 92 bytes of a realtime packet.
 ///
 /// Reflected CRC-32 (poly 0x04C11DB7, init 0xFFFFFFFF) with xor-out
-/// 0xF43F44AC — TWO independent community sources agree on this xor-out, and
-/// it is deliberately NOT the same as the framed-packet [crc32] in crc.dart
+/// 0xF43F44AC — two independent sources agree on this xor-out, but it has not
+/// been checked against a capture of ours. It is deliberately NOT the same as the framed-packet [crc32] in crc.dart
 /// (zlib xor-out 0xFFFFFFFF): the unframed data stream uses its own trailer
 /// checksum, so the two must not be mixed.
 int crc32WhoopStream(List<int> data) {
@@ -63,14 +63,13 @@ class Realtime96 {
   /// reason.
   final int rrMsRaw;
 
-  /// Byte [5] — community-reported SpO2 byte.
+  /// Byte [5] — claimed SpO2 byte.
   ///
-  /// RAW AND UNVALIDATED: the only evidence is single-source community
-  /// reverse engineering with a 50–100 range gate, and the original
-  /// reverse-engineering write-up says blood oxygen on this band is measured
-  /// only during sleep. The byte is exposed exactly as received so captures
-  /// can be correlated against a reference oximeter; it must NOT be
-  /// published to a user as a percentage.
+  /// RAW AND UNVALIDATED: the only evidence is a single source with a 50–100
+  /// range gate, which also says blood oxygen on this band is measured only
+  /// during sleep. The byte is exposed exactly as received so captures can be
+  /// correlated against a reference oximeter; it must NOT be published to a
+  /// user as a percentage.
   final int spo2Raw;
 
   /// Byte [6] — skin-temperature byte, raw. The +25 C offset is claimed but
@@ -97,14 +96,16 @@ class Realtime96 {
 /// shorter packet).
 Realtime96? parseRealtime96(List<int> bytes) {
   if (bytes.length != kRealtime96PacketSize) return null;
-  final view = ByteData.sublistView(bytes is Uint8List ? bytes : Uint8List.fromList(bytes));
+  // Normalise once: every field and the CRC read the same 0–255 bytes.
+  final b = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+  final view = ByteData.sublistView(b);
   final crcReceived = view.getUint32(92, Endian.little);
   return Realtime96(
-    sequence: bytes[0],
+    sequence: b[0],
     hrTimes100: view.getUint16(1, Endian.little),
     rrMsRaw: view.getUint16(3, Endian.little),
-    spo2Raw: bytes[5],
-    skinTempRaw: bytes[6],
-    crcValid: crc32WhoopStream(bytes.sublist(0, 92)) == crcReceived,
+    spo2Raw: b[5],
+    skinTempRaw: b[6],
+    crcValid: crc32WhoopStream(Uint8List.sublistView(b, 0, 92)) == crcReceived,
   );
 }

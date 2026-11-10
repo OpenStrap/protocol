@@ -1,9 +1,8 @@
 // Tests for the unframed 96-byte realtime packet decoder. The packets are
-// synthetic — built from the community-documented layout with the CRC
-// computed by the same crc32WhoopStream the decoder verifies — because no
-// real capture of this stream is in the repo; the CRC xor-out (0xF43F44AC) is
-// itself only community-sourced, so these tests pin the ARITHMETIC, not the
-// wire fact.
+// synthetic: built from the documented layout with the CRC computed by the
+// same crc32WhoopStream the decoder verifies, because no real capture of this
+// stream is in the repo. The CRC xor-out (0xF43F44AC) is itself unverified, so
+// these tests pin the ARITHMETIC, not the wire fact.
 
 import 'dart:typed_data';
 
@@ -60,6 +59,18 @@ void main() {
       final p = parseRealtime96(buildPacket(spo2: 0xFF))!;
       expect(p.spo2Raw, 0xFF);
       expect(p.crcValid, isTrue);
+    });
+
+    test('a plain List<int> reads the same bytes for fields and CRC', () {
+      // 256 + 97 is not a byte; it must land as 97 in the fields and the CRC
+      // alike, exactly as the same packet delivered as a Uint8List.
+      final good = buildPacket();
+      final loose = List<int>.from(good)..[5] = 256 + 97;
+      final a = parseRealtime96(loose)!;
+      final b = parseRealtime96(good)!;
+      expect(a.spo2Raw, b.spo2Raw);
+      expect(a.crcValid, b.crcValid);
+      expect(a.crcValid, isTrue);
     });
 
     test('crc32WhoopStream differs from the framed-packet crc32 (different xor-out)', () {
