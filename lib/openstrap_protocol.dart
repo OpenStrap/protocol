@@ -100,6 +100,7 @@ export 'src/realtime96.dart'
 // Source 2 — CRC, constants, framing, commands.
 export 'src/crc.dart' show crc8, crc32, crc16Modbus;
 export 'src/constants.dart';
+export 'src/firmware_update.dart';
 export 'src/framing.dart'
     show Frame, pad4, buildFrame, parseFrame, FrameReassembler;
 export 'src/commands.dart'
