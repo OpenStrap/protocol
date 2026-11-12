@@ -1,6 +1,7 @@
 // Device image update commands (gen5 only). Pure payload builders: nothing
 // here sends anything, and none of these opcodes may leave the host without
-// the caller's explicit allowDangerous opt-in (all four are destructive).
+// the caller's explicit allowDangerous opt-in (0x8E, 0x8F and 0x90 are
+// destructive; 0x53 only asks the strap to check what is staged).
 //
 //   0x8E start load     [0x01]
 //   0x8F load data      [0x01][offset u32 LE][len u8][data]
@@ -30,6 +31,9 @@ class FwUpdate {
     if (data.isEmpty || data.length > maxChunk) {
       throw ArgumentError('chunk must be 1..$maxChunk bytes, got ${data.length}');
     }
+    if (offset < 0 || offset > 0xFFFFFFFF) {
+      throw ArgumentError('offset out of u32 range: $offset');
+    }
     final b = BytesBuilder()
       ..addByte(0x01)
       ..add((ByteData(4)..setUint32(0, offset, Endian.little))
@@ -40,5 +44,8 @@ class FwUpdate {
     return b.toBytes();
   }
 
-  static int chunkCount(int imageLen) => (imageLen + chunk - 1) ~/ chunk;
+  static int chunkCount(int imageLen) {
+    if (imageLen <= 0) throw ArgumentError('image length must be > 0, got $imageLen');
+    return (imageLen + chunk - 1) ~/ chunk;
+  }
 }
