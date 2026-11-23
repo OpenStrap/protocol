@@ -45,6 +45,18 @@ void main() {
     expect(m.every((x) => x.asleep), isTrue);
   });
 
+  test('8-byte records: same first four bytes, one minute per eight', () {
+    final buf = HuamiActivityBuffer()
+      ..add([0, 0x01, 30, 12, 70, 9, 9, 9, 9])
+      ..add([1, 0x09, 5, 0, 0xff, 9, 9, 9, 9]);
+    final m = buf.minutes(1000, recordSize: 8);
+    expect(m.map((x) => (x.tsSec, x.kind, x.steps, x.hr)),
+        [(1000, 1, 12, 70), (1060, 9, 0, null)]);
+    // Read as 4-byte records the same bytes would be four minutes of noise.
+    expect(buf.minutes(1000), hasLength(4));
+    expect(() => buf.minutes(1000, recordSize: 6), throwsArgumentError);
+  });
+
   test('a counter gap marks the transfer untrustworthy', () {
     final buf = HuamiActivityBuffer()..add([0, 1, 0, 0, 0])..add([2, 1, 0, 0, 0]);
     expect(buf.ok, isFalse);

@@ -21,8 +21,9 @@
 // builds it. Without it the band keeps its history and the host tracks its
 // own resume point.
 //
-// SAMPLE — 4 bytes per minute: kind, intensity, steps, heart rate (0 and 0xFF
-// mean no reading). Kind is the low nibble; 0 (no change) and 10 (ignore)
+// SAMPLE — 4 bytes per minute (8 on Mi Band 5/6, the same four first, the
+// rest not decoded): kind, intensity, steps, heart rate (0 and 0xFF mean no
+// reading). Kind is the low nibble; 0 (no change) and 10 (ignore)
 // inherit the previous minute's kind. Kinds: 1 activity, 2 running,
 // 3 not worn, 4 cycling, 6 charging, 9 light sleep, 11 deep sleep, 12 woke up.
 
@@ -150,16 +151,24 @@ class HuamiActivityBuffer {
   /// bytes past it would land on the wrong minutes. A transfer cut short is
   /// still its contiguous prefix, so a caller resumes after the last minute
   /// it got, not after the count the header announced.
-  List<HuamiMinute> minutes(int startSec, {int previousKind = 1}) {
+  ///
+  /// [recordSize] is 4 (Mi Band 2/3/4) or 8 (Mi Band 5/6). An 8-byte record
+  /// starts with the same four bytes; bytes 4-7 are not decoded here (their
+  /// meaning and units are not established).
+  List<HuamiMinute> minutes(int startSec,
+      {int previousKind = 1, int recordSize = 4}) {
+    if (recordSize != 4 && recordSize != 8) {
+      throw ArgumentError.value(recordSize, 'recordSize', 'must be 4 or 8');
+    }
     if (!ok) return const [];
     final out = <HuamiMinute>[];
     var kind = previousKind;
-    for (var i = 0; i + 4 <= bytes.length; i += 4) {
+    for (var i = 0; i + recordSize <= bytes.length; i += recordSize) {
       final k = bytes[i] & 0x0f;
       if (k != 0 && k != 10) kind = k;
       final hr = bytes[i + 3];
-      out.add(HuamiMinute(startSec + (i ~/ 4) * 60, kind, bytes[i + 1],
-          bytes[i + 2], hr == 0 || hr == 0xff ? null : hr));
+      out.add(HuamiMinute(startSec + (i ~/ recordSize) * 60, kind,
+          bytes[i + 1], bytes[i + 2], hr == 0 || hr == 0xff ? null : hr));
     }
     return out;
   }
