@@ -142,13 +142,11 @@ class Huami2021FetchBuffer {
 }
 
 /// Whether an accumulated round's byte count matches what the start reply
-/// announced. Type `0x01`'s `expected` is a RECORD count (8 bytes normally,
-/// 4 when the byte length isn't a multiple of 8); every other type's
-/// `expected` is a plain byte count.
+/// announced. Type `0x01`'s `expected` is a RECORD count, of 8- or 4-byte
+/// records; every other type's `expected` is a plain byte count.
 bool huami2021FetchCountMatches(int type, int expected, int actualBytes) {
   if (type == kHuami2021TypeActivity) {
-    final recordSize = actualBytes % 8 == 0 ? 8 : 4;
-    return expected == actualBytes ~/ recordSize && actualBytes % recordSize == 0;
+    return actualBytes == expected * 8 || actualBytes == expected * 4;
   }
   return expected == actualBytes;
 }
@@ -156,8 +154,13 @@ bool huami2021FetchCountMatches(int type, int expected, int actualBytes) {
 /// The paging advance when a round decoded to zero samples but did carry
 /// raw bytes (types 0x01 and 0x13 only — a new strap answers every window
 /// before its first real day with filler, and without this the pager never
-/// gets past it). Minutes, clamped to 1-1440.
-int huami2021FetchGapSkipMinutes(int type, int rawLen) {
+/// gets past it). Minutes, clamped to 1-1440. For activity, pass the
+/// announced [recordCount] when there is one: the byte length alone can't
+/// tell six 4-byte records from three 8-byte ones.
+int huami2021FetchGapSkipMinutes(int type, int rawLen, {int? recordCount}) {
+  if (type == kHuami2021TypeActivity && recordCount != null && recordCount > 0) {
+    return recordCount.clamp(1, 1440);
+  }
   final recordSize = switch (type) {
     kHuami2021TypeActivity => rawLen % 8 == 0 ? 8 : 4,
     kHuami2021TypeStress => 1,

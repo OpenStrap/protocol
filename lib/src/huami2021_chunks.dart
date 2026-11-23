@@ -91,7 +91,7 @@ class Huami2021Encoder {
       chunk[0] = _marker;
       chunk[1] = flags;
       chunk[3] = _handle;
-      chunk[4] = count;
+      chunk[4] = count & 0xFF; // the counter wraps; the decoder wraps it too
       if (first) {
         bd.setUint32(5, data.length, Endian.little); // ORIGINAL length
         bd.setUint16(9, endpoint, Endian.little);
@@ -164,7 +164,9 @@ class Huami2021Decoder {
     final count = data[4];
     final isFirst = flags & _flagFirst != 0;
     if (_handle == null && !isFirst) return null; // orphan: no first chunk seen
-    if (_handle != null && _handle != chunkHandle) return null;
+    // A first chunk always starts over, even with a message still half
+    // assembled (its last chunk lost); only continuations must match.
+    if (!isFirst && _handle != chunkHandle) return null;
     var offset = 5;
     if (isFirst) {
       if (data.length < offset + 6) return null;
@@ -177,7 +179,7 @@ class Huami2021Decoder {
       _nextCount = 0;
       offset += 6;
     }
-    if (count != _nextCount) {
+    if (count != (_nextCount & 0xFF)) {
       _reset();
       return null;
     }
@@ -210,8 +212,8 @@ class Huami2021Decoder {
       final want = crc32(all.sublist(0, _length + 4));
       if (crc != want) return null;
     }
-    final n = _length < all.length ? _length : all.length;
-    return Uint8List.sublistView(all, 0, n);
+    if (all.length < _length) return null; // shorter than it said it was
+    return Uint8List.sublistView(all, 0, _length);
   }
 
   void _reset() {

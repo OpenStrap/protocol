@@ -52,8 +52,10 @@ List<Huami2021Sample> parseHuami2021Activity(Uint8List data, int roundStartMs,
   // to zero is not trustworthy either way — fall back to the heuristic
   // rather than risk a zero record size (which would never advance the
   // loop below).
-  final recordSize =
-      fromCount > 0 ? fromCount : (data.length % 8 == 0 ? 8 : 4);
+  // Only a 4- or 8-byte stride holds the fields read below.
+  final recordSize = fromCount == 4 || fromCount == 8
+      ? fromCount
+      : (data.length % 8 == 0 ? 8 : 4);
   final out = <Huami2021Sample>[];
   for (var i = 0; i + recordSize <= data.length; i += recordSize) {
     final ms = roundStartMs + (i ~/ recordSize) * 60000;
@@ -262,10 +264,11 @@ class _HuamiProtobufTruncated implements Exception {
 /// against, so a corrupted or unexpectedly-shaped workout record is a real
 /// possibility, not a theoretical one, and must be recoverable rather than
 /// a crash.
-({int value, int next}) _varint(Uint8List data, int off) {
+({int value, int next}) _varint(Uint8List data, int off, [int? end]) {
   var result = 0, shift = 0, i = off;
+  final limit = end ?? data.length;
   while (true) {
-    if (i >= data.length) throw const _HuamiProtobufTruncated();
+    if (i >= limit) throw const _HuamiProtobufTruncated();
     final b = data[i];
     i++;
     result |= (b & 0x7f) << shift;
@@ -281,27 +284,34 @@ class _HuamiProtobufTruncated implements Exception {
 /// guessing at its length — callers get whatever fields were read so far.
 void _walkProtobuf(Uint8List data, int start, int end,
     void Function(int fieldNo, int wireType, int off, int len) onField) {
+  // Every read is bounded by [end], the submessage, not the buffer: a
+  // field missing its value must not borrow the next outer field's bytes.
   var i = start;
   while (i < end) {
-    final tagRead = _varint(data, i);
+    final tagRead = _varint(data, i, end);
     final tag = tagRead.value;
     i = tagRead.next;
     final fieldNo = tag >> 3;
     final wireType = tag & 7;
     switch (wireType) {
       case 0: // varint
-        final v = _varint(data, i);
+        final v = _varint(data, i, end);
         onField(fieldNo, wireType, i, v.next - i);
         i = v.next;
       case 1: // fixed64
+        if (i + 8 > end) throw const _HuamiProtobufTruncated();
         onField(fieldNo, wireType, i, 8);
         i += 8;
       case 2: // length-delimited
-        final lenRead = _varint(data, i);
+        final lenRead = _varint(data, i, end);
         final contentStart = lenRead.next;
+        if (contentStart + lenRead.value > end) {
+          throw const _HuamiProtobufTruncated();
+        }
         onField(fieldNo, wireType, contentStart, lenRead.value);
         i = contentStart + lenRead.value;
       case 5: // fixed32
+        if (i + 4 > end) throw const _HuamiProtobufTruncated();
         onField(fieldNo, wireType, i, 4);
         i += 4;
       default:
@@ -339,6 +349,7 @@ List<Huami2021Workout> parseHuami2021Workouts(Uint8List data) {
             final v = _varint(data, i);
             i = v.next;
           case 1:
+            if (i + 8 > data.length) throw const _HuamiProtobufTruncated();
             i += 8;
           case 2:
             final lenRead = _varint(data, i);
@@ -630,7 +641,8 @@ List<Huami2021SleepSession> parseHuami2021Sleep(Uint8List data) {
         final slot = _readStageSlot(data, off);
         if (slot == null) continue; // a gap in the shared timeline, not this nap's end
         if (slot.type == _gapMarkerType) continue;
-        if (slot.start < napStart || slot.start > napEnd) continue;
+        // A stage starting at the nap's end belongs to the next nap.
+        if (slot.start < napStart || slot.start >= napEnd) continue;
         napStages.add(Huami2021Stage(msAt(slot.start), msAt(slot.end), slot.type));
         final minutes = slot.end - slot.start;
         switch (slot.type) {
