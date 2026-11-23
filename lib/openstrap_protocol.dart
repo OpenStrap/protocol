@@ -23,6 +23,7 @@ export 'src/ultrahuman.dart';
 export 'src/polar_pmd.dart';
 export 'src/colmi.dart';
 export 'src/health_thermometer.dart';
+export 'src/amazfit_scale.dart';
 export 'src/miscale.dart';
 export 'src/huami_legacy.dart';
 export 'src/huami2021_chunks.dart';
