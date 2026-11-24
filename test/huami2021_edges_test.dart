@@ -53,10 +53,14 @@ void main() {
   });
 
   group('records', () {
-    test('a count that implies a stride under 4 falls back, never throws', () {
+    test('a count that does not add up to 4- or 8-byte records gives nothing',
+        () {
       final data = Uint8List.fromList([1, 0, 5, 70, 1, 0]);
-      expect(() => parseHuami2021Activity(data, 0, expectedRecordCount: 2),
-          returnsNormally);
+      expect(parseHuami2021Activity(data, 0, expectedRecordCount: 2), isEmpty);
+      // The same bytes with a count that fits still decode.
+      final four = Uint8List.fromList([1, 0, 5, 70, 1, 0, 6, 71]);
+      expect(parseHuami2021Activity(four, 0, expectedRecordCount: 2),
+          isNotEmpty);
     });
 
     test('a duration field with no value does not borrow the next field', () {

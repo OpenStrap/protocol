@@ -45,17 +45,20 @@ class Huami2021Sample {
 /// ones. Never rely on it from a real fetch.
 List<Huami2021Sample> parseHuami2021Activity(Uint8List data, int roundStartMs,
     {int? expectedRecordCount}) {
-  final fromCount = (expectedRecordCount != null && expectedRecordCount > 0)
-      ? data.length ~/ expectedRecordCount
-      : 0;
-  // A count so large relative to the byte length that it would divide down
-  // to zero is not trustworthy either way — fall back to the heuristic
-  // rather than risk a zero record size (which would never advance the
-  // loop below).
-  // Only a 4- or 8-byte stride holds the fields read below.
-  final recordSize = fromCount == 4 || fromCount == 8
-      ? fromCount
-      : (data.length % 8 == 0 ? 8 : 4);
+  final int recordSize;
+  if (expectedRecordCount != null && expectedRecordCount > 0) {
+    // The count settles it exactly, or the round doesn't add up: no samples
+    // rather than a guess the heuristic below is known to get wrong.
+    if (data.length == expectedRecordCount * 8) {
+      recordSize = 8;
+    } else if (data.length == expectedRecordCount * 4) {
+      recordSize = 4;
+    } else {
+      return const [];
+    }
+  } else {
+    recordSize = data.length % 8 == 0 ? 8 : 4;
+  }
   final out = <Huami2021Sample>[];
   for (var i = 0; i + recordSize <= data.length; i += recordSize) {
     final ms = roundStartMs + (i ~/ recordSize) * 60000;
