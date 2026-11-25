@@ -1014,7 +1014,19 @@ CmdResponse? parseCommandResponse(Uint8List inner,
       final v = u32(payload, at);
       // Emit nothing rather than a guess: a value outside the plausible
       // window means we are not looking at the clock field.
-      if (_plausibleUnix(v)) dec['clock_epoch'] = v;
+      if (_plausibleUnix(v)) {
+        dec['clock_epoch'] = v;
+        // gen4 only: the second u32 is the sub-second count in 1/32768 s, the
+        // same unit as the record/event sub-second fields. On a WHOOP 4.0
+        // (harvard 41.17.6.0) all 13 replies we logged had it < 32768 (upper
+        // half 0), and only with it do the clock-offset bounds the replies give
+        // ([sec + subsec/32768 - t_reply, ... - t_write]) agree within a day.
+        // Anything >= 32768 is not that count, so it is not emitted.
+        if (!profile.isGen5 && payload.length >= at + 8) {
+          final sub = u32(payload, at + 4);
+          if (sub < 32768) dec['clock_subsec'] = sub;
+        }
+      }
     }
   } else if (op == Cmd.getDataRange) {
     // 65-byte reply body, starting at payload[2] (payload[0] = echoed request

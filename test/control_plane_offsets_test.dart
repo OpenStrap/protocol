@@ -93,6 +93,28 @@ void main() {
       expect(r.decoded['clock_epoch'], isNot(straddle));
     });
 
+    test('gen4 (0x0B) sub-seconds: second u32, 1/32768 s, emitted only < 32768',
+        () {
+      // Body bytes of a real WHOOP 4.0 reply: sec 0x6af4a5dc, subsec 0x0248.
+      final real = parseCommandResponse(cmdResponse(Cmd.getClock,
+          [0xdc, 0xa5, 0xf4, 0x6a, 0x48, 0x02, 0x00, 0x00]))!;
+      expect(real.decoded['clock_epoch'], 0x6af4a5dc);
+      expect(real.decoded['clock_subsec'], 584);
+      final r = parseCommandResponse(
+          cmdResponse(Cmd.getClock, [...le32(1786000000), ...le32(32767)]))!;
+      expect(r.decoded['clock_subsec'], 32767);
+      final big = parseCommandResponse(
+          cmdResponse(Cmd.getClock, [...le32(1786000000), ...le32(32768)]))!;
+      expect(big.decoded['clock_epoch'], 1786000000);
+      expect(big.decoded.containsKey('clock_subsec'), isFalse);
+      final noSub = parseCommandResponse(
+          cmdResponse(Cmd.getClock, [...le32(1786000000), 0x48, 0x02]))!;
+      expect(noSub.decoded.containsKey('clock_subsec'), isFalse);
+      final bad = parseCommandResponse(
+          cmdResponse(Cmd.getClock, [...le32(0), ...le32(584)]))!;
+      expect(bad.decoded.containsKey('clock_subsec'), isFalse);
+    });
+
     test('gen5 (0x93) epoch is the u32 at payload[3], after the revision byte',
         () {
       const sec = 1786000123;
