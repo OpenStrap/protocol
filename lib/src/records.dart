@@ -12,7 +12,7 @@ import 'constants.dart';
 class R24 {
   final int histVersion; // historical layout version byte @ inner[1] (frame[5])
   final int tsEpoch; // unix seconds @ inner[7:11] (frame[11:15])
-  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12)
+  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12/v25)
   final int counter; // record counter @ inner[3:7] (frame[7:11])
   final int hr; // heart rate bpm @ inner[17] (frame[21], v24/v12)
 
