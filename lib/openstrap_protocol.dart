@@ -29,6 +29,9 @@ export 'src/pebble.dart';
 export 'src/garmin_fit.dart';
 export 'src/garmin_transfer.dart';
 
+// WHOOP 4 v25 optical samples.
+export 'src/v25_samples.dart';
+
 // Source 1 — record decoders.
 export 'src/records.dart'
     show

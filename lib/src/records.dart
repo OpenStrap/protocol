@@ -12,7 +12,7 @@ import 'constants.dart';
 class R24 {
   final int histVersion; // historical layout version byte @ inner[1] (frame[5])
   final int tsEpoch; // unix seconds @ inner[7:11] (frame[11:15])
-  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12)
+  final int tsSubsec; // sub-seconds @ inner[11:13] (frame[15:17], v24/v12/v25)
   final int counter; // record counter @ inner[3:7] (frame[7:11])
   final int hr; // heart rate bpm @ inner[17] (frame[21], v24/v12)
 
@@ -251,9 +251,13 @@ ByteData _view(Uint8List b) =>
     b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
 
 /// Decode a v25 historical record. v25 is NOT a 1 Hz biometric record: it is a
-/// raw ~24 Hz PPG waveform, sent in 13–27 s bursts roughly every 20 minutes.
-/// The only field solved in it is the unix second at inner[7:11]; the waveform
-/// itself is left whole in [R24.rawTail].
+/// compressed optical burst, sent in bursts (up to ~40 records) roughly every 20
+/// minutes.
+/// Header: counter @ inner[3:7], unix second @ [7:11], sub-seconds (1/32768 s)
+/// @ [11:13] — the same header as v24 — so the timestamp is full resolution.
+/// The waveform is left whole in [R24.rawTail]; `reconstructV25Samples` decodes it:
+/// 25 samples per record, an i32 first sample @ [15:19] followed by 24 i16
+/// saturating deltas @ [19:67] (see v25_samples.dart).
 ///
 /// So everything else comes back absent, and that is deliberate:
 ///
@@ -282,7 +286,7 @@ R24? _parseV25(Uint8List inner) {
   return R24(
     histVersion: 25,
     tsEpoch: view.getUint32(7, Endian.little),
-    tsSubsec: 0,
+    tsSubsec: view.getUint16(11, Endian.little),
     counter: view.getUint32(3, Endian.little),
     hr: 0,
     rrCount: 0,
@@ -333,8 +337,9 @@ bool _physiologicallyPlausible(List<double> accelG, int hr) {
 /// packet-type byte.
 ///
 /// Routing:
-///   - v25 → the 24 Hz PPG-waveform layout ([_parseV25]): timestamp only, with
-///     HR 0 and accelG empty.
+///   - v25 → the optical-burst layout ([_parseV25]): timestamp only, with
+///     HR 0 and accelG empty; the samples come from
+///     `reconstructV25Samples` (v25_samples.dart).
 ///   - v24 / v12 → our hardware-validated field map, returned as-is.
 ///   - v18 / v9 / v7 → the SAME field map but with the HR byte read at that
 ///     version's offset (only the HR offset is independently confirmed for
