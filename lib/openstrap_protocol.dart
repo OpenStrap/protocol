@@ -35,6 +35,10 @@ export 'src/pebble.dart';
 export 'src/garmin_fit.dart';
 export 'src/garmin_transfer.dart';
 
+// WHOOP 4 v24 record tail: step-like counter, temperature candidate, activity
+// state and the three optical control words — see v24_status.dart.
+export 'src/v24_status.dart';
+
 // Source 1 — record decoders.
 export 'src/records.dart'
     show
