@@ -9,3 +9,4 @@ environment:
 dev_dependencies:
   test: ^1.25.0
   lints: ^4.0.0
+  pointycastle: ^3.9.1
