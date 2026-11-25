@@ -1022,7 +1022,9 @@ CmdResponse? parseCommandResponse(Uint8List inner,
         // half 0), and only with it do the clock-offset bounds the replies give
         // ([sec + subsec/32768 - t_reply, ... - t_write]) agree within a day.
         // Anything >= 32768 is not that count, so it is not emitted.
-        if (!profile.isGen5 && payload.length >= at + 8) {
+        if (op == Cmd.getClock &&
+            !profile.isGen5 &&
+            payload.length >= at + 8) {
           final sub = u32(payload, at + 4);
           if (sub < 32768) dec['clock_subsec'] = sub;
         }

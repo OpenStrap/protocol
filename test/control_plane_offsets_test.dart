@@ -115,6 +115,16 @@ void main() {
       expect(bad.decoded.containsKey('clock_subsec'), isFalse);
     });
 
+    test('a gen5 (0x93) reply on the gen4 profile never yields clock_subsec',
+        () {
+      // [rev=1][u32 sec][u16 subsec] plus two trailing bytes: enough length for
+      // the gen4 u32 read, which is not this reply's layout.
+      final r = parseCommandResponse(cmdResponse(Cmd.getClockGen5,
+          [1, ...le32(1786000000), 0x48, 0x02, 0x00, 0x00]))!;
+      expect(r.decoded['clock_epoch'], 1786000000);
+      expect(r.decoded.containsKey('clock_subsec'), isFalse);
+    });
+
     test('gen5 (0x93) epoch is the u32 at payload[3], after the revision byte',
         () {
       const sec = 1786000123;
